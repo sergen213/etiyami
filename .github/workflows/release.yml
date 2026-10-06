@@ -92,7 +92,7 @@ jobs:
           cmake -S "$RUNNER_TEMP/yami-deps/SDL3-3.4.18" -B "$RUNNER_TEMP/yami-deps/sdl-build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/yami-deps -DCMAKE_INSTALL_LIBDIR=lib \
             -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
-          cmake --build "$RUNNER_TEMP/yami-deps/sdl-build" --parallel 2
+          cmake --build "$RUNNER_TEMP/yami-deps/sdl-build" --parallel "$(nproc)"
           sudo cmake --install "$RUNNER_TEMP/yami-deps/sdl-build"
           curl --fail --location --proto '=https' --tlsv1.2 \
             https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz \
@@ -104,7 +104,7 @@ jobs:
             --enable-shared --disable-static --enable-pic --disable-autodetect \
             --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
             --disable-encoders --disable-muxers --disable-network
-          make -j2
+          make -j"$(nproc)"
           sudo make install
           popd
           curl --fail --location --proto '=https' --tlsv1.2 \
@@ -117,7 +117,7 @@ jobs:
             --enable-shared --disable-static --with-openssl --enable-ares --disable-threaded-resolver \
             --without-libpsl --without-libidn2 \
             --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ca-path=/etc/ssl/certs
-          make -j2
+          make -j"$(nproc)"
           sudo make install
           popd
           echo /opt/yami-deps/lib | sudo tee /etc/ld.so.conf.d/yami-release.conf
@@ -134,7 +134,7 @@ jobs:
             -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
             -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
             '-DCMAKE_INSTALL_RPATH=$ORIGIN/lib'
-          cmake --build build --target yami-native yami-updater yami-launcher --parallel 2
+          cmake --build build --target yami-native yami-updater yami-launcher --parallel "$(nproc)"
           cmake --install build --prefix "$RUNNER_TEMP/yami-install"
           python3 tools/package_release.py --install-root "$RUNNER_TEMP/yami-install" \
             --platform linux --arch '${{ matrix.arch }}' --version "$RELEASE_VERSION" \
@@ -147,127 +147,8 @@ jobs:
           compression-level: 0
           retention-days: 7
 
-  windows:
-    needs: metadata
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: windows-2022, arch: x86_64, msystem: UCRT64, package_env: ucrt-x86_64, compiler: gcc}
-          - {runner: windows-11-arm, arch: arm64, msystem: CLANGARM64, package_env: clang-aarch64, compiler: clang}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    env:
-      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
-      UPDATE_REPO: ${{ github.repository }}
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.metadata.outputs.commit }}
-          persist-credentials: false
-      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
-        with:
-          msystem: ${{ matrix.msystem }}
-          update: true
-          install: >-
-            mingw-w64-${{ matrix.package_env }}-${{ matrix.compiler }}
-            mingw-w64-${{ matrix.package_env }}-cmake
-            mingw-w64-${{ matrix.package_env }}-ninja
-            mingw-w64-${{ matrix.package_env }}-pkgconf
-            mingw-w64-${{ matrix.package_env }}-python
-            mingw-w64-${{ matrix.package_env }}-sdl3
-            mingw-w64-${{ matrix.package_env }}-libepoxy
-            mingw-w64-${{ matrix.package_env }}-libxml2
-            mingw-w64-${{ matrix.package_env }}-ffmpeg
-            mingw-w64-${{ matrix.package_env }}-curl-winssl
-            mingw-w64-${{ matrix.package_env }}-libarchive
-            mingw-w64-${{ matrix.package_env }}-json-c
-      - name: Build and package native Windows binaries and recursive DLL imports
-        run: |
-          set -euo pipefail
-          pkg-config --modversion sdl3 libavcodec libcurl libarchive json-c
-          pkg-config --atleast-version=7.85.0 libcurl
-          # Require Schannel/native certificate trust; never ship a runner-local OpenSSL CA path.
-          curl --version
-          curl --version | /usr/bin/grep -q Schannel
-          curl --version | /usr/bin/grep -q AsynchDNS
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
-            -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF
-          cmake --build build --target yami-native yami-updater yami-launcher --parallel 2
-          cmake --install build --prefix "$PWD/install"
-          python tools/package_release.py --install-root install \
-            --platform windows --arch '${{ matrix.arch }}' --version "$RELEASE_VERSION" \
-            --search-dir "$(cygpath -m "$MINGW_PREFIX/bin")" \
-            --output 'dist/yami-windows-${{ matrix.arch }}.zip'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: windows-${{ matrix.arch }}
-          path: dist/yami-windows-${{ matrix.arch }}.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
-  macos:
-    needs: metadata
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {runner: macos-15-intel, arch: x86_64}
-          - {runner: macos-15, arch: arm64}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    env:
-      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
-      UPDATE_REPO: ${{ github.repository }}
-      MACOSX_DEPLOYMENT_TARGET: '15.0'
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ needs.metadata.outputs.commit }}
-          persist-credentials: false
-      - name: Install published Homebrew dependency formulae
-        shell: bash
-        run: |
-          set -euo pipefail
-          brew install cmake ninja pkgconf sdl3 libepoxy libxml2 ffmpeg@7 curl libarchive json-c
-          pc_paths=""
-          for formula in sdl3 libepoxy libxml2 ffmpeg@7 curl libarchive json-c; do
-            pc_paths="$(brew --prefix "$formula")/lib/pkgconfig:$pc_paths"
-          done
-          printf 'PKG_CONFIG_PATH=%s\n' "$pc_paths" >> "$GITHUB_ENV"
-          brew list --versions cmake sdl3 libepoxy libxml2 ffmpeg@7 curl libarchive json-c
-      - name: Build, relocate dylib closure, and ad-hoc sign the macOS launcher
-        shell: bash
-        run: |
-          set -euo pipefail
-          pkg-config --atleast-version=7.85.0 libcurl
-          "$(brew --prefix curl)/bin/curl" --version
-          "$(brew --prefix curl)/bin/curl" --version | grep -q AsynchDNS
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
-            -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
-            -DCMAKE_OSX_ARCHITECTURES='${{ matrix.arch }}' -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-            -DCMAKE_EXE_LINKER_FLAGS=-Wl,-headerpad_max_install_names
-          cmake --build build --target yami-native yami-updater yami-launcher --parallel 2
-          cmake --install build --prefix "$RUNNER_TEMP/yami-install"
-          python3 tools/package_release.py --install-root "$RUNNER_TEMP/yami-install" \
-            --platform macos --arch '${{ matrix.arch }}' --version "$RELEASE_VERSION" \
-            --macos-min 15.0 --output 'dist/yami-macos-${{ matrix.arch }}.zip'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: macos-${{ matrix.arch }}
-          path: dist/yami-macos-${{ matrix.arch }}.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
   publish:
-    needs: [metadata, linux, windows, macos]
+    needs: [metadata, linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -280,23 +161,20 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Recheck all six release assets before creating a draft
+      - name: Recheck both Linux release assets before creating a draft
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          expected = {f'yami-{platform}-{arch}.zip' for platform in ('linux', 'windows', 'macos')
-                      for arch in ('x86_64', 'arm64')}
+          expected = {f'yami-linux-{arch}.zip' for arch in ('x86_64', 'arm64')}
           actual = {path.name for path in Path('dist').iterdir()}
           if actual != expected:
               raise SystemExit(f'Incomplete release asset set: {actual ^ expected}')
           PY
-          for platform in linux windows macos; do
-            for arch in x86_64 arm64; do
-              python3 tools/package_release.py --verify-only --platform "$platform" --arch "$arch" \
-                --output "dist/yami-$platform-$arch.zip"
-            done
+          for arch in x86_64 arm64; do
+            python3 tools/package_release.py --verify-only --platform linux --arch "$arch" \
+              --output "dist/yami-linux-$arch.zip"
           done
       - name: Upload complete draft, verify GitHub SHA256 digests, then publish
         env:
@@ -311,7 +189,7 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --target "$RELEASE_COMMIT" --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes 'Engine/launcher updates only: original game assets and saves are not included. Linux: glibc 2.35+ and host graphics drivers. Windows: native UCRT/Schannel. macOS: 15+, ad-hoc signed (not Apple-notarized).'
+            --notes 'Linux engine/launcher updates only: original game assets and saves are not included. Requires glibc 2.35+ and host graphics drivers. Windows/macOS releases are deferred.'
           gh release upload "$RELEASE_TAG" dist/*.zip
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/yami-release.json"
           python3 - <<'PY'
