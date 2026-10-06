@@ -2,6 +2,7 @@
 #include "ending.hpp"
 #include "launcher.hpp"
 #include "update.hpp"
+#include "update_install.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <algorithm>
@@ -152,6 +153,10 @@ fs::path asset_root(const Options& opts) {
     const auto base = utf8_path(baseText);
     for (const auto& root : {base/"game", base/".."/"game"})
         if (valid(root)) return fs::canonical(root);
+#ifdef __APPLE__
+    const auto adjacent = updates::installation_root()/"game";
+    if (valid(adjacent)) return fs::canonical(adjacent);
+#endif
     const auto local = fs::current_path()/"game";
     if (valid(local)) return fs::canonical(local);
     throw std::runtime_error("Cannot find original game assets; use --asset-root PATH");
