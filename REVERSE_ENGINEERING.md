@@ -6,7 +6,7 @@
 
 The implementation includes all four levels, the 40-opcode script VM and 20 script hosts, model/mesh/animation loaders, CPU skinning, body/flight physics and collision, player controls, five enemy AI families, combat, pickups, mission callbacks, level transitions, the original menus/quizzes/HUD, settings, checkpoints, video/audio, and the native ending dialog/code generator. The original 32-bit VM words, animation ordinals, callable registration order, and 33 ms tick rules are retained rather than translated into host-pointer-sized values.
 
-Linux execution is verified on COSMIC Wayland and X11, with OpenGL and OpenGL ES. Windows/macOS builds and a complete human campaign playthrough are **not verified**. Portable source and build configuration are supplied; no Windows/macOS binary or blanket behavioral-parity certification is claimed.
+Linux execution is verified on COSMIC Wayland and X11, with OpenGL and OpenGL ES. Current release work targets Linux only; Windows/macOS builds are deferred. Portable source remains available, but no Windows/macOS binary or blanket behavioral-parity certification is claimed. A complete human campaign playthrough is **not verified**.
 
 ## Build and run
 
@@ -92,9 +92,9 @@ Environment-based authentication is inherited by the trusted update helper and r
 
 Missing releases, inaccessible metadata, offline operation, or a non-writable installation produce a visible status; the current installed game remains launchable. Closing cancels a pending check/download. `--no-updates` explicitly disables network checks, `--version` prints the installed binary version, and direct game/smoke execution does not check updates.
 
-`.github/workflows/release.yml` builds release packages without proprietary assets. Release ZIP names are `yami-{linux|windows|macos}-{x86_64|arm64}.zip`; they contain launcher/game/updater and runtime dependencies only. The workflow publishes a draft only after all builds succeed, uploads complete assets, then makes the release available. CMake embeds `YAMI_RELEASE_VERSION` and `YAMI_UPDATE_REPO`; the default repository is this public project. Initial installation still needs a legitimate original asset tree. Use a per-user writable install location for automatic updates; protected system installs require an OS installer/administrator.
+`.github/workflows/release.yml` builds Linux x86_64 and arm64 release packages without proprietary assets. ZIP names are `yami-linux-{x86_64|arm64}.zip`; they contain launcher/game/updater and runtime dependencies only, targeting glibc 2.35+ and host graphics drivers. The workflow publishes a draft only after both builds succeed, uploads complete assets, then makes the release available. Windows/macOS release jobs are deferred. CMake embeds `YAMI_RELEASE_VERSION` and `YAMI_UPDATE_REPO`; the default repository is this public project. Initial installation still needs a legitimate original asset tree. Use a per-user writable install location for automatic updates; protected system installs require an OS installer/administrator.
 
-To publish, push a stable `vMAJOR.MINOR.PATCH` tag after committing the intended source. A manual workflow run accepts an existing tag and resolves its commit rather than silently building the selected branch. All six packages must succeed before the complete draft is published; failed uploads remain draft and are not offered by the launcher.
+To publish, push a stable `vMAJOR.MINOR.PATCH` tag after committing the intended source. A manual workflow run accepts an existing tag and resolves its commit rather than silently building the selected branch. Both Linux packages must succeed before the complete draft is published; failed uploads remain draft and are not offered by the launcher.
 
 ## Graphics and platform changes
 

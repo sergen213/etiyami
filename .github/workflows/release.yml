@@ -75,7 +75,7 @@ jobs:
             build-essential cmake ninja-build pkg-config python3 curl ca-certificates xz-utils bzip2 \
             nasm patchelf libepoxy-dev libxml2-dev libssl-dev libc-ares-dev zlib1g-dev libarchive-dev libjson-c-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libx11-dev libxext-dev libxrandr-dev \
-            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libasound2-dev libpulse-dev \
+            libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev \
             libudev-dev libdbus-1-dev libdrm-dev libgbm-dev libegl1-mesa-dev libgl1-mesa-dev
       - name: Build pinned SDL3, FFmpeg, and asynchronous-DNS curl on glibc 2.35
         shell: bash
