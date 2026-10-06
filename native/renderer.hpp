@@ -73,7 +73,7 @@ private:
     unsigned color_buffer_ = 0, depth_buffer_ = 0;
     unsigned brightness_step_ = 257;
     int brightness_uniform_ = -1, copy_uniform_ = -1;
-    std::array<int, 4> effect_uniforms_{};
+    std::array<int, 3> effect_uniforms_{};
     std::array<float, 4> effects_{}, projection_info_{};
     std::array<float, 3> world_up_{{0, 1, 0}};
     bool enhanced_ = true, world_camera_ = false, world_finished_ = false;

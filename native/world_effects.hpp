@@ -1,7 +1,7 @@
 #pragma once
 
 namespace yami {
-// Perspective depth, not artist-authored material data, drives this world-only pass.
+// Perspective depth supplies world-only AO and conservative rough dielectric SSR.
 inline constexpr char world_effect_fragment_source[] = R"GLSL(
 #ifdef GL_ES
 precision highp float;
@@ -13,7 +13,6 @@ out vec4 outColor;
 uniform sampler2D uFrame, uDepth;
 uniform vec4 uProjectionInfo;
 uniform vec2 uTexelSize;
-uniform vec3 uWorldUp;
 uniform vec4 uEffects;
 
 bool insideFrame(vec2 uv) {
@@ -106,11 +105,27 @@ float ambientOcclusion(vec3 position, vec3 normal) {
     return clamp(occlusion * (2.4 / 16.0), 0.0, 0.65);
 }
 
-vec4 groundReflection(vec3 position, vec3 normal) {
-    // ponytail: upward-facing geometry substitutes for roughness/material masks;
-    // use material masks if the original assets gain PBR metadata.
-    float ground = smoothstep(0.7, 0.95, dot(normal, safeNormal(uWorldUp)));
-    if (ground <= 0.0) return vec4(0.0);
+// ponytail: exports have no gloss/roughness metadata; assume a rough dielectric
+// until real artist surface data exists, never infer polish from orientation.
+const float legacyRoughness = 0.85;
+vec3 reflectedHitColor(vec2 uv, float hitZ, float pixelTravel) {
+    vec3 sum = texture(uFrame, uv).rgb;
+    float weight = 1.0;
+    float radius = clamp(pixelTravel * legacyRoughness * 0.12, 2.0, 12.0);
+    for (int tap = 0; tap < 8; ++tap) {
+        vec2 sampleUv = uv + directions[tap] * uTexelSize * radius;
+        if (!insideFrame(sampleUv)) continue;
+        float depth = texture(uDepth, sampleUv).r;
+        if (depth >= 0.999999) continue;
+        // Rough lobes may blur a real hit, not bleed sky/other depth layers into it.
+        float connected = 1.0 - smoothstep(0.01, 0.04,
+            abs(viewDepth(depth) - hitZ) / max(hitZ, 0.0001));
+        sum += texture(uFrame, sampleUv).rgb * connected;
+        weight += connected;
+    }
+    return sum / weight;
+}
+vec4 screenReflection(vec3 position, vec3 normal) {
     vec3 incident = safeNormal(position);
     vec3 ray = reflect(incident, normal);
     float maxDistance = clamp(-position.z * 3.0, 32.0, 1600.0);
@@ -159,8 +174,11 @@ vec4 groundReflection(vec3 position, vec3 normal) {
             float edge = min(min(hitUv.x, 1.0 - hitUv.x), min(hitUv.y, 1.0 - hitUv.y));
             confidence *= smoothstep(0.0, 0.08, edge);
             confidence *= 1.0 - smoothstep(maxDistance * 0.65, maxDistance, high);
-            float fresnel = 0.06 + 0.94 * pow(1.0 - clamp(dot(normal, -incident), 0.0, 1.0), 5.0);
-            return vec4(texture(uFrame, hitUv).rgb, confidence * fresnel * ground);
+            float fresnel = 0.04 + 0.96 * pow(1.0 - clamp(dot(normal, -incident), 0.0, 1.0), 5.0);
+            // Only the residual coherent lobe belongs in this single-ray approximation.
+            // At maximum strength a rough legacy surface can replace at most 2.25%.
+            float coherentEnergy = (1.0 - legacyRoughness) * (1.0 - legacyRoughness);
+            return vec4(reflectedHitColor(hitUv, hitZ, pixelTravel), confidence * fresnel * coherentEnergy);
         }
         previousDistance = distance;
         previousGap = gap;
@@ -216,7 +234,7 @@ void main() {
         if (confidence > 0.0) {
             if (effects.x > 0.0) color *= 1.0 - effects.x * confidence * ambientOcclusion(position, normal);
             if (effects.y > 0.0) {
-                vec4 reflection = groundReflection(position, normal);
+                vec4 reflection = screenReflection(position, normal);
                 color = mix(color, reflection.rgb, effects.y * confidence * reflection.a);
             }
         }

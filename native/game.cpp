@@ -235,7 +235,7 @@ struct Game::State {
         alternatePlayer.reset(); passenger.reset(); combat.projectiles.clear(); combat.meleeDelays.clear();
         clock.level=level; clock.previousLevel=level; clock.level_loaded(now);
         cameraState=initialize_player_camera(level); flight={}; passengerFlight={}; levelEnabled=true; overlay=false;
-        metadata=read_level_metadata(resolve_asset(game.scene_.root(),"data/levels/level"+std::to_string(level)+"/level.xml"));
+        metadata=read_level_metadata(game.scene_.resolve("data/levels/level"+std::to_string(level)+"/level.xml"));
         const auto start=level_player_start(level);
         add_actor(level==4?"player_ucak":"player",level==1?"yaman":level==4?"ucak":"yaman_silahli",start,true);
         if (level==1 || level==3) alternatePlayer=instance(descriptor(level==1?"yaman_silahli":"yaman_buyuk_silahli"),true);
@@ -260,7 +260,7 @@ struct Game::State {
             projectileModels[i]=instance(combat::weapons()[i].model,true);
         // 004181f0 calls 00401000: shared motion history resets for every level.
         history={}; install_hosts();
-        vm.load_directory(resolve_asset(game.scene_.root(),"data/scripts/level"+std::to_string(level)+".pcs").parent_path(),"level"+std::to_string(level));
+        vm.load_directory(game.scene_.resolve("data/scripts/level"+std::to_string(level)+".pcs").parent_path(),"level"+std::to_string(level));
         seed_callable_words();
         objectives.clear();
         static constexpr std::array<std::string_view,3> level1{{"1.Nöbetçi eczaneyi bul.","2.Tüm robotları öldür.","3.Romatizma ilacını anneanneye götür."}};
@@ -279,7 +279,7 @@ struct Game::State {
         game.scene_.reset_video(movie); // Material resolution remains strict for real AVI data.
         if (!game.audio_.registered(movie)) {
             std::filesystem::path wav;
-            try { wav=resolve_asset(game.scene_.root(),"data/avi_sound/"+movie+".wav"); }
+            try { wav=game.scene_.resolve("data/avi_sound/"+movie+".wav"); }
             catch (const std::filesystem::filesystem_error& error) {
                 if (error.code()!=std::errc::no_such_file_or_directory) throw;
                 wav=error.path1(); // Retain the original unavailable sample, including its name.

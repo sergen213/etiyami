@@ -390,7 +390,8 @@ Material read_material(const std::filesystem::path& path) {
     return material;
 }
 
-std::filesystem::path resolve_asset(const std::filesystem::path& root, const std::string& name) {
+std::filesystem::path resolve_asset(const std::filesystem::path& root, const std::string& name,
+                                    AssetDirectories* directories) {
     std::string normalized = name;
     std::replace(normalized.begin(), normalized.end(), '\\', '/');
     if (normalized.empty() || normalized.find('\0') != std::string::npos || normalized.find(':') != std::string::npos)
@@ -403,33 +404,47 @@ std::filesystem::path resolve_asset(const std::filesystem::path& root, const std
         if (part.empty() || part == ".") continue;
         if (part == "..") throw std::runtime_error("resource path escapes root: " + name);
         const auto candidate = result / component;
-        if (std::filesystem::exists(candidate)) {
-            if (std::filesystem::is_symlink(candidate)) throw std::runtime_error("symlink resource path: " + name);
+        if (directories) {
+            if (const auto cached = directories->find(candidate); cached != directories->end()) {
+                result = cached->second;
+                continue;
+            }
+        }
+        const auto status = std::filesystem::symlink_status(candidate);
+        if (std::filesystem::exists(status)) {
+            if (std::filesystem::is_symlink(status)) throw std::runtime_error("symlink resource path: " + name);
             result = candidate;
+            if (directories && std::filesystem::is_directory(status))
+                directories->emplace(candidate, result);
             continue;
         }
-        bool found = false;
+        bool found = false, directory_found = false;
+        const auto wanted = folded(part);
         if (std::filesystem::is_directory(result)) {
             for (const auto& entry : std::filesystem::directory_iterator(result)) {
-                if (folded(entry.path().filename().string()) != folded(part)) continue;
+                if (folded(entry.path().filename().string()) != wanted) continue;
                 if (entry.is_symlink()) throw std::runtime_error("symlink resource path: " + name);
                 if (found) throw std::runtime_error("ambiguous case-insensitive resource: " + name);
                 result = entry.path(); found = true;
+                directory_found = directories && entry.is_directory();
             }
         }
         if (!found) throw std::filesystem::filesystem_error(
             "missing resource", candidate, std::make_error_code(std::errc::no_such_file_or_directory));
+        if (directories && directory_found) directories->emplace(candidate, result);
     }
     if (!std::filesystem::is_regular_file(result)) throw std::filesystem::filesystem_error(
         "resource is not a file", result, std::make_error_code(
             std::filesystem::is_directory(result) ? std::errc::is_a_directory : std::errc::invalid_argument));
     return result;
 }
-std::filesystem::path mesh_path(const std::filesystem::path& model_file, const ModelPart& part) {
-    return resolve_asset(model_file.parent_path(), part.mesh_name + ".dat");
+std::filesystem::path mesh_path(const std::filesystem::path& model_file, const ModelPart& part,
+                               AssetDirectories* directories) {
+    return resolve_asset(model_file.parent_path(), part.mesh_name + ".dat", directories);
 }
-std::filesystem::path animation_path(const std::filesystem::path& mesh_file, const std::string& name) {
-    return resolve_asset(mesh_file.parent_path(), "animations/" + name + ".dat");
+std::filesystem::path animation_path(const std::filesystem::path& mesh_file, const std::string& name,
+                                    AssetDirectories* directories) {
+    return resolve_asset(mesh_file.parent_path(), "animations/" + name + ".dat", directories);
 }
 
 void prepare_skinning(const Mesh& mesh, SkinningState& state) {

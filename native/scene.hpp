@@ -42,6 +42,7 @@ private:
 class SceneCache {
 public:
     SceneCache(Renderer&, std::filesystem::path root);
+    std::filesystem::path resolve(std::string_view name); // Scoped to this read-only asset tree.
     ModelResource& model(std::string_view descriptor); // game-relative model.dat path
     MaterialResource& material(std::string_view name); // data/materials/<name>.dat
     unsigned image(std::string_view filename); // original missing-image white semantics
@@ -62,6 +63,7 @@ private:
     };
     Renderer& renderer_;
     std::filesystem::path root_;
+    AssetDirectories directories_;
     std::map<std::string, std::unique_ptr<MeshResource>, std::less<>> meshes_;
     std::map<std::string, std::unique_ptr<ModelResource>, std::less<>> models_;
     std::map<std::string, std::unique_ptr<MaterialResource>, std::less<>> materials_;

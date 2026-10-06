@@ -24,9 +24,10 @@ import zipfile
 BINARIES = ("yami-native", "yami-updater", "yami-launcher")
 SEMVER = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 # These belong to the host OS/driver stack, not a redistributable engine runtime.
+# Host GPU drivers can require newer C++/unwind symbols than the build distro.
 LINUX_SYSTEM = re.compile(
     r"(?:ld-linux[^/]*|ld64[^/]*|linux-vdso[^/]*|"
-    r"lib(?:c|m|dl|pthread|rt|resolv|util|anl|nss_[^.]+)\.so(?:\.[0-9]+)*|"
+    r"lib(?:c|m|dl|pthread|rt|resolv|util|anl|nss_[^.]+|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*|"
     r"lib(?:GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]|vulkan|drm(?:_[^.]+)?|gbm|"
     r"cuda|nvidia[^.]*|vdpau|va(?:-x11|-drm|-wayland)?)\.so(?:\.[0-9]+)*)\Z"
 )
@@ -277,7 +278,7 @@ def package_linux(payload: Payload, executables: list[Path], glibc_max: str | No
             continue
         visited.add(source)
         for name, dependency in linux_dependencies(source):
-            _, added = payload.copy(dependency, "lib/" + name)
+            _, added = payload.copy(dependency, name)
             if added:
                 pending.append(dependency.resolve())
     for name in payload.sources:
@@ -291,11 +292,12 @@ def package_linux(payload: Payload, executables: list[Path], glibc_max: str | No
         needed = command("patchelf", "--print-needed", target).splitlines()
         if any("/" in library for library in needed):
             fail(f"Absolute ELF dependency in {target}")
-        command("patchelf", "--set-rpath", "$ORIGIN" if name.startswith("lib/") else "$ORIGIN/lib", target)
+        # Flat runtime deliberately leaves legacy lib/ out of the loader search path.
+        command("patchelf", "--set-rpath", "$ORIGIN", target)
     for name in payload.sources:
         target = payload.root / name
         for library, dependency in linux_dependencies(target):
-            if dependency.resolve().parent != (payload.root / "lib").resolve():
+            if dependency.resolve().parent != payload.root.resolve():
                 fail(f"Runtime still escapes package: {target.name} -> {library}: {dependency}")
 
 
@@ -403,6 +405,8 @@ def verify_archive(archive: Path, platform: str, arch: str) -> None:
                     or member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
                     or not allowed_path(member.filename, platform)):
                 fail(f"Unsafe archive member: {member.filename}")
+            if platform == "linux" and ("/" in member.filename or LINUX_SYSTEM.fullmatch(member.filename)):
+                fail(f"Linux archive must contain only flat application runtime: {member.filename}")
             key = member.filename.casefold()
             if key in names:
                 fail(f"Case-folded path collision: {member.filename}")
@@ -472,6 +476,10 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="yami-package-") as temporary:
         payload = Payload(Path(temporary) / "payload", args.platform, args.arch)
         for source, name in existing:
+            if args.platform == "linux" and name not in expected:
+                if LINUX_SYSTEM.fullmatch(source.name):
+                    continue
+                name = source.name
             payload.copy(source, name)
         executables = [install / name for name in required_paths(args.platform)]
         for executable in executables:

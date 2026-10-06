@@ -99,6 +99,13 @@ int main(int argc, char** argv) {
         sample_count=0;
         for(;;) { const auto n=effect.read(pcm); if(!n) break; sample_count+=n; }
         require(sample_count==35751,"Actual effect WAV sample count differs");
+        // Stream registration must not open/decode content before its first play.
+        yami::AudioSystem deferred;
+        deferred.register_sound({"deferred",root/"data/images/tabela_yazi_hotel_2.tga",false,true,false,100,0});
+        require(deferred.registered("deferred"),"Deferred stream was not registered");
+        rejected=false;
+        try { deferred.play("deferred"); } catch(const std::runtime_error&) { rejected=true; }
+        require(rejected && !deferred.playing(0),"Invalid deferred stream must fail at play without creating a voice");
 
         yami::AudioSystem mixer;
         mixer.master_volume(1,1);

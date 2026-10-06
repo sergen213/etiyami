@@ -87,6 +87,16 @@ int main(int argc, char** argv) {
         if (argc > 2) throw std::runtime_error("usage: check_assets [game-directory]");
         const std::filesystem::path game = argc == 2 ? argv[1] : "game";
         check_math_and_skinning();
+        yami::AssetDirectories directories;
+        const auto player = yami::resolve_asset(game,"data/models/YAMAN/model.dat",&directories);
+        const auto prefixes = directories.size();
+        check(prefixes && !directories.contains(player),"Resolver must cache verified directories, not file status");
+        check(yami::resolve_asset(game,"data/models/YAMAN/model.dat",&directories)==player &&
+              directories.size()==prefixes,"Repeated resource paths must reuse directory prefixes");
+        bool escaped=false;
+        try { yami::resolve_asset(game,"data/models/YAMAN/../yaman/model.dat",&directories); }
+        catch (const std::runtime_error&) { escaped=true; }
+        check(escaped,"Cached prefixes must not bypass resource traversal rejection");
         std::vector<std::filesystem::path> models, meshes, animations, materials;
         for (const auto& directory : {game / "data/models", game / "data/levels"}) {
             check(std::filesystem::is_directory(directory), "missing asset directory: " + directory.string());

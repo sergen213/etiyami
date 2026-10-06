@@ -46,6 +46,9 @@ SceneCache::SceneCache(Renderer& renderer, std::filesystem::path root)
     : renderer_(renderer), root_(std::move(root)) {
     quad_ = renderer_.upload_mesh(quad_vertices, quad_indices);
 }
+std::filesystem::path SceneCache::resolve(std::string_view name) {
+    return resolve_asset(root_, std::string(name), &directories_);
+}
 MeshResource& SceneCache::mesh(const std::filesystem::path& path) {
     const auto key = model_key(path);
     if (const auto found = meshes_.find(key); found != meshes_.end()) return *found->second;
@@ -53,30 +56,30 @@ MeshResource& SceneCache::mesh(const std::filesystem::path& path) {
     resource->mesh = read_mesh(path);
     resource->animations.reserve(resource->mesh.animation_names.size());
     for (const auto& name : resource->mesh.animation_names)
-        resource->animations.push_back(read_animation(animation_path(path, name), resource->mesh));
+        resource->animations.push_back(read_animation(animation_path(path, name, &directories_), resource->mesh));
     return *meshes_.emplace(key, std::move(resource)).first->second;
 }
 ModelResource& SceneCache::model(std::string_view descriptor) {
     if (const auto found = models_.find(descriptor); found != models_.end()) return *found->second;
-    const auto path = resolve_asset(root_, std::string(descriptor));
+    const auto path = resolve(descriptor);
     auto resource = std::make_unique<ModelResource>();
     resource->model = read_model(path);
     resource->parts.reserve(resource->model.parts.size());
     for (const auto& part : resource->model.parts)
-        resource->parts.push_back({&mesh(mesh_path(path, part)), &material(part.material_name)});
+        resource->parts.push_back({&mesh(mesh_path(path, part, &directories_)), &material(part.material_name)});
     return *models_.emplace(std::string(descriptor), std::move(resource)).first->second;
 }
 MaterialResource& SceneCache::material(std::string_view name) {
     if (const auto found = materials_.find(name); found != materials_.end()) return *found->second;
     auto resource = std::make_unique<MaterialResource>();
-    resource->material = read_material(resolve_asset(root_, "data/materials/"+std::string(name)+".dat"));
+    resource->material = read_material(resolve("data/materials/"+std::string(name)+".dat"));
     resource->textures.resize(resource->material.passes.size());
     return *materials_.emplace(std::string(name), std::move(resource)).first->second;
 }
 unsigned SceneCache::image(std::string_view name) {
     if (const auto found = images_.find(name); found != images_.end()) return found->second;
     std::filesystem::path path;
-    try { path = resolve_asset(root_, std::string(name)); }
+    try { path = resolve(name); }
     catch (const std::filesystem::filesystem_error& error) {
         if (error.code() != std::errc::no_such_file_or_directory && error.code() != std::errc::is_a_directory)
             throw;
@@ -113,7 +116,7 @@ bool SceneCache::video_texture(std::string_view name, std::uint32_t time, bool l
     auto found = videos_.find(name);
     if (found == videos_.end()) {
         Video video;
-        video.decoder = std::make_unique<VideoDecoder>(resolve_asset(root_, std::string(name)));
+        video.decoder = std::make_unique<VideoDecoder>(resolve(name));
         const int width = video.decoder->width(), height = video.decoder->height();
         if (width <= 0 || height <= 0 || width > 16384 || height > 16384 ||
             video.decoder->frame_count() <= 0 || !(video.decoder->fps() > 0))

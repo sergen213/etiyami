@@ -46,6 +46,22 @@ int main(int argc,char** argv) {
         check(select_player_input(input,player).action==17,"Firing forward-right action");
         input={}; input.back=true; input.left=true;
         check(select_player_input(input,player).action==7,"Original back-left action quirk");
+        for (const auto rightAxis : std::array<Vec3,4>{{{1,0,0},{0,0,1},{-1,0,0},{0,0,-1}}}) {
+            for (const bool alternate : {false,true}) {
+                for (const bool left : {false,true}) {
+                    EntityState walker; walker.role=0; walker.model="yaman";
+                    PlayerInput strafe;
+                    if (alternate) { strafe.alternateLeft=left; strafe.alternateRight=!left; }
+                    else { strafe.left=left; strafe.right=!left; }
+                    const auto decision=select_player_input(strafe,walker);
+                    ForceState motion;
+                    request_movement(walker,motion,decision.moves[0],rightAxis);
+                    const auto lateral=motion.direction.x*rightAxis.x+motion.direction.z*rightAxis.z;
+                    check(left ? lateral<-.9f : lateral>.9f,
+                          "A/Left must move screen-left and D/Right screen-right at every heading");
+                }
+            }
+        }
         player.action=18; check(action_locked(player) && !movement_allowed(player),"Unarmed action lock");
         player.model="yaman_silahli"; player.weapon=1;
         check(!action_locked(player) && movement_allowed(player),"Armed action lock differs");

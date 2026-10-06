@@ -228,7 +228,7 @@ Renderer::Renderer(const DisplayOptions& options) {
         glUseProgram(effect_program_);
         glUniform1i(glGetUniformLocation(effect_program_, "uFrame"), 0);
         glUniform1i(glGetUniformLocation(effect_program_, "uDepth"), 1);
-        constexpr const char* effect_names[] = {"uProjectionInfo", "uTexelSize", "uWorldUp", "uEffects"};
+        constexpr const char* effect_names[] = {"uProjectionInfo", "uTexelSize", "uEffects"};
         for (std::size_t n = 0; n < effect_uniforms_.size(); ++n) {
             effect_uniforms_[n] = glGetUniformLocation(effect_program_, effect_names[n]);
             if (effect_uniforms_[n] == -1)
@@ -508,8 +508,7 @@ void Renderer::finish_world() {
     glUseProgram(effect_program_);
     glUniform4fv(effect_uniforms_[0], 1, projection_info_.data());
     glUniform2f(effect_uniforms_[1], 1.f/width_, 1.f/height_);
-    glUniform3fv(effect_uniforms_[2], 1, world_up_.data());
-    glUniform4fv(effect_uniforms_[3], 1, effects_.data());
+    glUniform4fv(effect_uniforms_[2], 1, effects_.data());
     glBindTexture(GL_TEXTURE_2D, resolve_texture_);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, resolve_depth_);

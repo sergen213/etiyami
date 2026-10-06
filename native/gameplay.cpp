@@ -690,8 +690,8 @@ void request_movement(EntityState& entity,ForceState& force,Move move,Vec3 right
     switch (move) {
     case Move::Forward:direction=cross(right,{0,-1,0});break;
     case Move::Back:direction=cross(right,{0,1,0});break;
-    case Move::Right:direction={-right.x,-right.y,-right.z};normalize(direction);break;
-    case Move::Left:direction=right;normalize(direction);break;
+    case Move::Right:direction=right;normalize(direction);break;
+    case Move::Left:direction={-right.x,-right.y,-right.z};normalize(direction);break;
     case Move::Stop:return;
     }
     force.direction={force.direction.x+direction.x,force.direction.y+direction.y,

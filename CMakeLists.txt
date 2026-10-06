@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-set(YAMI_RELEASE_VERSION "1.0.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
+set(YAMI_RELEASE_VERSION "1.0.1" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
 if(NOT YAMI_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "YAMI_RELEASE_VERSION must be MAJOR.MINOR.PATCH")
 endif()
@@ -52,7 +52,7 @@ target_link_libraries(yami-updater PRIVATE yami_engine)
 
 if(UNIX AND NOT APPLE)
     set_target_properties(yami-native yami-launcher yami-updater
-        PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
+        PROPERTIES INSTALL_RPATH "$ORIGIN")
 endif()
 if(APPLE)
     target_link_options(yami-native PRIVATE -Wl,-headerpad_max_install_names)

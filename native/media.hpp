@@ -38,6 +38,7 @@ struct AudioInfo { int sample_rate{}, channels{}; double duration{}; };
 // Bounded-memory decoder. Output is interleaved float PCM at requested rate/channels.
 class AudioDecoder {
 public:
+    // channels=0 retains the source's mono/stereo layout in the same open.
     explicit AudioDecoder(const std::filesystem::path& path, int rate = 44100, int channels = 2);
     ~AudioDecoder();
     AudioDecoder(AudioDecoder&&) noexcept;
@@ -64,7 +65,7 @@ public:
     AudioSystem(const AudioSystem&) = delete;
     AudioSystem& operator=(const AudioSystem&) = delete;
     void open_device(); // Optional; SDL_INIT_AUDIO must already be initialized.
-    void register_sound(SoundDefinition definition); // Missing paths retain an unavailable original null sample and report it.
+    void register_sound(SoundDefinition definition); // Stream decode is deferred until play; missing paths retain the original null sample and report it.
     void register_original_sounds(const std::filesystem::path& game_root);
     bool registered(std::string_view name) const noexcept;
     int play(std::string_view name, AudioPosition position = {}, int percentage = -1); // Default registered percentage; -1 on music toggle-stop, unknown name, or unavailable sample.

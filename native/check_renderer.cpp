@@ -36,14 +36,14 @@ void check_world_effects(DisplayOptions options) {
     MaterialPass pass;
     DrawState state;
     state.diffuse_light = {.25f,.25f,.25f,1};
-    const auto render = [&](bool lighting = false) {
+    const auto render = [&](bool lighting = false, bool draw_wall = true) {
         renderer.clear();
         renderer.camera(identity_matrix(), frustum_projection(.75f, float(width)/height, 1, 30000));
         state.lighting = lighting;
         state.color = {.35f,.35f,.35f,1};
         renderer.draw(floor, 0, material, pass, state);
         state.color = {.9f,.04f,.02f,1};
-        renderer.draw(wall, 0, material, pass, state);
+        if (draw_wall) renderer.draw(wall, 0, material, pass, state);
         renderer.finish_world();
         renderer.hud_camera();
         state.lighting = false;
@@ -91,10 +91,37 @@ void check_world_effects(DisplayOptions options) {
                                                  : pixel(enhanced,x,y,0)-pixel(baseline,x,y,0);
                     response = std::max(response, delta);
                 }
-            if (response < 3)
+            if (response < (effect == 0 ? 3 : 1))
                 throw std::runtime_error(effect == 0 ? "Live AO did not darken floor/wall junction"
-                                                    : "Live reflection did not return red wall onto floor");
+                                                    : "Live rough reflection did not return a real wall hit");
         }
+        // Unknown legacy materials stay rough, not mirrors, even at maximum
+        // strength. Real hits still respond to the slider; misses stay untouched.
+        graphics.ambient_occlusion = 0;
+        graphics.reflections = 1;
+        renderer.set_graphics(graphics);
+        const auto pavement = render();
+        for (std::size_t i = 0; i < pavement.size(); ++i)
+            assert(std::abs(int(pavement[i])-int(baseline[i])) <= (i%4 == 3 ? 0 : 6));
+        graphics.reflections = .25f;
+        renderer.set_graphics(graphics);
+        const auto weaker = render();
+        int pavement_response = 0, full_energy = 0, weaker_energy = 0;
+        for (int y = int(height*.21f); y < int(std::ceil(height*.30f)); ++y)
+            for (int x = width*47/100; x < width*53/100; ++x) {
+                const int response = pixel(pavement,x,y,0)-pixel(baseline,x,y,0);
+                pavement_response = std::max(pavement_response, response);
+                full_energy += response;
+                weaker_energy += pixel(weaker,x,y,0)-pixel(baseline,x,y,0);
+            }
+        assert(pavement_response > 0 && pavement_response <= 4);
+        assert(full_energy > weaker_energy && weaker_energy >= 0);
+        graphics.reflections = 0;
+        renderer.set_graphics(graphics);
+        const auto miss_baseline = render(false, false);
+        graphics.reflections = 1;
+        renderer.set_graphics(graphics);
+        assert(render(false, false) == miss_baseline); // No wall: no fabricated environment/ghost.
         graphics.enhanced = false; // Nonzero strengths must not leak into classic mode.
         renderer.set_graphics(graphics);
         assert(render() == baseline);
@@ -177,7 +204,7 @@ int main(int argc, char** argv) {
                       << " MSAA=" << renderer.samples() << " gamma/orientation/alpha/resolve PASS\n";
         }
         check_world_effects(options);
-        std::cout << "live classic/enhanced AO/reflection MSAA4/0/4 widescreen HUD PASS\n";
+        std::cout << "live classic/enhanced AO/rough-reflection/hit-miss/strength MSAA4/0/4 widescreen HUD PASS\n";
         SDL_Quit();
         return 0;
     } catch (const std::exception& error) {

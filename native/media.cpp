@@ -229,16 +229,18 @@ struct AudioDecoder::Impl {
     double next_pts{}, target = -1;
     bool ended{};
     explicit Impl(const std::filesystem::path& p, int r, int c) : decode(p, AVMEDIA_TYPE_AUDIO), rate(r), channels(c) {
-        if (r <= 0 || r > 384000 || (c != 1 && c != 2)) throw std::runtime_error("Invalid audio output format");
+        if (r <= 0 || r > 384000 || c < 0 || c > 2) throw std::runtime_error("Invalid audio output format");
         if (decode.codec->sample_rate <= 0 || decode.codec->ch_layout.nb_channels <= 0)
             throw std::runtime_error("Invalid source audio format: " + decode.path);
         info = {decode.codec->sample_rate, decode.codec->ch_layout.nb_channels, decode.duration()};
+        if (!channels) channels=info.channels; // Preserve mono/stereo without reopening the input.
+        if (channels!=1 && channels!=2) throw std::runtime_error("Original sound must be mono or stereo: " + decode.path);
         AVChannelLayout layout{};
-        av_channel_layout_default(&layout, c);
+        av_channel_layout_default(&layout, channels);
         const int result = swr_alloc_set_opts2(&resampler, &layout, AV_SAMPLE_FMT_FLT, r,
             &decode.codec->ch_layout, decode.codec->sample_fmt, decode.codec->sample_rate, 0, nullptr);
         av_channel_layout_uninit(&layout);
-        try { checked(result, "Creating resampler " + decode.path); checked(swr_init(resampler), "Initializing resampler " + decode.path); buffer.resize(65536u * c); }
+        try { checked(result, "Creating resampler " + decode.path); checked(swr_init(resampler), "Initializing resampler " + decode.path); buffer.resize(65536u * channels); }
         catch (...) { swr_free(&resampler); throw; }
     }
     ~Impl() { swr_free(&resampler); }
@@ -361,22 +363,24 @@ void AudioSystem::register_sound(SoundDefinition def) {
         s.sounds.push_back(std::move(sound));
         return;
     }
-    AudioDecoder decoder(sound->definition.path, s.rate, 1);
+    // Streaming paths stay registered; opening/probing belongs to the first play,
+    // not registration of every level's music or a second cutscene-audio decode.
+    if (sound->definition.streaming) {
+        sound->available = true;
+        s.sounds.push_back(std::move(sound));
+        return;
+    }
+    AudioDecoder decoder(sound->definition.path, s.rate, 0);
     sound->channels=decoder.source_info().channels;
-    if (sound->channels!=1 && sound->channels!=2)
-        throw std::runtime_error("Original sound must be mono or stereo: " + sound->definition.path.string());
     if (sound->definition.positional && decoder.source_info().channels != 1)
         throw std::runtime_error("Original 3D effects must be mono: " + sound->definition.path.string());
-    if (sound->channels==2) decoder=AudioDecoder(sound->definition.path,s.rate,2);
-    if (!sound->definition.streaming) {
-        const int channels = sound->channels;
-        for (;;) {
-            const auto n = decoder.read(std::span(s.scratch.data(), block_frames * channels));
-            if (!n) break;
-            sound->pcm.insert(sound->pcm.end(), s.scratch.begin(), s.scratch.begin() + n * channels);
-        }
-        if (sound->pcm.empty()) throw std::runtime_error("Empty sound: " + sound->definition.path.string());
+    const int channels = sound->channels;
+    for (;;) {
+        const auto n = decoder.read(std::span(s.scratch.data(), block_frames * channels));
+        if (!n) break;
+        sound->pcm.insert(sound->pcm.end(), s.scratch.begin(), s.scratch.begin() + n * channels);
     }
+    if (sound->pcm.empty()) throw std::runtime_error("Empty sound: " + sound->definition.path.string());
     sound->available = true;
     s.sounds.push_back(std::move(sound));
 }
@@ -399,7 +403,10 @@ int AudioSystem::play(std::string_view name, Vec3 pos, int percentage) {
     }
     // Prepare stream before replacing a live voice, so failed opens preserve playback.
     std::unique_ptr<AudioDecoder> decoder;
-    if (sound.definition.streaming) decoder = std::make_unique<AudioDecoder>(sound.definition.path, s.rate, sound.channels);
+    if (sound.definition.streaming) {
+        decoder = std::make_unique<AudioDecoder>(sound.definition.path, s.rate, 0);
+        sound.channels = decoder->source_info().channels;
+    }
     s.voices[chosen] = {};
     auto& v = s.voices[chosen]; v.sound = &sound; v.decoder = std::move(decoder);
     v.percentage = percentage < 0 ? sound.definition.volume : percentage;

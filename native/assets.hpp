@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -99,9 +100,15 @@ Material read_material(const std::filesystem::path&);
 // Resolve original Windows case-insensitive names safely beneath a supplied root.
 // Name contract: UTF-8; exhaustive shipped binary names and filesystem paths
 // are ASCII (also valid CP1254). No heuristic encoding conversion occurs here.
-std::filesystem::path resolve_asset(const std::filesystem::path& root, const std::string& name);
-std::filesystem::path mesh_path(const std::filesystem::path& model_file, const ModelPart&);
-std::filesystem::path animation_path(const std::filesystem::path& mesh_file, const std::string& name);
+// Optional cache belongs to one read-only asset lifetime; never reuse it after
+// changing/replacing the asset tree. Only verified non-symlink directories enter it.
+using AssetDirectories = std::map<std::filesystem::path, std::filesystem::path>;
+std::filesystem::path resolve_asset(const std::filesystem::path& root, const std::string& name,
+                                    AssetDirectories* directories = nullptr);
+std::filesystem::path mesh_path(const std::filesystem::path& model_file, const ModelPart&,
+                               AssetDirectories* directories = nullptr);
+std::filesystem::path animation_path(const std::filesystem::path& mesh_file, const std::string& name,
+                                    AssetDirectories* directories = nullptr);
 
 // Allocate caller-owned buffers once using prepare_skinning; subsequent calls do
 // not allocate or copy unchanged vertex/UV arrays. Static meshes remain verbatim.
