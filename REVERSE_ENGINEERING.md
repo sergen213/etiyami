@@ -1,0 +1,205 @@
+# ETI Yami recovery
+
+## Delivered native engine
+
+`native/` is a C++20 reconstruction; `build/yami-native` is the working Linux executable. It loads the original assets and compiled scripts directly. It does **not** launch Wine, the original executable, or `son.eti`.
+
+The implementation includes all four levels, the 40-opcode script VM and 20 script hosts, model/mesh/animation loaders, CPU skinning, body/flight physics and collision, player controls, five enemy AI families, combat, pickups, mission callbacks, level transitions, the original menus/quizzes/HUD, settings, checkpoints, video/audio, and the native ending dialog/code generator. The original 32-bit VM words, animation ordinals, callable registration order, and 33 ms tick rules are retained rather than translated into host-pointer-sized values.
+
+Linux execution is verified on COSMIC Wayland and X11, with OpenGL and OpenGL ES. Windows/macOS builds and a complete human campaign playthrough are **not verified**. Portable source and build configuration are supplied; no Windows/macOS binary or blanket behavioral-parity certification is claimed.
+
+## Build and run
+
+Dependencies: a C++20 compiler, CMake 3.20+, Ninja, pkg-config, SDL3, libepoxy, libxml2, FFmpeg development libraries (`libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample`), libcurl 7.85+, libarchive, and json-c. FFmpeg must include the Indeo 5 decoder. Curl supplies verified HTTPS, json-c parses GitHub metadata, libarchive safely reads update ZIPs, and FFmpeg's SHA implementation verifies download integrity. Neither the bundled DirectX installer, proprietary Indeo installer, FMOD DLL, nor Wine is needed.
+
+On Arch/CachyOS:
+
+```sh
+sudo pacman -S --needed gcc cmake ninja pkgconf sdl3 libepoxy libxml2 ffmpeg curl libarchive json-c
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build
+./build/yami-native --width 1600 --height 900
+```
+
+Assets are discovered relative to the executable (`game/`, then the development tree's `../game/`), with the current directory's `game/` as a final fallback. An explicit `--asset-root /path/to/game` is used exactly and must contain `data/menu/menulist.xml`. SDL supplies UTF-8 executable/preference paths, including macOS bundle Resources. The asset tree is read-only; checkpoints and `game.ini` go to `SDL_GetPrefPath("ETI", "YamiNative")`, or an explicit `--save-dir` outside the asset tree.
+
+Controls: WASD/arrows move; mouse controls the camera and the original menu cursor; Ctrl/left mouse fires; Space performs the special action; E/Enter interacts; Tab shows objectives; Escape opens the game menu; F11 toggles fullscreen. Mouse capture is released on focus loss and during the ending dialog, with held input cleared before reacquisition.
+
+Optional flags: `--fullscreen`, `--gles`, `--samples 4`, `--anisotropy 16`, `--skip-intro`, `--level 1` through `--level 4`, and `--capture output.ppm`. `--help` lists the interface. Linux prefers Wayland when available; `SDL_VIDEO_DRIVER=x11` explicitly selects X11.
+
+Enhanced graphics are on by default. Effect strengths are independently adjustable in `0..1`: `--ao 0.65 --reflections 0.22 --bloom 0.12 --sharpen 0.18`. Zero disables that effect; nonfinite/out-of-range values are rejected. `--classic-graphics` restores the recovered lighting and disables world effects while retaining widescreen layout, MSAA, and texture filtering.
+
+### Ayarlar graphics controls
+
+The original **Ayarlar** screen now has a right-hand parchment graphics panel, using the game's original bitmap font, blue/red buttons, hover artwork, and background. Existing brightness, sensitivity, sound, aiming knobs, and Back remain in their original locations. The original asset files are not modified.
+
+- **Işıklandırma:** classic or enhanced lighting/world effects.
+- **Ortam gölgesi, Yansımalar, Parlama, Keskinlik:** SSAO, ground reflections, bloom, and sharpening strengths; each click changes five percentage points, bounded to 0–100%. Loaded/CLI values are retained until edited. Classic mode retains these values but does not execute the effects.
+- **Yumuşatma:** MSAA off or a GPU-supported quality level. **Doku filtresi:** anisotropic filtering from 1× to 16×, bounded by GPU support. Live changes preserve the GL context and scene assets; only MSAA render targets are reallocated, and filtering updates already-uploaded world textures.
+- **Tam ekran:** fullscreen on/off, synchronized with F11 and completed SDL fullscreen events, including asynchronous Wayland transitions.
+
+Native buttons change on mouse release, not hover or repeated held frames. Changes apply immediately and are saved by atomic temporary-file replacement. Original held knobs save on release; Back and normal window close also save. Five-line legacy settings files remain readable. Native `game.ini` appends validated `grafik_*` fields; invalid, duplicate, or unknown fields are rejected. Saved graphics settings load before renderer creation; explicit CLI flags override only their corresponding saved fields. The effective settings are saved on normal exit. Window dimensions follow resize; OpenGL/GLES remains a launch-time selection.
+
+### Native asset-based launcher
+
+```sh
+./build/yami-launcher
+# Same interface through the direct executable:
+./build/yami-native --launcher
+```
+
+The launcher uses the original Ayarlar artwork, bitmap fonts, dials, parchment graphics panel, and game artwork rather than host-native or web controls. It exposes the same five original settings and eight native graphics settings. Both interfaces share the settings parser, bounds, hardware capabilities, and atomic file replacement; there is no second launcher configuration file.
+
+The launcher starts windowed, even when fullscreen is saved. **Tam ekran** selects the game's launch mode without taking over the desktop while editing settings. **OYNA / PLAY** saves the selected settings and enters the native game in-process, reusing the window/context/menu assets. Audio registration, intro playback, game VM initialization, and level loading happen only after Play. Closing saves settings without starting the game. CLI overrides seed the controls; subsequent launcher edits take precedence. Tab/Shift-Tab select one of the 13 setting rows or Play/Close, arrows change values, Enter/Space activate, and Escape closes; keyboard focus is visibly outlined. `--no-launcher` bypasses the interface, and `--smoke` always bypasses it.
+
+For a portable installed layout with original data:
+
+```sh
+cmake -S . -B build -DYAMI_INSTALL_ORIGINAL_ASSETS=ON
+cmake --build build
+cmake --install build --prefix /path/to/yami-distribution
+```
+
+The install target includes launcher, game, and update helper, original `game/data`, the original EULA/icon, and macOS bundle Resources when targeting Apple. It excludes the old Windows executables, Wine reference, legacy DLLs, and bundled codec/DirectX installers. Asset installation is opt-in; redistribution still requires the appropriate asset rights. Third-party runtime-library packaging is handled by the release workflow; platform installers and Apple notarization are separate requirements.
+
+### Windows build prerequisites
+
+Use an MSYS2 **UCRT64** shell and its matching compiler/dependency packages, not a mixture of MSYS and MinGW libraries:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-libepoxy \
+  mingw-w64-ucrt-x86_64-libxml2 mingw-w64-ucrt-x86_64-ffmpeg \
+  mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-libarchive \
+  mingw-w64-ucrt-x86_64-json-c
+cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win
+./build-win/yami-native.exe --asset-root game
+```
+
+The dependency packages are published by MSYS2: [SDL3](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-sdl3), [libepoxy](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-libepoxy), and [FFmpeg](https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-ffmpeg). This recipe has not been executed on Windows. Keep UCRT64 runtime DLLs available on `PATH`; a standalone Windows distribution is not supplied. CMake also defines MSVC strict floating-point/UTF-8 options, but MSVC execution is unverified. macOS requires equivalent dependencies and a compatible SDL/OpenGL desktop session; its build/run is likewise unverified.
+
+### Private GitHub project and updates
+
+Repository: [sergen213/etiyami](https://github.com/sergen213/etiyami), **private**. Git tracks the native source, build/release configuration, recovery utilities, existing technical notes, and selected visual evidence. Proprietary `game/` data, installer archives/executables, Wine state, build products, and credentials remain local and excluded.
+
+The launcher checks GitHub releases in the background before Play. Version checks use `vMAJOR.MINOR.PATCH`; only a newer complete asset matching the native OS/architecture is eligible. Downloads use verified HTTPS and GitHub's authenticated asset endpoint. The SHA-256 digest from GitHub must match before bounded extraction; traversal, links, conflicting paths, and original/user-data targets are rejected. A detached copy of `yami-updater` replaces launcher, game/engine binaries, and their bundled runtimes with backup/rollback, then restarts the launcher with the same asset/preferences paths. Settings and original assets are not part of updates.
+
+Private releases need repository read access. The launcher uses per-user `YAMI_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`, or the existing local `gh auth login` credential. Tokens are never built into the application or written to update files/command arguments. For a fine-grained token, grant **Contents: read** only for this repository. A future public repository can serve updates without authentication.
+
+Environment-based authentication is inherited by the trusted update helper and restarted launcher so it survives an automatic restart. It is never serialized into the package or staging directory. The helper uses null standard streams and a private diagnostic log.
+
+Missing releases, inaccessible metadata, offline operation, or a non-writable installation produce a visible status; the current installed game remains launchable. Closing cancels a pending check/download. `--no-updates` explicitly disables network checks, `--version` prints the installed binary version, and direct game/smoke execution does not check updates.
+
+`.github/workflows/release.yml` builds release packages without proprietary assets. Release ZIP names are `yami-{linux|windows|macos}-{x86_64|arm64}.zip`; they contain launcher/game/updater and runtime dependencies only. The workflow publishes a draft only after all builds succeed, uploads complete assets, then makes the release available. CMake embeds `YAMI_RELEASE_VERSION` and `YAMI_UPDATE_REPO`; the default repository is this private project. Initial installation still needs a legitimate original asset tree. Use a per-user writable install location for automatic updates; protected system installs require an OS installer/administrator.
+
+## Graphics and platform changes
+
+- Resizable/high-DPI windows and true widescreen world projection. The recovered frustum retains half-height 0.75, near plane 1, and far plane 30000; only the world aspect changes. Gameplay HUD energy/objectives anchor left, score/notifications centre, battery/jump count anchor right, and the crosshair stays centred. Original artwork and glyph proportions are preserved by stretching only empty HUD background strips. Menus, videos, and ending retain their proportionally fitted 1024×768 canvas; windows narrower than 4:3 also retain the fitted HUD.
+- Default 4× MSAA, trilinear mipmaps, and up to 16× anisotropic filtering, subject to GPU capabilities. `--samples 0 --anisotropy 1` disables the quality additions.
+- OpenGL 3.3 core or GLES 3 replaces fixed-function/WGL rendering. Enhanced world lighting is evaluated per pixel with normalized normals and a modest hemisphere ambient term. Classic mode retains recovered vertex lighting. Original fog, alpha tests, blending, depth/cull rules, and image orientation remain intact.
+- World-only depth-based SSAO supplies contact occlusion. Depth normals choose coplanar neighbors rather than interpolating across silhouettes/corners.
+- Screen-space reflections ray-march actual scene depth and sample actual scene colour on upward-facing surfaces, with Fresnel weighting, hit refinement, and edge/distance fading. The original assets have no roughness masks, so this is a ground-surface heuristic, not PBR or ray tracing. Off-screen objects, hidden surfaces, and misses produce no invented reflection.
+- Subtle highlight bloom and depth-aware local contrast complete the world pass. Colour/depth are resolved into persistent size-dependent targets before HUD/menu overlays, leaving interface text and movies untouched. MSAA and zero-MSAA paths avoid texture feedback; resizing recreates all affected targets.
+- Original brightness settings are applied through a window-only postprocess, never by changing monitor gamma.
+- SDL3 replaces Win32/DirectInput. The first framebuffer is committed before waiting for focus, avoiding a Wayland unmapped-window/focus deadlock. Resize and fullscreen transitions recreate render targets from the actual compositor-provided pixel size.
+- Original menu pause/resume timer compensation (`00430060` / `004300e0`) excludes menu wall time from gameplay and animation clocks. Rendering no longer mutates the paused simulation timestamp.
+- FFmpeg replaces AVIFile/Indeo and legacy audio decoding; SDL streams the mixer output. AVI sample slots are preserved, including two-byte Indeo repeat samples that produce no new decoded picture.
+- Native checkpoint replacement is written and flushed to a temporary file before rename. The original format, two-decimal position precision, ordered callable prefix, and script-variable tail are preserved. The ending consumes only its own native `save43.eti` handoff and returns to the game without starting a Windows helper.
+
+The ending retains historical 2006 text and code generation. Telephone input stays local; the native implementation makes no network connection and does not automatically access the clipboard.
+
+## Exercised verification
+
+```sh
+ctest --test-dir build --output-on-failure
+./build/yami-native --smoke --width 1600 --height 900 --level 1
+./build/yami-native --smoke --skip-intro --width 1680 --height 720 --level 2
+./build/yami-native --smoke --skip-intro --width 1200 --height 900 --level 3
+./build/yami-native --smoke --skip-intro --gles --samples 0 --width 1600 --height 900 --level 4
+```
+
+All twelve CTests passed: assets, script VM, gameplay, enemy AI, entity, combat, media, menu, ending, actual GPU renderer, update validation, and transactional update installation. Update checks exercise SHA-256 tampering, unsafe ZIP members, version/schema boundaries, cancellation, protected paths, busy locks, replacement and rollback after a real filesystem failure. Asset checks parsed 984 models, 3,947 meshes, 141 animation files, and 2,523 materials. GPU geometry fixtures verify corner occlusion, red-wall reflections onto the floor, unchanged background, and unaffected right-anchored HUD pixels. Renderer checks passed all four combinations of OpenGL/GLES and 4×/zero MSAA. Menu geometry checks verify 16:9/21:9 anchors, unscaled artwork/glyphs, and the narrow-window fallback.
+
+All four enhanced native level smokes passed on Wayland: real New Game mouse hit/release, intro/cutscene frames, 123 fixed ticks, meaningful player movement/action, Escape to the original menu, two simulated minutes paused, and mouse hit/release on Continue without a clock jump. Actual drawable sizes were 1600×900 (16:9, level 1), 1680×720 (21:9, level 2), and 1200×900 (4:3, level 3), using OpenGL/4× MSAA. Level 4 passed at 1600×900 using GLES/zero MSAA and replayed its reached `galata_ucus` movie to check missing-WAV completion and repeated registration. A classic-graphics level-1 smoke also passed.
+
+An isolated integration exercise additionally invoked the real `save_game` host, checked the raw callable prefix, restored through the actual checkpoint menu, and invoked `son` through the real blocking SDL dialog. Keyboard tab/text/Enter generated a local code from synthetic digits; Escape closed it; its score handoff was removed and host capture restored. Real window resizing to 1000×700 and F11 fullscreen/windowed transitions passed. COSMIC selected 1280×924 on return to windowed mode; the renderer followed that actual size. Synthetic focus events exercised SDL relative-mode release/reacquisition and held-key clearing.
+
+Game-only visual evidence: [level 1](analysis/native-level1.png), [level 2](analysis/native-level2.png), [level 3](analysis/native-level3.png), [level 4](analysis/native-level4.png), [ending](analysis/native-ending.png), [resize](analysis/native-resized.png), [fullscreen](analysis/native-fullscreen.png), and [windowed return](analysis/native-restored.png).
+
+Enhanced graphics evidence: [16:9](analysis/native-enhanced-16x9.png), [classic comparison](analysis/native-classic-16x9.png), [21:9](analysis/native-enhanced-21x9.png), [4:3](analysis/native-enhanced-4x3.png), and [GLES/zero-MSAA level 4](analysis/native-enhanced-level4.png). A live enhanced-renderer exercise verified resize to [1000×700](analysis/native-enhanced-resized.png), F11 [fullscreen at 2560×1440](analysis/native-enhanced-fullscreen.png), and [windowed return at 1680×720](analysis/native-enhanced-restored.png). Actual [menu](analysis/native-enhanced-menu.png) and decoded [intro](analysis/native-enhanced-intro.png) framebuffers were byte-identical between enhanced and classic graphics at 21:9. These images contain only the native game framebuffer, not the desktop.
+
+Ayarlar verification passed on both OpenGL and GLES using real SDL motion/press/release events: original menu entry, all eight native controls, unchanged original brightness/sensitivity, fullscreen/F11 synchronization, actual level startup, changing MSAA/filtering with world textures already loaded, and Back/Continue. See the [original-style graphics panel](analysis/native-ayarlar-graphics.png), [changed settings](analysis/native-ayarlar-changed.png), [fullscreen](analysis/native-ayarlar-fullscreen.png), [GLES panel](analysis/native-ayarlar-gles.png), and world rendering [before](analysis/native-ayarlar-world.png)/[after live quality restoration](analysis/native-ayarlar-world-restored.png). Actual application restarts on levels 2–4 verified saved strengths, selective CLI overrides, and subsequent persistence. Permanent menu checks cover release timing, bounds, hardware-limited choices, legacy/native settings parsing, malformed extensions, and round-trip precision; GPU checks cover live classic/enhanced restoration and 4×→off→4× MSAA transitions.
+
+A separate actual main-loop window-close exercise persisted an explicit MSAA override while retaining the saved AO strength. Live MSAA changes reuse existing full-size resolve/effect textures; only multisample attachments are reallocated, and unused multisample colour storage is released when MSAA is disabled.
+
+Launcher SDL interaction passed on both OpenGL and GLES: all 13 keyboard-adjustable settings, mouse-release ordering, focus-loss click cancellation, saved fullscreen deferred while the launcher stays windowed, Play/Escape, and shared settings persistence without creating checkpoints. The actual startup main loop also passed launcher-only window close without audio/intro/level initialization, then a separate Play-to-level-1 run with CLI-seeded AO edited to 32%, fullscreen handoff, original Continue, and normal-close persistence. A temporary install with original data ran from `/tmp` without an asset-root override: actual 123-tick level-2 OpenGL/21:9 and level-4 GLES smokes passed. Permanent menu checks cover Unicode settings paths, replacement of existing settings, and preservation/temporary cleanup after a failed write. See [launcher](analysis/native-launcher.png), [GLES launcher](analysis/native-launcher-gles.png), and [actual launched game](analysis/native-launcher-started-game.png). Windows/macOS remain unverified.
+
+Smokes require a real desktop and focus. They use a newly created temporary save directory unless `--save-dir` explicitly overrides it. Injected SDL input and capture-state checks do **not** establish physical mouse hardware behavior. Full campaign progression has not been manually played end-to-end.
+
+## Original-media limitations
+
+The shipped definitions reference three absent audio samples: `env/araba_alarm_basla.mp3`, `env/hayvan_kus1.mp3`, and `env/hayvan_kus2.mp3`. Reached movies `galata_ucus` and `sahaf_kitap_alma` also lack their WAV files. These remain explicitly unavailable; videos still run, and no replacement sound or fabricated PCM is supplied. Missing original images retain the original white-image behavior and emit diagnostics. Missing AVI references are reported; attempting to play an absent video fails rather than showing a fake substitute.
+
+Empty mesh-bound sentinels (±999999) and repeated animation names are authentic data, not discarded corruption: signed bounds and every animation ordinal remain intact. Decompiler output alone was not used as a claim of source correctness; object layouts, instruction behavior, and external boundaries were reconstructed separately.
+
+## Original-engine reference
+
+The extracted original engine runs under system Wine 11.19 on COSMIC Wayland. The patched reference displayed the introductory video, menu, and first playable level. Wine input injection exercised relative motion and a left-button release on New Game. Physical mouse behavior has not been independently verified after the backend change.
+
+```sh
+./play-reference.sh
+```
+
+This optional comparison launcher uses `.wine-yami`. It selects Wine's native Wayland backend and unsets `DISPLAY` on Wayland; otherwise it selects X11. The Wine Wayland branch was exercised; its X11 launcher branch is unverified. The reference retains 1024×768 and is **not** the native engine or graphics upgrade. Its legacy executable may write settings/checkpoints in its working directory.
+
+For extraction into a fresh working directory:
+
+```sh
+./extract_game.py
+./prepare_reference.py
+./play-reference.sh
+```
+
+Extraction needs `7z` and `cabextract` and refuses to overwrite an existing `game/`. `prepare_reference.py` checks the full original hash and creates a separate `game/eti-reference.exe`.
+
+### Verified original defects and patches
+
+Original `game/eti.exe` SHA-256:
+
+`361335a4241ba1165f700d9cb61accdec313710becf0a291dec1d1f9300f119e`
+
+| Address | Evidence | Reference change |
+| --- | --- | --- |
+| `004327eb` | Startup attempts a legacy exclusive display-mode change. | Skip that mode switch. |
+| `00432821` | Window creation is passed the fullscreen flag. | Select the windowed path. |
+| `004329dc` | Pixel-format selection increments the `ChoosePixelFormat` result before `SetPixelFormat`. | Remove the increment. |
+| `00433110`, `00433118` | Decorated-window dimensions ignore the adjusted outer rectangle; the client is smaller than the fixed viewport. | Use a borderless 1024×768 client. |
+| `00432ff9` | `WM_ACTIVATE` accepts `WA_ACTIVE` (1), not `WA_CLICKACTIVE` (2). Deactivation releases DirectInput devices; mouse-click activation fails to reacquire them. | Treat both nonzero activation states as active. |
+
+`check_activation.c` executes the real 32-bit handler instructions and their original state-global writes. Original activation state 2 failed; the patched handler passed states 0, 1, and 2:
+
+```sh
+gcc -m32 -no-pie -Wl,-Ttext-segment=0x10000000 -Wall -Wextra -o /tmp/yami-activation-check check_activation.c
+/tmp/yami-activation-check game/eti.exe           # expected failure: activation 2
+/tmp/yami-activation-check game/eti-reference.exe # passes states 0, 1, and 2
+```
+
+This trusted-release regression check needs Linux x86 compatibility and multilib; it is not a general executable loader.
+
+### Installer and recovered evidence
+
+The MSI's `indeo` and `directx` custom actions invoke `iv5setup.exe` and `dxsetup.exe` whenever the product is not installed. Their presence is proven; the exact point of the reported Proton installer stall is not. Static extraction bypasses the whole installer without guessing its hang stage.
+
+The original renderer is fixed-function OpenGL, not Direct3D. Its boundaries include WGL/GDI/USER32, DirectInput 8, AVIFile, GLEW 1.3.3, and FMOD 3.7.5. Its intro is Indeo 5, 512×384 at 12.5 fps. `game.ini` contains brightness, sensitivity, music/effect volume, and aiming mode, not resolution. `son.eti` is a PE32 executable, not a save.
+
+- `analysis/Yami.gpr`: persistent Ghidra project.
+- `analysis/TraceStartup.java`: startup, display, and input evidence.
+- `analysis/RecoverEngine.java`: recovered functions, instructions, strings, and calls.
+- `analysis/recovered/functions/`: 1,835 decompiled functions, including CRT routines.
+- `analysis/recovered/functions.tsv`, `calls.tsv`, `strings.tsv`, `disassembly.txt`: address-level evidence.
+- `analysis/wayland-click-verified.png`: original-engine first-level gameplay reached through the menu.
+- `native/` and `CMakeLists.txt`: compilable reconstruction, separate from those decompiler exports.
+
+Loader entry points include model `0040f1b0`, mesh `00420c40`, animation `00401760`, compiled script `0040dbf0`, script-object construction `0040d9a0`, and script host registration `00415db0`. Formats mix little-endian words with whitespace-delimited names. Zero decompiler failures did not establish correct prototypes; wrong calling conventions, erased layouts, and incomplete indirect targets required additional recovery.
