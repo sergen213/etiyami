@@ -16,6 +16,11 @@ constexpr std::array<Vertex, 4> quad_vertices{{
     {{1,0,0},{1,0},{0,0,1}}, {{0,0,0},{0,0},{0,0,1}}
 }};
 std::string model_key(const std::filesystem::path& path) { return path.generic_string(); }
+ShadowBounds indexed_bounds(std::span<const Vertex> vertices, std::span<const std::uint16_t> indices) {
+    ShadowBounds bounds;
+    for (const auto index : indices) bounds.include(vertices[index].position);
+    return bounds;
+}
 }
 ModelInstance::ModelInstance(Renderer& renderer, const ModelResource& model, bool animated)
     : renderer_(renderer), model_(model) {
@@ -24,13 +29,23 @@ ModelInstance::ModelInstance(Renderer& renderer, const ModelResource& model, boo
         for (const auto& source : model.parts) {
             parts.emplace_back();
             auto& part = parts.back();
+            const auto& passes = source.material->material.passes;
+            for (std::size_t p = 0; p < passes.size(); ++p)
+                if (!passes[p].blend && passes[p].depth_write && !passes[p].video) {
+                    part.primary_pass = p;
+                    break;
+                }
             if (animated && !source.mesh->mesh.bones.empty()) {
                 prepare_skinning(source.mesh->mesh, part.skin);
+                part.bounds = indexed_bounds(part.skin.vertices, source.mesh->mesh.indices);
                 part.gpu = renderer_.upload_mesh(part.skin.vertices, source.mesh->mesh.indices);
                 part.owned = true;
             } else {
-                if (!source.mesh->static_gpu)
+                if (!source.mesh->static_gpu) {
+                    source.mesh->static_bounds = indexed_bounds(source.mesh->mesh.vertices, source.mesh->mesh.indices);
                     source.mesh->static_gpu = renderer_.upload_mesh(source.mesh->mesh.vertices, source.mesh->mesh.indices);
+                }
+                part.bounds = source.mesh->static_bounds;
                 part.gpu = source.mesh->static_gpu;
             }
         }
@@ -41,6 +56,13 @@ ModelInstance::ModelInstance(Renderer& renderer, const ModelResource& model, boo
 }
 ModelInstance::~ModelInstance() {
     for (const auto& part : parts) if (part.owned) renderer_.release_mesh(part.gpu);
+}
+ShadowBounds ModelInstance::bounds(const Mat4& transform) const {
+    ShadowBounds result;
+    for (const auto& part : parts)
+        if (part.primary_pass != static_cast<std::size_t>(-1))
+            result.include(part.bounds.transformed(transform));
+    return result;
 }
 SceneCache::SceneCache(Renderer& renderer, std::filesystem::path root)
     : renderer_(renderer), root_(std::move(root)) {
@@ -157,8 +179,7 @@ bool SceneCache::video_texture(std::string_view name, std::uint32_t time, bool l
         renderer_.update_texture(texture, frame.width, frame.height, frame.rgba, video.padding_x, video.padding_y);
     return true;
 }
-void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t animation,
-                      std::uint32_t elapsed, std::uint32_t wall_clock) {
+void SceneCache::prepare(ModelInstance& instance, std::size_t animation, std::uint32_t elapsed) {
     const auto& model = instance.resource();
     for (std::size_t n = 0; n < model.parts.size(); ++n) {
         auto& part = instance.parts[n];
@@ -171,22 +192,52 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             if (animation != part.animation || frame != part.frame) {
                 skin_mesh(source.mesh->mesh, clip, elapsed, model.model.scale, model.model.offset, part.skin);
                 renderer_.update_mesh(part.gpu, part.skin.vertices);
+                part.bounds = indexed_bounds(part.skin.vertices, source.mesh->mesh.indices);
                 part.animation = animation; part.frame = frame;
             }
         }
+    }
+}
+void SceneCache::draw_shadow(ModelInstance& instance, DrawState state) {
+    const auto& model = instance.resource();
+    for (std::size_t n = 0; n < model.parts.size(); ++n) {
+        const auto& part = instance.parts[n];
+        if (part.primary_pass == static_cast<std::size_t>(-1)) continue;
+        auto& material = *model.parts[n].material;
+        const auto& pass = material.material.passes[part.primary_pass];
+        auto& texture = material.textures[part.primary_pass];
+        if (!texture) texture = image(pass.texture_name);
+        auto submission = state;
+        submission.ray_primary = true;
+        submission.temporal_static = state.temporal_static && !part.owned;
+        renderer_.draw(part.gpu, texture, material.material, pass, submission);
+    }
+}
+void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t animation,
+                      std::uint32_t elapsed, std::uint32_t wall_clock) {
+    prepare(instance, animation, elapsed);
+    const auto& model = instance.resource();
+    for (std::size_t n = 0; n < model.parts.size(); ++n) {
+        const auto& part = instance.parts[n];
+        const auto& source = model.parts[n];
         auto& material = *source.material;
         for (std::size_t p = 0; p < material.material.passes.size(); ++p) {
             const auto& pass = material.material.passes[p];
             auto& texture = material.textures[p];
             if (pass.video) video_texture(pass.texture_name, wall_clock, true, texture);
             else if (!texture) texture = image(pass.texture_name);
-            renderer_.draw(part.gpu, texture, material.material, pass, state);
+            auto submission = state;
+            submission.ray_primary = p == part.primary_pass;
+            submission.ray_geometry = state.ray_geometry && submission.ray_primary;
+            submission.temporal_static = state.temporal_static && !part.owned && !pass.video;
+            renderer_.draw(part.gpu, texture, material.material, pass, submission);
         }
     }
 }
 void SceneCache::draw_quad(const menu::Draw& quad, std::uint32_t time, bool loop) {
     if (!quad.visible) return;
     DrawState state;
+    state.ray_geometry = false;
     state.color = quad.color;
     const auto& p = quad.positions;
     auto& m = state.model.values;

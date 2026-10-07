@@ -1,12 +1,14 @@
 # ETI Yami Native — Linux
 
-A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. Includes an original-style settings launcher, OpenGL/GLES rendering, widescreen support, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
+A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. The **v1.1.0 source release line** includes an original-style settings launcher, retained OpenGL/GLES rendering with enhanced character shadows, selectable Vulkan with optional hardware ray tracing, widescreen support, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows/macOS releases are deferred.
 
 Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**, available in [the public v1.0.3 release](https://github.com/sergen213/etiyami/releases/tag/v1.0.3); the 1.0.2 installer does not provide them.
 
 Installer **1.0.4** fixes the Linux portal-picker freeze affecting **Choose ISO**, **Change...**, and picker cancellation/error responses. The corrected AppImage and `.run` installers are publicly available in [v1.0.4](https://github.com/sergen213/etiyami/releases/tag/v1.0.4), published from source commit `d0d7d8209e40a130a7890a6a1f47966a07149d31`: all four jobs in [run 37566309522](https://github.com/sergen213/etiyami/actions/runs/37566309522) passed native Ubuntu 22.04 x86_64/ARM64 builds, glibc-2.35 packaging, and installer self-tests. This CI package proof is separate from the local source GUI checks below, not a public GUI installation or live portal-popup test. Redownload the corrected installer if you have an older copy; the game's automatic launcher/engine update does **not** replace an old downloaded installer.
+
+**v1.1.0 release status:** the graphics upgrade is complete in source; its native Ubuntu 22.04 x86_64/ARM64 release pipeline, public assets, and downloaded/installed-package verification are pending. The latest/download links below continue to resolve the latest public release (currently **1.0.4**) until publication succeeds. OpenGL remains the default and the choice for older hardware; Vulkan and hardware RT are optional.
 
 [Install](#install-on-linux-recommended-appimage) · [Uninstall](#uninstall-an-installer-created-game) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
 
@@ -122,11 +124,23 @@ See [extracting from the original installer](#extracting-from-the-original-insta
 
 Choose your settings, then click **OYNA / PLAY**. In the game's main menu, choose **Yeni Oyun / New Game** to start.
 
-The launcher exposes the same 13 settings as the in-game **Ayarlar / Settings** screen: brightness, sensitivity, aiming mode, music/effects volume, lighting, ambient occlusion, reflections, bloom, sharpening, MSAA, texture filtering, and fullscreen. It stays windowed while you configure settings; the saved fullscreen choice applies when you press Play.
+The v1.1.0 launcher retains the 13 shared settings from release 1.0.4 and the in-game **Ayarlar / Settings** screen: brightness, sensitivity, aiming mode, music/effects volume, lighting, ambient occlusion, reflections, bloom, sharpening, MSAA, texture filtering, and fullscreen. It stays windowed while you configure settings; the saved fullscreen choice applies when you press Play.
 
 Keyboard navigation: **Tab / Shift+Tab** selects a control, **arrow keys** adjust it, **Enter / Space** activates it, and **Escape** closes the launcher. Mouse buttons apply changes on release. Closing saves settings without starting the game.
 
 ![Original-style settings launcher](analysis/native-launcher-github-updated.png)
+
+### Graphics selection in v1.1.0
+
+The v1.1.0 launcher adds an **OpenGL / Vulkan** selector before Play. **Gelişmiş seçenekler** opens ray tracing, TAA, **Gölge gücü** (shadow strength, default **0.75**), indirect lighting, exposure, render scale, and global roughness controls; **OpenGL / Genel** returns to the shared controls. Shadow strength is shared: enhanced OpenGL/GLES casts character shadows, while supported Vulkan RT uses ray-query shadows. The other advanced controls are Vulkan-only and stay saved but dormant in OpenGL/GLES. OpenGL is the default; `--gles` retains the GLES alternative. Backend selection is launcher-only, not a live in-game switch.
+
+The launcher preview always uses the retained OpenGL path (GLES with `--gles`), never Vulkan. Play creates a fresh window/renderer and scene resources for the selected gameplay backend. If Vulkan initialization fails, the launcher returns with an explanation and lets you choose OpenGL; it does **not** silently run gameplay on another backend. GL-only builds still open the launcher and allow a saved Vulkan preference to be changed to OpenGL.
+
+Vulkan requires a compatible **Vulkan 1.3** driver/device, but hardware RT is optional. Enhanced Vulkan rendering includes linear-HDR world lighting and sky, exposure/tone mapping, bloom, sharpening, temporal denoising/TAA, and 50–100% world render scale with native-resolution reconstruction and HUD. Supported RT devices add ray-query shadows, ambient occlusion, reflections, and one-bounce indirect lighting. RT off or unavailable uses raster rendering with screen-space AO/reflections; RT shadows and indirect lighting are then inactive. Classic graphics bypasses these enhancements, TAA, and reduced-resolution rendering, retaining native-resolution legacy lighting/colour.
+
+Enhanced OpenGL/GLES character shadows follow animated, alpha-cutout actor geometry within a near-gameplay map; this is not ray tracing or a full-level scenery shadow map. Zero shadow strength or classic graphics bypasses them. The latest Vulkan denoiser filters noisy illumination rather than blurring original artwork, preserves texture detail during camera motion, and rejects stale moving-shadow history. Existing Vulkan RT effects remain active on supported devices.
+
+The original assets have no authored roughness/metalness maps: roughness is a conservative global dielectric treatment, not replacement PBR artwork. This is hybrid raster/RT, not full path tracing. No 1440p/60-fps performance guarantee or physical ARM64 GPU verification is claimed.
 
 ## Game controls
 
@@ -171,7 +185,7 @@ Start **`yami-launcher`** to check for new releases in the background. A newer m
 The AppImage installer is the easiest way to play. To build on Arch Linux / CachyOS:
 
 ```sh
-sudo pacman -S --needed git gcc cmake ninja pkgconf sdl3 libepoxy libxml2 ffmpeg curl libarchive json-c
+sudo pacman -S --needed git gcc cmake ninja pkgconf sdl3 libepoxy libxml2 ffmpeg curl libarchive json-c vulkan-headers glslang python
 
 git clone https://github.com/sergen213/etiyami.git
 cd etiyami
@@ -185,7 +199,17 @@ cmake --build build --parallel
 ./build/yami-launcher
 ```
 
-For other distributions, install equivalent development packages: a C++20 compiler, CMake 3.20+, Ninja, pkg-config, SDL3, libepoxy, libxml2, FFmpeg (`libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample`), libcurl 7.85+, libarchive, and json-c. FFmpeg must include the Indeo 5/JPEG/TGA/BMP decoders and PNG encoder. **SDL2 is not a substitute for SDL3.** The Linux release workflow builds its dependencies on Ubuntu 22.04; distribution packages may be too old for a source build.
+For other distributions, install equivalent development packages: a C++20 compiler, CMake 3.20+, Ninja, pkg-config, SDL3, libepoxy, libxml2, FFmpeg (`libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample`), libcurl 7.85+, libarchive, and json-c. Vulkan additionally needs Vulkan SDK headers, **glslangValidator or glslc**, and Python 3. Shaders compile to embedded SPIR-V at build time; no external shader files/compiler are needed at runtime. FFmpeg must include the Indeo 5/JPEG/TGA/BMP decoders and PNG encoder. **SDL2 is not a substitute for SDL3.** The Linux release workflow builds its dependencies on Ubuntu 22.04; distribution packages may be too old for a source build.
+
+`YAMI_ENABLE_VULKAN` defaults on when the SDK headers and a shader compiler are detected, otherwise off. Explicitly request it with `-DYAMI_ENABLE_VULKAN=ON` (missing prerequisites are a configuration error), or build without any Vulkan build dependencies:
+
+```sh
+cmake -S . -B build-gl -G Ninja -DCMAKE_BUILD_TYPE=Release -DYAMI_ENABLE_VULKAN=OFF
+cmake --build build-gl --parallel
+./build-gl/yami-launcher
+```
+
+Vulkan is loaded dynamically through SDL only when that renderer is created; OpenGL startup does not require a Vulkan loader. The loader and graphics drivers remain distribution-owned runtime dependencies, not bundled application libraries.
 
 ### Build the Linux ISO installer
 
@@ -213,7 +237,7 @@ This reads the installer tables and CAB without running a Windows installer, val
 
 ## Useful launch options
 
-Examples below use the downloaded executables; for a source build, prefix them with `./build/` instead of `./`.
+Examples below use the downloaded executables; for a source build, prefix them with `./build/` instead of `./`. The Vulkan-specific examples/table require the current unreleased source build.
 
 ```sh
 # Direct gameplay, bypassing the settings launcher
@@ -235,12 +259,39 @@ Examples below use the downloaded executables; for a source build, prefix them w
 
 Effect strengths accept values from `0` to `1`; zero disables that effect. CLI graphics options override saved values, while edits made in the launcher take precedence before Play. `yami-native --launcher` opens the same launcher interface.
 
+```sh
+# Select Vulkan before Play, with optional hardware RT
+./build/yami-launcher --renderer vulkan --ray-tracing on
+
+# Vulkan raster path, reduced world resolution, native-resolution HUD
+./build/yami-launcher --renderer vulkan --ray-tracing off --render-scale 0.75 --taa on
+
+# Explicitly retain OpenGL, or GLES, regardless of a saved Vulkan preference
+./build/yami-launcher --renderer opengl
+./build/yami-launcher --renderer opengl --gles
+```
+
+| Source graphics option | Values / effect |
+|---|---|
+| `--renderer` | `opengl` or `vulkan`; default OpenGL unless saved otherwise |
+| `--ray-tracing`, `--taa` | `on` / `off`; Vulkan only, enabled by default |
+| `--shadows` | `0..1`; shared enhanced GL/GLES character-shadow / Vulkan RT shadow strength, default `0.75`; zero disables shadows |
+| `--gi` | `0..1`; Vulkan RT one-bounce indirect strength, default `0.35`; inactive with RT off/unavailable |
+| `--exposure` | `0.1..4`; Vulkan HDR exposure, default `1` |
+| `--render-scale` | `0.5..1`; Vulkan enhanced world resolution, default `1`; HUD stays native |
+| `--roughness` | `0.05..1`; Vulkan global dielectric roughness, default `0.85` |
+| `--ao`, `--reflections`, `--bloom`, `--sharpen` | `0..1`; shared settings, with backend-specific rendering |
+| `--classic-graphics` | Disable enhanced world processing without discarding saved strengths |
+
+Numeric options reject nonfinite and out-of-range inputs. Ray tracing, TAA, indirect lighting, exposure, render scale, and roughness controls are annotated as dormant in OpenGL/GLES; shadow strength remains active in enhanced graphics. `--ray-tracing on` is a preference, not a claim that the GPU supports RT.
+
 ## Troubleshooting
 
 - **Original assets not found:** check that `game/data/menu/menulist.xml` exists and that the complete original data was copied. Use `--asset-root "/path/to/game"` if it is stored elsewhere.
 - **Permission denied when launching:** if your extractor lost executable permissions, run `chmod +x yami-launcher yami-native yami-updater` in the extracted directory. Do not run the game as root.
 - **Update cannot install:** move the whole installation to a per-user writable directory, such as `~/Games/etiyami`; keep its libraries and update helper together.
 - **EGL/OpenGL startup error:** ensure your host graphics drivers and C++ runtime are current. The withdrawn 1.0.0 package could conflict with newer Mesa; repair that installation by extracting the latest fixed package into the same directory. Do not add its old bundled C++ libraries to `LD_LIBRARY_PATH`.
+- **Vulkan startup error (source build):** update your distribution's Vulkan driver/loader, or select **OpenGL** in the returned launcher / pass `--renderer opengl`. Vulkan 1.3 support and required device features are necessary; RT support is optional. A GL-only build intentionally cannot start Vulkan.
 - **Wayland-specific issue:** Linux prefers Wayland when available. To explicitly try X11 on a desktop that provides it, run `SDL_VIDEO_DRIVER=x11 ./yami-launcher`.
 - **Poor performance:** reduce MSAA, filtering, or effects in Ayarlar, or use the lower-cost CLI example above.
 
@@ -261,7 +312,11 @@ cmake --build build --target check_setup_install check_setup_gui
 ./build/check_setup_gui "/path/to/original.iso" "/absolute/path/to/7zz" "/path/to/new-frame-directory"
 ```
 
-The Linux `uninstall` CTest runs the standalone helper/script safety checks using isolated temporary installations. Current local x86_64 verification passed all **15 CTests**; `setup_gui` runs headlessly with SDL's dummy video/software renderer and simulates inline portal callbacks for ISO/folder selection, cancellation, and errors. A separate source GUI check on actual Wayland/software rendering read the original ISO, displayed its artwork-ready preview, and cancelled an active preview with responsive exit; it did not exercise a live portal popup. Earlier local verification covered real-ISO installation/repair, actual application-menu/Desktop terminal shortcuts, saved/unknown-file preservation, trusted update ownership, and both installer packaging self-tests. Public v1.0.3 passed Ubuntu 22.04 x86_64/ARM64 build/package checks; downloaded x86_64 AppImage and `.run` installers also passed real installation, terminal cancellation, repair, and confirmed removal without deleting saves or unknown files. See the technical notes for measured evidence and security boundaries. ARM64 packaging is verified, not physical ARM GPU/gameplay execution.
+The Linux `uninstall` CTest runs the standalone helper/script safety checks using isolated temporary installations. The local 1.0.4 installer verification passed **15 CTests**; `setup_gui` runs headlessly with SDL's dummy video/software renderer and simulates inline portal callbacks for ISO/folder selection, cancellation, and errors. A separate source GUI check on actual Wayland/software rendering read the original ISO, displayed its artwork-ready preview, and cancelled an active preview with responsive exit; it did not exercise a live portal popup. Earlier local verification covered real-ISO installation/repair, actual application-menu/Desktop terminal shortcuts, saved/unknown-file preservation, trusted update ownership, and both installer packaging self-tests. Public v1.0.3 passed Ubuntu 22.04 x86_64/ARM64 build/package checks; downloaded x86_64 AppImage and `.run` installers also passed real installation, terminal cancellation, repair, and confirmed removal without deleting saves or unknown files. See the technical notes for measured evidence and security boundaries. ARM64 packaging is verified, not physical ARM GPU/gameplay execution.
+
+Latest local v1.1.0 source verification passed **17/17 Vulkan-enabled CTests in 1.97 seconds** and **15/15 GL-only CTests in 1.76 seconds**, on an RX 7900 XTX, RADV Mesa 26.2.4, COSMIC Wayland. Real GPU checks passed RT on/off, all four OpenGL/GLES × 4×/zero-MSAA combinations, artwork-preserving illumination denoising and camera-motion history, moving-shadow rejection, and sample-aligned MSAA metadata (excluded-normal contamination fell from 446 pixels to zero). Stochastic AO fluctuation fell from 5.84772 spatial-only to 1.7038 with temporal filtering. Original-game smokes and inspected captures passed all four levels across the two backends; Vulkan RT-off at 0.75 render scale kept acceleration-build/ray-query counters **0 / 0**. These are local source results, not v1.1.0 native release-CI, public-asset or installed-package proof. No new Khronos validation run was performed for this latest revision; earlier validation and authored-colour fixture evidence remain historical in the technical notes.
+
+Earlier source launcher checks also passed Vulkan→OpenGL handoff with every Vulkan-only preference retained, and GL-only Vulkan-selection failure→visible recovered GL launcher→explicit OpenGL game-window handoff. The desired-Vulkan preview caption **Oyunda kontrol** correctly defers GPU capability checking until Play. The failure check acknowledged only the owned application's exact error notification through a scoped test hook; its constructor failure, recovered window/banner and initialized game window were real, but the host modal dialog itself was not exercised. See the technical notes for this verification boundary.
 
 The smoke command exercises real menu input, New Game, gameplay, and rendering; it needs an actual focused window. Keep the mouse/keyboard idle and do not switch windows during this automated check: concurrent physical input or focus loss intentionally fails it. By default it uses a new temporary save directory. Existing checks cover assets, scripts, gameplay, audio, settings, rendering, and safe update installation. Full campaign progression has not been manually played end-to-end.
 

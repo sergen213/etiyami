@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-set(YAMI_RELEASE_VERSION "1.0.4" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
+set(YAMI_RELEASE_VERSION "1.1.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
 if(NOT YAMI_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "YAMI_RELEASE_VERSION must be MAJOR.MINOR.PATCH")
 endif()
@@ -15,6 +15,64 @@ pkg_check_modules(YAMI_DEPS REQUIRED IMPORTED_TARGET
     sdl3 epoxy libavformat libavcodec libavutil libswscale libswresample libxml-2.0
     "libcurl>=7.85" libarchive json-c)
 
+# Vulkan is a build-time SDK dependency only. SDL loads the user's loader/driver
+# when Vulkan is selected; merely starting the OpenGL launcher must not need it.
+find_path(YAMI_VULKAN_INCLUDE_DIR vulkan/vulkan.h HINTS "$ENV{VULKAN_SDK}/include")
+find_program(YAMI_GLSLANG_VALIDATOR glslangValidator HINTS "$ENV{VULKAN_SDK}/bin")
+find_program(YAMI_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/bin")
+set(YAMI_VULKAN_DEFAULT OFF)
+if(YAMI_VULKAN_INCLUDE_DIR AND (YAMI_GLSLANG_VALIDATOR OR YAMI_GLSLC))
+    set(YAMI_VULKAN_DEFAULT ON)
+endif()
+option(YAMI_ENABLE_VULKAN "Build the selectable Vulkan renderer with embedded shaders" ${YAMI_VULKAN_DEFAULT})
+if(YAMI_ENABLE_VULKAN)
+    if(NOT YAMI_VULKAN_INCLUDE_DIR OR NOT (YAMI_GLSLANG_VALIDATOR OR YAMI_GLSLC))
+        message(FATAL_ERROR "Vulkan requires SDK headers and glslangValidator or glslc; use -DYAMI_ENABLE_VULKAN=OFF for OpenGL/GLES only")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(YAMI_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/native/shaders")
+    set(YAMI_SHADER_NAMES vulkan_raster.vert vulkan_raster.frag vulkan_final.vert
+        vulkan_final.frag effects.frag temporal.frag)
+    set(YAMI_SHADER_SOURCES)
+    foreach(shader IN LISTS YAMI_SHADER_NAMES)
+        list(APPEND YAMI_SHADER_SOURCES "${YAMI_SHADER_DIR}/${shader}")
+    endforeach()
+    # Variants share source; RT-off SPIR-V contains no ray-query operations.
+    list(APPEND YAMI_SHADER_NAMES effects_rt.frag vulkan_raster_ui.frag)
+    set(YAMI_SPIRV_FILES)
+    foreach(shader IN LISTS YAMI_SHADER_NAMES)
+        set(spirv "${CMAKE_CURRENT_BINARY_DIR}/spirv/${shader}.spv")
+        set(shader_source "${YAMI_SHADER_DIR}/${shader}")
+        set(shader_defines)
+        if(shader STREQUAL "effects_rt.frag")
+            set(shader_source "${YAMI_SHADER_DIR}/effects.frag")
+            set(shader_defines -DYAMI_RAY_QUERY=1)
+        elseif(shader STREQUAL "vulkan_raster_ui.frag")
+            set(shader_source "${YAMI_SHADER_DIR}/vulkan_raster.frag")
+            set(shader_defines -DYAMI_INTERFACE_ONLY=1)
+        endif()
+        if(YAMI_GLSLANG_VALIDATOR)
+            set(shader_command "${YAMI_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3
+                "-I${YAMI_SHADER_DIR}" ${shader_defines} -o "${spirv}" "${shader_source}")
+        else()
+            set(shader_command "${YAMI_GLSLC}" --target-env=vulkan1.3
+                "-I${YAMI_SHADER_DIR}" ${shader_defines} -o "${spirv}" "${shader_source}")
+        endif()
+        add_custom_command(OUTPUT "${spirv}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/spirv"
+            COMMAND ${shader_command}
+            DEPENDS ${YAMI_SHADER_SOURCES}
+            VERBATIM)
+        list(APPEND YAMI_SPIRV_FILES "${spirv}")
+    endforeach()
+    set(YAMI_SHADER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/yami_vulkan_shaders.hpp")
+    add_custom_command(OUTPUT "${YAMI_SHADER_HEADER}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py"
+            --output "${YAMI_SHADER_HEADER}" ${YAMI_SPIRV_FILES}
+        DEPENDS ${YAMI_SPIRV_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py"
+        VERBATIM)
+endif()
+
 add_library(yami_engine STATIC
     native/assets.cpp native/script_vm.cpp native/gameplay.cpp native/enemy_ai.cpp
     native/entity.cpp native/combat.cpp native/media.cpp native/menu.cpp
@@ -24,6 +82,11 @@ target_compile_features(yami_engine PUBLIC cxx_std_20)
 target_compile_definitions(yami_engine PUBLIC
     YAMI_VERSION="${PROJECT_VERSION}" YAMI_UPDATE_REPO="${YAMI_UPDATE_REPO}")
 target_link_libraries(yami_engine PUBLIC PkgConfig::YAMI_DEPS Threads::Threads)
+target_compile_definitions(yami_engine PUBLIC YAMI_HAS_VULKAN=$<BOOL:${YAMI_ENABLE_VULKAN}>)
+if(YAMI_ENABLE_VULKAN)
+    target_sources(yami_engine PRIVATE native/vulkan_renderer.cpp native/vulkan_effects.cpp "${YAMI_SHADER_HEADER}")
+    target_include_directories(yami_engine PRIVATE "${YAMI_VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+endif()
 if(WIN32)
     target_link_libraries(yami_engine PUBLIC advapi32)
 endif()
@@ -112,6 +175,19 @@ if(BUILD_TESTING)
             add_test(NAME ${component} COMMAND check_${component} "${CMAKE_CURRENT_SOURCE_DIR}/game")
         endif()
     endforeach()
+    if(YAMI_ENABLE_VULKAN)
+        add_test(NAME renderer_vulkan COMMAND check_renderer --vulkan)
+        set_tests_properties(renderer_vulkan PROPERTIES LABELS "native-display;vulkan")
+        add_executable(check_vulkan native/check_vulkan.cpp)
+        target_link_libraries(check_vulkan PRIVATE yami_engine)
+        if(MSVC)
+            target_compile_options(check_vulkan PRIVATE /UNDEBUG /fp:strict)
+        else()
+            target_compile_options(check_vulkan PRIVATE -UNDEBUG -ffp-contract=off)
+        endif()
+        add_test(NAME vulkan COMMAND check_vulkan)
+        set_tests_properties(vulkan PROPERTIES LABELS "native-display;vulkan")
+    endif()
     if(UNIX AND NOT APPLE)
         add_executable(check_setup_assets native/check_setup_assets.cpp)
         target_compile_features(check_setup_assets PRIVATE cxx_std_20)

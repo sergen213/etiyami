@@ -16,8 +16,8 @@
 namespace yami {
 namespace {
 constexpr std::array<std::size_t,5> originalPlus{{1,4,13,7,10}};
-constexpr std::size_t playFocus=13, closeFocus=14, focusCount=15;
-constexpr menu::Rect playRect{504,116,224,52}, closeRect{504,54,224,48};
+constexpr std::size_t advancedFocus=13, backendFocus=14, playFocus=15, closeFocus=16, focusCount=17;
+constexpr menu::Rect backendRect{504,220,224,44}, playRect{504,116,224,52}, closeRect{504,54,224,48};
 constexpr std::array<float,4> ink{{.16f,.12f,.08f,1}};
 constexpr std::array<float,4> focusColor{{.95f,.83f,.18f,1}};
 
@@ -70,7 +70,8 @@ void drain_input() {
 } // namespace
 
 bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
-                  const std::filesystem::path& saveDirectory, bool checkUpdates) {
+                  const std::filesystem::path& saveDirectory, bool checkUpdates,
+                  std::string_view recoveryMessage) {
     SDL_Window* window=renderer.window();
     const auto windowID=SDL_GetWindowID(window);
     sdl_check(SDL_SetWindowTitle(window,"ETI Yami - Başlatıcı / Launcher"));
@@ -83,6 +84,7 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
     menu.clear_commands(); // Initial settings restoration must not start audio or gameplay.
     menu.show(3);
     menu.set_graphics_limits(renderer.max_samples(),renderer.max_anisotropy());
+    menu.set_graphics_device(false,false);
     const menu::Context context{};
     const auto& page=menu.pages()[3];
     if (menu.fonts().empty()) throw std::runtime_error("Launcher requires original bitmap font");
@@ -90,6 +92,7 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
     const auto apply_preview=[&] {
         auto graphics=menu.settings().graphics;
         graphics.fullscreen=false; // Desired fullscreen belongs to the game handoff, not this window.
+        graphics.backend=GraphicsBackend::OpenGL; // Preview never creates or switches to Vulkan.
         renderer.set_graphics(graphics);
         renderer.set_brightness(menu.settings_effect().brightnessRamp);
     };
@@ -126,8 +129,10 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
         focusRects[5+row]={minus.x,minus.y,plus.x+plus.width-minus.x,plus.height};
     }
     focusRects[playFocus]=playRect; focusRects[closeFocus]=closeRect;
+    focusRects[advancedFocus]=page.buttons[32].rect;
+    focusRects[backendFocus]=backendRect;
     std::size_t focus=playFocus;
-    int pressedAction=-1;
+    int pressedAction=-1, pressedMenu=-1;
     bool mouseDown=false,focused=(SDL_GetWindowFlags(window)&SDL_WINDOW_INPUT_FOCUS)!=0;
     bool finished=false,start=false;
     updates::Snapshot updateStatus{updates::State::Unavailable,0,0,"Offline"};
@@ -175,6 +180,7 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
     const auto action_at=[&](Vec2 point) {
         if (menu::contains(playRect,point)) return int(playFocus);
         if (menu::contains(closeRect,point)) return int(closeFocus);
+        if (menu::contains(backendRect,point)) return int(backendFocus);
         return -1;
     };
     const auto position_cursor=[&](Vec2 point) {
@@ -185,14 +191,19 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
         else menu.set_cursor({point.x,point.y-45});
     };
     const auto release_mouse=[&] {
-        mouseDown=false; pressedAction=-1;
+        mouseDown=false; pressedAction=-1; pressedMenu=-1;
         menu.set_cursor({0,723}); // Focus loss/keyboard handoff cannot activate a release-only button.
         menu.update({{},false},context);
         commands();
     };
     const auto adjust=[&](bool increase) {
         release_mouse();
-        const std::size_t button=focus<5 ? originalPlus[focus]+(increase?0:1) :
+        if (focus==backendFocus) {
+            menu.set_launcher_backend(increase?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL);
+            commands();
+            return;
+        }
+        const std::size_t button=focus==advancedFocus?32:focus<5 ? originalPlus[focus]+(increase?0:1) :
                                                     16+(focus-5)*2+(increase?1:0);
         const auto& rect=page.buttons[button].rect;
         menu.set_cursor({rect.x+rect.width/2,rect.y+rect.height/2-45});
@@ -224,6 +235,24 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
         menu::append_text(chrome,font,"Ayarlarını seç, maceraya başla.",{36,679},.85f,ink);
         menu::append_text(chrome,font,{updateText.data(),updateTextLength},{36,661},.55f,ink);
         menu::append_text(chrome,font,{caps,std::size_t(capsLength)},{758,624},.6f,ink);
+        chrome.push_back(quad(backendRect,{{.35f,.39f,.22f,1}}));
+        const auto selected=menu.settings().graphics.backend;
+        menu::append_text(chrome,font,selected==GraphicsBackend::Vulkan?"Vulkan":"OpenGL",
+                          {backendRect.x+20,backendRect.y+14},.9f,{{1,1,.84f,1}});
+        menu::append_text(chrome,font,"< OpenGL / Vulkan >  Next launch",{504,276},.55f,ink);
+#if YAMI_HAS_VULKAN
+        const std::string_view availability=selected==GraphicsBackend::Vulkan?
+            "RT: GPU desteği açılışta kontrol edilir":"Vulkan ayarları OpenGL'de etkisiz";
+#else
+        const std::string_view availability=selected==GraphicsBackend::Vulkan?
+            "Bu sürümde Vulkan yok; OpenGL seçin":"OpenGL hazır / Vulkan bu sürümde yok";
+#endif
+        menu::append_text(chrome,font,availability,{504,200},.47f,ink);
+        if (!recoveryMessage.empty()) {
+            chrome.push_back(quad({16,618,716,37},{{.25f,.08f,.04f,.95f}}));
+            menu::append_text(chrome,font,"Vulkan açılamadı. OpenGL seçin veya tekrar deneyin.",
+                              {27,631},.55f,{{1,1,.84f,1}});
+        }
         for (const auto row:{playFocus,closeFocus}) {
             const auto rect=focusRects[row];
             const bool disabled=row==playFocus && updateBlocksPlay();
@@ -308,12 +337,23 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
                     for (std::size_t row=0;row<focusCount;++row)
                         if (menu::contains(focusRects[row],pointer)) { focus=row; break; }
                     mouseDown=true; pressedAction=action;
+                    pressedMenu=-1;
+                    for (std::size_t i=1;i<page.buttons.size();++i)
+                        if (menu::contains(page.buttons[i].rect,pointer)) { pressedMenu=int(i); break; }
                 } else {
-                    if (mouseDown && pressedAction>=0 && pressedAction==action &&
-                        (action!=int(playFocus) || !updateBlocksPlay())) {
-                        start=action==int(playFocus); finished=true;
+                    if (mouseDown && pressedAction>=0 && pressedAction==action) {
+                        if (action==int(backendFocus)) {
+                            const auto current=menu.settings().graphics.backend;
+                            menu.set_launcher_backend(current==GraphicsBackend::OpenGL?
+                                                      GraphicsBackend::Vulkan:GraphicsBackend::OpenGL);
+                            commands();
+                        } else if (action!=int(playFocus) || !updateBlocksPlay()) {
+                            start=action==int(playFocus); finished=true;
+                        }
                     }
-                    mouseDown=false; pressedAction=-1;
+                    if (pressedMenu<0 || !menu::contains(page.buttons[std::size_t(pressedMenu)].rect,pointer))
+                        menu.set_cursor({0,723});
+                    mouseDown=false; pressedAction=-1; pressedMenu=-1;
                 }
                 // Consume release before any subsequent motion event changes the tested hot point.
                 menu.update({{},mouseDown},context); commands();

@@ -73,7 +73,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
             build-essential cmake ninja-build pkg-config python3 curl ca-certificates xz-utils bzip2 squashfs-tools \
-            nasm patchelf libepoxy-dev libxml2-dev libssl-dev libc-ares-dev zlib1g-dev libarchive-dev libjson-c-dev \
+            nasm patchelf libepoxy-dev libvulkan-dev glslang-tools libxml2-dev libssl-dev libc-ares-dev zlib1g-dev libarchive-dev libjson-c-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libx11-dev libxext-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev \
             libudev-dev libdbus-1-dev libdrm-dev libgbm-dev libegl1-mesa-dev libgl1-mesa-dev
@@ -132,7 +132,7 @@ jobs:
           set -euo pipefail
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
-            -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
+            -DBUILD_TESTING=OFF -DYAMI_ENABLE_VULKAN=ON -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
             '-DCMAKE_INSTALL_RPATH=$ORIGIN'
           cmake --build build --target yami-native yami-updater yami-launcher yami-setup yami-remove --parallel "$(nproc)"
           cmake --install build --component runtime --prefix "$RUNNER_TEMP/yami-install"
@@ -264,7 +264,17 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes 'Linux offline GUI installers (.AppImage or .run) accept your original ISO, display its original game artwork, and create app-menu/Desktop shortcuts; engine/launcher ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves. Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
+            --notes '## v1.1.0 renderer enhancements
+
+          - Selectable Vulkan 1.3 backend with optional hardware ray-query shadows, reflections, ambient occlusion and global illumination, plus HDR/exposure, TAA, native-resolution HUD and render-scale upscaling. Hardware ray tracing is optional, not full path tracing. OpenGL remains the default and launcher-preview backend; explicit Vulkan failures report recovery instructions rather than silently switching backends.
+          - Vulkan denoising preserves deterministic raster artwork by filtering illumination separately and anchoring temporal history to the current artwork. Moving hard shadows reject stale history; signed-integer normal/eligibility MSAA resolves now match the depth sample while color averaging retains authored coverage.
+          - Enhanced OpenGL/OpenGL ES add alpha-correct skinned character shadows. Shared shadow strength is adjustable with --shadows 0..1 (default 0.75); classic rendering remains unchanged.
+
+          ## Linux downloads and installation
+
+          Six assets cover x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. Installers accept your original ISO, display its original game artwork and create app-menu/Desktop shortcuts; ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves.
+
+          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
           gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \

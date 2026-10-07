@@ -39,13 +39,14 @@ struct Game::State {
     FrameClock clock;
     LevelMetadata metadata;
     struct Source { std::string name; Mat4 transform; bool hidden=false;
-                    std::unique_ptr<ModelInstance> instance; };
+                    std::unique_ptr<ModelInstance> instance; ShadowBounds bounds{}; };
     std::vector<Source> sources,decorations;
     std::vector<EntityState> actors;
     std::vector<entity::Runtime> runtime;
     std::vector<ForceState> forces;
     std::vector<enemy_ai::State> ai;
     std::vector<std::unique_ptr<ModelInstance>> models;
+    std::vector<std::size_t> shadowCasters;
     std::unique_ptr<ModelInstance> alternatePlayer;
     std::array<std::unique_ptr<ModelInstance>,8> projectileModels;
     std::vector<HealthState> pickups;
@@ -126,6 +127,7 @@ struct Game::State {
         ai.push_back(enemy_ai::initialize(static_cast<enemy_ai::Kind>(entity_type(model)),position));
         ai.back().enabled=!player; actors.back().aiEnabled=!player;
         models.push_back(std::move(gpu));
+        shadowCasters.reserve(actors.capacity());
     }
     void replace_model(std::size_t index,std::string_view model) {
         auto gpu=instance(descriptor(model),true);
@@ -226,6 +228,7 @@ struct Game::State {
     }
     void build_level(int level,bool initialize) {
         ++levelGeneration;
+        game.renderer_.reset_history();
         const auto now=wallNow-clockOffset;
         clock.frameNow=now;
         const auto oldLevel=clock.level;
@@ -246,6 +249,8 @@ struct Game::State {
         const auto directory="data/levels/level"+std::to_string(level)+"/";
         for (const auto& part:metadata.parts) sources.push_back({part.name,identity_matrix(),false,instance(directory+part.filename+"/model.dat",false)});
         for (const auto& source:metadata.models) sources.push_back({source.name,source.transform,false,instance(descriptor(source.filename),false)});
+        for (std::size_t i=1;i<sources.size();++i)
+            sources[i].bounds=sources[i].instance->bounds(sources[i].transform);
         if (initialize) for (const auto& bot:metadata.bots) add_actor(bot.name,bot.model,bot.position,false);
         if (level==4) {
             auto pose=identity_matrix(); entity::rotate_local_up(pose,-90);
@@ -573,6 +578,31 @@ struct Game::State {
             }
         }
     }
+    void draw_actor_shadows() {
+        shadowCasters.clear();
+        ShadowBounds casters,receivers;
+        for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {
+            auto& model=*models[i];
+            game.scene_.prepare(model,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame);
+            const auto transform=entity::upright_transform(runtime[i],model.resource().model.collision_box.y);
+            const auto bounds=model.bounds(transform);
+            if (game.renderer_.shadow_caster_visible(bounds)) {
+                casters.include(bounds);
+                shadowCasters.push_back(i);
+            }
+        }
+        if (shadowCasters.empty()) return;
+        for (std::size_t i=1;i<sources.size();++i) if (!sources[i].hidden)
+            receivers.include(sources[i].bounds);
+        if (!game.renderer_.begin_shadows(casters,receivers)) return;
+        for (const auto i:shadowCasters) {
+            DrawState draw;
+            draw.model=entity::upright_transform(runtime[i],models[i]->resource().model.collision_box.y);
+            draw.lighting=true;
+            game.scene_.draw_shadow(*models[i],draw);
+        }
+        game.renderer_.end_shadows();
+    }
     void draw(std::uint32_t now) {
         wallNow=now;
         if (clock.phase==Phase::Intro) {
@@ -585,8 +615,11 @@ struct Game::State {
             entity::respawn_big_health(actors[0],pickups,score);
             if (clock.level==4) entity::update_flight_pickups(pickupMotion,pickupRuntime,pickups);
             game.renderer_.camera(inverse_pose(camera),frustum_projection(0.75f,float(game.renderer_.pixel_width())/game.renderer_.pixel_height(),1,30000));
+            if (game.renderer_.shadow_enabled()) draw_actor_shadows();
             for (std::size_t i=0;i<sources.size();++i) if (!sources[i].hidden) {
                 DrawState draw; draw.model=sources[i].transform; draw.lighting=i!=0; draw.fog=i!=0 && clock.level!=4;
+                draw.ray_geometry=i!=0;
+                draw.temporal_static=i!=0;
                 game.scene_.draw(*sources[i].instance,draw,0,0,now);
             }
             for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {

@@ -32,9 +32,14 @@ constexpr std::array<float,4> parchmentInk{{.16f,.12f,.08f,1}};
 constexpr std::array<std::string_view,8> graphicsLabels{{
     "Işıklandırma","Ortam gölgesi","Yansımalar","Parlama","Keskinlik",
     "Yumuşatma","Doku filtresi","Tam ekran"}};
-constexpr std::array<std::string_view,8> graphicsFields{{
+constexpr std::array<std::string_view,8> vulkanLabels{{
+    "Işın izleme","Zamansal AA","Gölge gücü","Dolaylı ışık",
+    "Pozlama","Çizim ölçeği","Pürüzlülük","Grafik desteği"}};
+constexpr std::array<std::string_view,16> graphicsFields{{
     "grafik_gelistirilmis","grafik_ao","grafik_yansima","grafik_parlama",
-    "grafik_keskinlik","grafik_msaa","grafik_anizotropi","grafik_tamekran"}};
+    "grafik_keskinlik","grafik_msaa","grafik_anizotropi","grafik_tamekran",
+    "grafik_backend","grafik_rt","grafik_taa","grafik_golge","grafik_gi",
+    "grafik_pozlama","grafik_olcek","grafik_puruz"}};
 constexpr auto sampleChoices=[] {
     std::array<int,30> choices{};
     int value=4; // 2 samples is rounded up to 4 by some drivers.
@@ -244,7 +249,7 @@ Settings read_settings(std::istream& input) {
     const auto aim=field("hedefleme=");
     require(aim=="elile" || aim=="otomatik", "Invalid original aiming mode");
     result.automaticAim=aim!="elile";
-    std::array<bool,8> seen{};
+    std::array<bool,graphicsFields.size()> seen{};
     while (std::getline(input,line)) {
         if (!line.empty() && line.back()=='\r') line.pop_back();
         if (line.empty()) continue;
@@ -258,9 +263,14 @@ Settings read_settings(std::istream& input) {
         seen[index]=true;
         const auto value=std::string_view(line).substr(separator+1);
         auto& graphics=result.graphics;
-        if (index==0 || index==7) {
+        if (index==8) {
+            require(value=="opengl" || value=="vulkan", "Invalid native graphics backend");
+            graphics.backend=value=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
+        } else if (index==0 || index==7 || index==9 || index==10) {
             require(value=="0" || value=="1", "Invalid native graphics boolean");
-            (index==0?graphics.enhanced:graphics.fullscreen)=value=="1";
+            bool* target=index==0?&graphics.enhanced:index==7?&graphics.fullscreen:
+                         index==9?&graphics.ray_tracing:&graphics.temporal_aa;
+            *target=value=="1";
         } else if (index==5) {
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),graphics.samples);
             require(parsed.ec==std::errc{} && parsed.ptr==value.data()+value.size() &&
@@ -273,6 +283,11 @@ Settings read_settings(std::istream& input) {
             case 3: graphics.bloom=parsed; break;
             case 4: graphics.sharpen=parsed; break;
             case 6: graphics.anisotropy=parsed; break;
+            case 11: graphics.shadows=parsed; break;
+            case 12: graphics.indirect_lighting=parsed; break;
+            case 13: graphics.exposure=parsed; break;
+            case 14: graphics.render_scale=parsed; break;
+            case 15: graphics.roughness=parsed; break;
             default: throw std::runtime_error("Unmapped native graphics field");
             }
         }
@@ -313,6 +328,14 @@ void write_settings(std::ostream& output, const Settings& settings) {
     output.write(buffer.data(),samples.ptr-buffer.data()); output.put('\n');
     append(graphicsFields[6],graphics.anisotropy);
     append(graphicsFields[7],graphics.fullscreen?1:0);
+    output << graphicsFields[8] << '=' << (graphics.backend==GraphicsBackend::Vulkan?"vulkan":"opengl") << '\n';
+    append(graphicsFields[9],graphics.ray_tracing?1:0);
+    append(graphicsFields[10],graphics.temporal_aa?1:0);
+    append(graphicsFields[11],graphics.shadows);
+    append(graphicsFields[12],graphics.indirect_lighting);
+    append(graphicsFields[13],graphics.exposure);
+    append(graphicsFields[14],graphics.render_scale);
+    append(graphicsFields[15],graphics.roughness);
     require(bool(output), "Cannot write original settings stream");
 }
 void save_settings(const std::filesystem::path& path, const Settings& settings) {
@@ -439,6 +462,10 @@ Menu::Menu(const std::filesystem::path& root) : fonts_(read_fonts(root)) {
             settingsPage.buttons.push_back(std::move(button));
         }
     }
+    Button advanced;
+    advanced.rect={764,52,220,32};
+    advanced.material="menu/fill"; advanced.overMaterial="menu/fill";
+    settingsPage.buttons.push_back(std::move(advanced));
     activeCounts_[3]=settingsPage.buttons.size();
     commands_.reserve(64);
     draws_.reserve(4096); // Original HUD has bounded strings; retained for every frame.
@@ -494,6 +521,16 @@ void Menu::set_fullscreen(bool fullscreen) {
     graphics_.fullscreen=fullscreen;
     originalSettingsDirty_=false;
     emit(CommandKind::PersistSettings);
+}
+void Menu::set_launcher_backend(GraphicsBackend backend) {
+    require(backend==GraphicsBackend::OpenGL || backend==GraphicsBackend::Vulkan, "Invalid game backend");
+    if (graphics_.backend==backend) return;
+    graphics_.backend=backend;
+    emit(CommandKind::PersistSettings);
+}
+void Menu::set_graphics_device(bool vulkan, bool rayTracing) noexcept {
+    activeVulkan_=vulkan;
+    rayTracingAvailable_=rayTracing;
 }
 void Menu::set_settings(const Settings& settings) {
     valid_settings(settings);
@@ -598,6 +635,7 @@ void Menu::dispatch(const Context& context, bool released) {
         if (active(0)) {
             emit(CommandKind::PersistSettings); originalSettingsDirty_=false; current_=1; break;
         }
+        if (active(32)) advancedGraphics_=!advancedGraphics_;
         bool changed=false;
         for (std::size_t i=0;i<4;++i) {
             auto& angle=buttons[3+i*3].angle;
@@ -618,6 +656,17 @@ void Menu::dispatch(const Context& context, bool released) {
         for (std::size_t row=0;row<graphicsLabels.size();++row) {
             const bool decrease=active(16+row*2),increase=active(17+row*2);
             if (!increase && !decrease) continue;
+            if (advancedGraphics_) {
+                if (row==0) graphics_.ray_tracing=increase;
+                else if (row==1) graphics_.temporal_aa=increase;
+                else if (row<7) {
+                    float* value=row==2?&graphics_.shadows:row==3?&graphics_.indirect_lighting:
+                                 row==4?&graphics_.exposure:row==5?&graphics_.render_scale:&graphics_.roughness;
+                    const float minimum=row==4?.1f:row==5?.5f:row==6?.05f:0.f;
+                    *value=std::clamp(*value+(increase?.05f:-.05f),minimum,row==4?4.f:1.f);
+                }
+                continue;
+            }
             if (row==0) graphics_.enhanced=increase;
             else if (row==7) graphics_.fullscreen=increase;
             else if (row==5)
@@ -790,7 +839,12 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
         if (current_==7 && i==0) { left=0; right=context.loadingProgress; }
         quad(button.rect,button.over?button.overMaterial:button.material,button.style,int(i),
              button.over,left,right,current_==6?0.0015f:0);
-        if (current_==3 && i>=16 && !button.over) {
+        if (current_==3 && i==32) {
+            auto& toggle=draws_.back();
+            toggle.material={};
+            toggle.color=button.over?std::array<float,4>{{.50f,.54f,.29f,1}}:
+                                      std::array<float,4>{{.25f,.29f,.14f,1}};
+        } else if (current_==3 && i>=16 && i<32 && !button.over) {
             auto& native=draws_.back();
             native.material={};
             native.texture=(i-16)%2==0?"data/images/menuimages/dugme/ayarlar_eksi.tga":
@@ -836,15 +890,35 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
         const int y=integer(combo.previous.y+std::floor(combo.previous.height/2)-float(font.height/2));
         text(selected,combo.font,combo.textMaterial,integer(x),y,1,white);
     }
-    for (const auto& label:page.labels)
-        text(label.text,label.font,label.material,integer(label.position.x),integer(label.position.y),1,
+    for (std::size_t i=0;i<page.labels.size();++i) {
+        const auto& label=page.labels[i];
+        const auto title=current_==3 && advancedGraphics_ && i<8?vulkanLabels[i]:std::string_view(label.text);
+        text(title,label.font,label.material,integer(label.position.x),integer(label.position.y),1,
              current_==3?parchmentInk:white);
+    }
     if (current_==3) {
         // Labels and values use the retained original bitmap font, not host UI text.
+        text(advancedGraphics_?"OpenGL / Genel":"Gelişmiş seçenekler","title",{},774,62,.65f,white);
         for (std::size_t row=0;row<graphicsLabels.size();++row) {
             const auto& label=page.labels[row];
             std::string_view value;
-            if (row==0) value=graphics_.enhanced?"Geliştirilmiş":"Klasik";
+            if (advancedGraphics_) {
+                if (row==7) value=!activeVulkan_?
+                    (graphics_.backend==GraphicsBackend::Vulkan?"Oyunda kontrol":"GL: karakter gölgesi"):
+                    rayTracingAvailable_?"RT destekli GPU":"RT yok: raster";
+                else if (!activeVulkan_ && row!=2) value="Vulkan için";
+                else if (row==0) value=graphics_.ray_tracing?"Açık":"Kapalı";
+                else if (row==1) value=graphics_.temporal_aa?"Açık":"Kapalı";
+                else {
+                    const float setting=row==2?graphics_.shadows:row==3?graphics_.indirect_lighting:
+                                        row==4?graphics_.exposure:row==5?graphics_.render_scale:graphics_.roughness;
+                    auto& buffer=graphicsText_[row];
+                    const auto converted=std::to_chars(buffer.data(),buffer.data()+buffer.size(),setting,
+                                                       std::chars_format::fixed,2);
+                    require(converted.ec==std::errc{}, "Advanced graphics value text overflow");
+                    value={buffer.data(),std::size_t(converted.ptr-buffer.data())};
+                }
+            } else if (row==0) value=graphics_.enhanced?"Geliştirilmiş":"Klasik";
             else if (row==7) value=graphics_.fullscreen?"Açık":"Kapalı";
             else {
                 auto& buffer=graphicsText_[row];

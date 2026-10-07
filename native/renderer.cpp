@@ -1,5 +1,8 @@
 #include "renderer.hpp"
 #include "world_effects.hpp"
+#if YAMI_HAS_VULKAN
+#include "vulkan_renderer.hpp"
+#endif
 #include <epoxy/gl.h>
 #include <algorithm>
 #include <cmath>
@@ -80,6 +83,7 @@ layout(location=0) in vec3 aPosition;
 layout(location=1) in vec2 aUv;
 layout(location=2) in vec3 aNormal;
 uniform mat4 uModelView, uProjection;
+uniform mat4 uShadowModel;
 uniform mat3 uNormal;
 uniform vec4 uLight, uDiffuse, uColor, uUvTransform;
 uniform bool uLighting, uEnhanced;
@@ -87,9 +91,11 @@ out vec2 vUv;
 out vec4 vColor;
 out float vFogDepth;
 out vec3 vNormal, vEye;
+out vec3 vShadow;
 void main() {
     vec4 eye = uModelView * vec4(aPosition,1.0);
     gl_Position = uProjection * eye;
+    vShadow = (uShadowModel*vec4(aPosition,1.0)).xyz*0.5+0.5;
     vUv = aUv*uUvTransform.xy+uUvTransform.zw;
     vFogDepth = abs(eye.z);
     vNormal = uNormal*aNormal;
@@ -113,6 +119,22 @@ uniform sampler2D uTexture;
 uniform bool uTextured, uFog, uFlipVertical;
 uniform int uAlphaFunction;
 uniform float uAlphaReference;
+in vec3 vShadow;
+uniform highp sampler2D uShadow;
+uniform float uShadowStrength;
+uniform vec2 uShadowFilter;
+float visibility(float diffuse) {
+    if (uShadowStrength == 0.0 || any(lessThan(vShadow,vec3(0.0))) ||
+        any(greaterThan(vShadow,vec3(1.0)))) return 1.0;
+    float occluded = 0.0;
+    float bias = uShadowFilter.y*(1.0+2.0*(1.0-diffuse));
+    for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+        vec2 uv = vShadow.xy+vec2(float(x),float(y))*uShadowFilter.x;
+        if (all(greaterThanEqual(uv,vec2(0.0))) && all(lessThanEqual(uv,vec2(1.0))))
+            occluded += vShadow.z-bias > texture(uShadow,uv).r ? 1.0 : 0.0;
+    }
+    return 1.0-uShadowStrength*occluded/9.0;
+}
 out vec4 outColor;
 void main() {
     vec4 value = vColor;
@@ -121,7 +143,7 @@ void main() {
         vec3 light = normalize(uLight.xyz-vEye*uLight.w);
         float diffuse = max(dot(normal,light),0.0);
         float hemisphere = dot(normal,uWorldUp)*0.5+0.5;
-        value = vec4(clamp(vec3(0.416+0.08*hemisphere)+0.8*uDiffuse.rgb*diffuse,0.0,1.0),1.0);
+        value = vec4(clamp(vec3(0.416+0.08*hemisphere)+0.8*uDiffuse.rgb*diffuse*visibility(diffuse),0.0,1.0),1.0);
     }
     if (uTextured) value *= texture(uTexture,vec2(vUv.x,uFlipVertical ? 1.0-vUv.y : vUv.y));
     float a = value.a, r = uAlphaReference;
@@ -132,6 +154,34 @@ void main() {
     if (!pass) discard;
     if (uFog) value.rgb = mix(vec3(0.2),value.rgb,clamp((2000.0-vFogDepth)/1000.0,0.0,1.0));
     outColor = value;
+}
+)";
+constexpr const char* shadow_vertex_source = R"(
+layout(location=0) in vec3 aPosition;
+layout(location=1) in vec2 aUv;
+uniform mat4 uShadowModel;
+uniform vec4 uUvTransform;
+out vec2 vUv;
+void main() {
+    gl_Position = uShadowModel*vec4(aPosition,1.0);
+    vUv = aUv*uUvTransform.xy+uUvTransform.zw;
+}
+)";
+constexpr const char* shadow_fragment_source = R"(
+in vec2 vUv;
+uniform sampler2D uTexture;
+uniform bool uTextured, uFlipVertical;
+uniform float uAlpha, uAlphaReference;
+uniform int uAlphaFunction;
+void main() {
+    float a = uAlpha;
+    if (uTextured) a *= texture(uTexture,vec2(vUv.x,uFlipVertical ? 1.0-vUv.y : vUv.y)).a;
+    float r = uAlphaReference;
+    bool pass = uAlphaFunction == 0 || uAlphaFunction == 519 ||
+        (uAlphaFunction == 513 && a < r) || (uAlphaFunction == 514 && a == r) ||
+        (uAlphaFunction == 515 && a <= r) || (uAlphaFunction == 516 && a > r) ||
+        (uAlphaFunction == 517 && a != r) || (uAlphaFunction == 518 && a >= r);
+    if (!pass) discard;
 }
 )";
 constexpr const char* post_vertex_source = R"(
@@ -157,6 +207,20 @@ void main() {
     outColor = vec4(min(indices*uRampStep,vec3(65535.0))/65535.0,value.a);
 }
 )";
+}
+void ShadowBounds::include(Vec3 p) {
+    if (!valid) { min = max = p; valid = true; return; }
+    min = {std::min(min.x,p.x),std::min(min.y,p.y),std::min(min.z,p.z)};
+    max = {std::max(max.x,p.x),std::max(max.y,p.y),std::max(max.z,p.z)};
+}
+void ShadowBounds::include(const ShadowBounds& bounds) {
+    if (bounds.valid) { include(bounds.min); include(bounds.max); }
+}
+ShadowBounds ShadowBounds::transformed(const Mat4& matrix) const {
+    ShadowBounds result;
+    if (valid) for (int n=0; n<8; ++n)
+        result.include(transform_point(matrix,{n&1 ? max.x : min.x,n&2 ? max.y : min.y,n&4 ? max.z : min.z}));
+    return result;
 }
 
 Viewport fit_original_interface(int width, int height) {
@@ -187,9 +251,17 @@ Mat4 interface_projection() {
     m.values[12] = m.values[13] = -1;
     return m;
 }
-Renderer::Renderer(const DisplayOptions& options) {
+Renderer::Renderer(const DisplayOptions& options) : desired_(options), gles_(options.gles) {
     if (options.width <= 0 || options.height <= 0 || !valid_graphics(options))
         throw std::runtime_error("Invalid display options");
+    if (options.backend == GraphicsBackend::Vulkan) {
+#if YAMI_HAS_VULKAN
+        vulkan_ = std::make_unique<VulkanRenderer>(options);
+        return;
+#else
+        throw std::runtime_error("This build has no Vulkan support. Select OpenGL in the launcher.");
+#endif
+    }
     effects_ = {options.ambient_occlusion, options.reflections, options.bloom, options.sharpen};
     enhanced_ = options.enhanced;
     try {
@@ -217,6 +289,13 @@ Renderer::Renderer(const DisplayOptions& options) {
         sdl_check(SDL_GL_SetSwapInterval(1));
         const std::string prefix = options.gles ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
         program_ = create_program(prefix+vertex_source, prefix+fragment_source);
+        shadow_program_ = create_program(prefix+shadow_vertex_source, prefix+shadow_fragment_source);
+        constexpr const char* shadow_names[] = {"uShadowModel", "uUvTransform", "uAlpha",
+            "uAlphaFunction", "uAlphaReference", "uTextured", "uFlipVertical"};
+        glUseProgram(shadow_program_);
+        for (std::size_t n=0; n<shadow_uniforms_.size(); ++n)
+            shadow_uniforms_[n] = glGetUniformLocation(shadow_program_,shadow_names[n]);
+        glUniform1i(glGetUniformLocation(shadow_program_,"uTexture"),0);
         post_program_ = create_program(prefix+post_vertex_source, prefix+post_fragment_source);
         brightness_uniform_ = glGetUniformLocation(post_program_, "uRampStep");
         copy_uniform_ = glGetUniformLocation(post_program_, "uCopy");
@@ -251,8 +330,31 @@ Renderer::Renderer(const DisplayOptions& options) {
             if (uniforms_[n] == -1) throw std::runtime_error(std::string("Inactive shader uniform: ")+names[n]);
         }
         glUniform1i(glGetUniformLocation(program_, "uTexture"), 0);
+        shadow_model_uniform_ = glGetUniformLocation(program_,"uShadowModel");
+        shadow_strength_uniform_ = glGetUniformLocation(program_,"uShadowStrength");
+        shadow_filter_uniform_ = glGetUniformLocation(program_,"uShadowFilter");
+        glUniform1i(glGetUniformLocation(program_,"uShadow"),2);
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size_);
+        shadow_size_ = std::min(2048,max_texture_size_);
+        glGenTextures(1,&shadow_texture_);
+        glBindTexture(GL_TEXTURE_2D,shadow_texture_);
+        glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,shadow_size_,shadow_size_,0,
+                     GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1,&shadow_framebuffer_);
+        glBindFramebuffer(GL_FRAMEBUFFER,shadow_framebuffer_);
+        glFramebufferTexture2D(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadow_texture_,0);
+        constexpr unsigned no_color = GL_NONE;
+        glDrawBuffers(1,&no_color);
+        glReadBuffer(GL_NONE);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            throw std::runtime_error("Incomplete character shadow framebuffer");
+        glBindFramebuffer(GL_FRAMEBUFFER,0);
+        glBindTexture(GL_TEXTURE_2D,0);
         glGetIntegerv(GL_MAX_SAMPLES, &max_samples_);
         if (!epoxy_is_desktop_gl() || epoxy_gl_version() >= 42 ||
             epoxy_has_gl_extension("GL_ARB_internalformat_query")) {
@@ -288,6 +390,9 @@ void Renderer::cleanup() noexcept {
         if (program_) glDeleteProgram(program_);
         if (post_program_) glDeleteProgram(post_program_);
         if (effect_program_) glDeleteProgram(effect_program_);
+        if (shadow_program_) glDeleteProgram(shadow_program_);
+        glDeleteFramebuffers(1,&shadow_framebuffer_);
+        glDeleteTextures(1,&shadow_texture_);
         glDeleteVertexArrays(1, &post_vao_);
         glDeleteFramebuffers(1, &draw_framebuffer_);
         glDeleteFramebuffers(1, &resolve_framebuffer_);
@@ -303,8 +408,194 @@ void Renderer::cleanup() noexcept {
     if (window_) { SDL_DestroyWindow(window_); window_ = nullptr; }
 }
 Renderer::~Renderer() { cleanup(); }
+SDL_Window* Renderer::window() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->window();
+#endif
+    return window_;
+}
+int Renderer::pixel_width() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->pixel_width();
+#endif
+    return width_;
+}
+int Renderer::pixel_height() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->pixel_height();
+#endif
+    return height_;
+}
+int Renderer::samples() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->samples();
+#endif
+    return samples_;
+}
+float Renderer::anisotropy() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->anisotropy();
+#endif
+    return anisotropy_;
+}
+int Renderer::max_samples() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->max_samples();
+#endif
+    return max_samples_;
+}
+float Renderer::max_anisotropy() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->max_anisotropy();
+#endif
+    return max_anisotropy_;
+}
+const char* Renderer::backend_name() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->backend_name();
+#endif
+    return gles_ ? "OpenGL ES" : "OpenGL";
+}
+bool Renderer::ray_tracing_available() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->ray_tracing_available();
+#endif
+    return false;
+}
+void Renderer::reset_history() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) vulkan_->reset_history();
+#endif
+    shadow_valid_ = false;
+}
+bool Renderer::shadow_enabled() const noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return false;
+#endif
+    return enhanced_ && desired_.shadows > 0;
+}
+bool Renderer::shadow_caster_visible(const ShadowBounds& bounds) const {
+    if (!bounds.valid || !world_camera_) return false;
+    // Keep one map useful near gameplay; far/offscreen level actors cannot
+    // steal texels. Sweep downhill as well so nearby offscreen casters remain.
+    auto swept = bounds;
+    swept.include(Vec3{bounds.min.x-1000,bounds.min.y-2000,bounds.min.z-600});
+    const auto eye = swept.transformed(view_);
+    if (eye.min.z > -1 || eye.max.z < -6000) return false;
+    const float depth = std::max(1.f,-eye.min.z);
+    return eye.min.x*projection_.values[0] <= 2*depth &&
+           eye.max.x*projection_.values[0] >= -2*depth &&
+           eye.min.y*projection_.values[5] <= 2*depth &&
+           eye.max.y*projection_.values[5] >= -2*depth;
+}
+bool Renderer::begin_shadows(const ShadowBounds& casters, const ShadowBounds& receivers) {
+    shadow_valid_ = false;
+    if (!shadow_enabled() || !casters.valid) return false;
+    if (shadow_pass_) throw std::runtime_error("Nested character shadow pass");
+    Mat4 basis = identity_matrix();
+    const float length = std::sqrt(1.34f), side = std::sqrt(.34f);
+    const Vec3 right{.3f/side,0,-.5f/side}, light{.5f/length,1/length,.3f/length};
+    const Vec3 up{light.y*right.z,light.z*right.x-light.x*right.z,-light.y*right.x};
+    // Look downhill from the same directional light as the forward pass.
+    auto& b = basis.values;
+    b[0]=right.x; b[4]=right.y; b[8]=right.z;
+    b[1]=up.x; b[5]=up.y; b[9]=up.z;
+    b[2]=-light.x; b[6]=-light.y; b[10]=-light.z;
+    const auto fit = casters.transformed(basis);
+    auto depth = fit;
+    depth.include(receivers.transformed(basis));
+    // Quantize extent and center in light-space texels, not camera-space.
+    const float extent = std::ceil(std::max({64.f,fit.max.x-fit.min.x,fit.max.y-fit.min.y})*1.04f/32)*32;
+    const float texel = extent/shadow_size_;
+    const float center_x = std::floor((fit.min.x+fit.max.x)*.5f/texel)*texel;
+    const float center_y = std::floor((fit.min.y+fit.max.y)*.5f/texel)*texel;
+    const float near_depth = depth.min.z-16, range = std::max(32.f,depth.max.z-depth.min.z+32);
+    Mat4 projection = identity_matrix();
+    projection.values[0]=projection.values[5]=2/extent;
+    projection.values[10]=2/range;
+    projection.values[12]=-2*center_x/extent;
+    projection.values[13]=-2*center_y/extent;
+    projection.values[14]=-1-2*near_depth/range;
+    shadow_matrix_ = multiply(projection,basis);
+    shadow_bias_ = std::max(2.f/16777215,std::clamp(texel*.3f,.03f,.75f)/range);
+    constexpr unsigned capabilities[] = {GL_DEPTH_TEST,GL_CULL_FACE,GL_BLEND,GL_SCISSOR_TEST,GL_POLYGON_OFFSET_FILL};
+    auto& saved = shadow_state_;
+    for (std::size_t n=0;n<saved.enabled.size();++n) saved.enabled[n]=glIsEnabled(capabilities[n]);
+    glGetIntegerv(GL_VIEWPORT,saved.viewport.data());
+    glGetIntegerv(GL_SCISSOR_BOX,saved.scissor.data());
+    glGetBooleanv(GL_COLOR_WRITEMASK,saved.color_mask.data());
+    GLboolean depth_mask;
+    glGetBooleanv(GL_DEPTH_WRITEMASK,&depth_mask); saved.depth_mask=depth_mask;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&saved.read_framebuffer);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&saved.draw_framebuffer);
+    glGetIntegerv(GL_CURRENT_PROGRAM,&saved.program);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING,&saved.vao);
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&saved.active_texture);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,&saved.texture);
+    glActiveTexture(GL_TEXTURE2);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,&saved.shadow_texture);
+    glBindTexture(GL_TEXTURE_2D,0);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_DEPTH_FUNC,&saved.depth_function);
+    glGetIntegerv(GL_CULL_FACE_MODE,&saved.cull_face);
+    glGetIntegerv(GL_FRONT_FACE,&saved.front_face);
+    glGetIntegerv(GL_BLEND_SRC_RGB,&saved.blend_source);
+    glGetIntegerv(GL_BLEND_DST_RGB,&saved.blend_destination);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA,&saved.blend_source_alpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA,&saved.blend_destination_alpha);
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR,&saved.polygon_factor);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS,&saved.polygon_units);
+    glBindFramebuffer(GL_FRAMEBUFFER,shadow_framebuffer_);
+    glUseProgram(shadow_program_);
+    glViewport(0,0,shadow_size_,shadow_size_);
+    glDisable(GL_SCISSOR_TEST);
+    glDepthMask(GL_TRUE);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    shadow_pass_=true; shadow_drawn_=false;
+    return true;
+}
+void Renderer::end_shadows() {
+    if (!shadow_pass_) return;
+    auto& saved = shadow_state_;
+    constexpr unsigned capabilities[] = {GL_DEPTH_TEST,GL_CULL_FACE,GL_BLEND,GL_SCISSOR_TEST,GL_POLYGON_OFFSET_FILL};
+    for (std::size_t n=0;n<saved.enabled.size();++n)
+        if (saved.enabled[n]) glEnable(capabilities[n]); else glDisable(capabilities[n]);
+    glDepthFunc(saved.depth_function);
+    glDepthMask(saved.depth_mask);
+    glColorMask(saved.color_mask[0],saved.color_mask[1],saved.color_mask[2],saved.color_mask[3]);
+    glCullFace(saved.cull_face);
+    glFrontFace(saved.front_face);
+    glBlendFuncSeparate(saved.blend_source,saved.blend_destination,
+                        saved.blend_source_alpha,saved.blend_destination_alpha);
+    glPolygonOffset(saved.polygon_factor,saved.polygon_units);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER,saved.read_framebuffer);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER,saved.draw_framebuffer);
+    glViewport(saved.viewport[0],saved.viewport[1],saved.viewport[2],saved.viewport[3]);
+    glScissor(saved.scissor[0],saved.scissor[1],saved.scissor[2],saved.scissor[3]);
+    glUseProgram(saved.program);
+    glBindVertexArray(saved.vao);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D,saved.shadow_texture);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D,saved.texture);
+    glActiveTexture(saved.active_texture);
+    shadow_pass_=false; shadow_valid_=shadow_drawn_;
+    model_valid_=normal_valid_=false;
+    gl_check("Character shadow pass");
+}
+void Renderer::set_brightness(std::uint16_t ramp) noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->set_brightness(ramp); return; }
+#endif
+    brightness_step_ = unsigned(ramp)+128;
+}
 GraphicsSettings Renderer::graphics_settings() const noexcept {
-    GraphicsSettings settings;
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->graphics_settings();
+#endif
+    GraphicsSettings settings = desired_;
+    settings.backend = GraphicsBackend::OpenGL;
     settings.samples = samples_;
     settings.anisotropy = anisotropy_;
     settings.enhanced = enhanced_;
@@ -317,6 +608,10 @@ GraphicsSettings Renderer::graphics_settings() const noexcept {
 }
 void Renderer::set_graphics(const GraphicsSettings& settings) {
     if (!valid_graphics(settings)) throw std::runtime_error("Invalid graphics settings");
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->set_graphics(settings); return; }
+#endif
+    desired_ = settings;
     const int samples = std::min(settings.samples, max_samples_);
     const float anisotropy = std::min(settings.anisotropy, max_anisotropy_);
     if (settings.fullscreen != ((SDL_GetWindowFlags(window_) & SDL_WINDOW_FULLSCREEN) != 0))
@@ -346,9 +641,13 @@ void Renderer::set_graphics(const GraphicsSettings& settings) {
     enhanced_ = settings.enhanced;
     effects_ = {settings.ambient_occlusion, settings.reflections, settings.bloom, settings.sharpen};
     model_valid_ = normal_valid_ = false;
+    shadow_valid_ = false;
     gl_check("Graphics settings");
 }
 void Renderer::resize() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->resize(); return; }
+#endif
     int width, height;
     sdl_check(SDL_GetWindowSizeInPixels(window_, &width, &height));
     if (width == width_ && height == height_) return;
@@ -429,19 +728,28 @@ void Renderer::allocate_targets(bool resizeTextures) {
     gl_check("Framebuffer resize");
 }
 void Renderer::clear() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->clear(); return; }
+#endif
     glBindFramebuffer(GL_FRAMEBUFFER, draw_framebuffer_);
     glUseProgram(program_);
     frame_finished_ = false;
     world_finished_ = false;
     world_camera_ = false;
+    shadow_valid_ = false;
+    glUniform1f(shadow_strength_uniform_,0);
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }
 void Renderer::camera(const Mat4& view, const Mat4& projection, bool interface) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->camera(view, projection, interface); return; }
+#endif
     if (view_.values != view.values) model_valid_ = normal_valid_ = false;
     view_ = view;
+    projection_ = projection;
     const auto& p = projection.values;
     world_camera_ = !interface && p[11] == -1 && p[15] == 0 && p[0] != 0 && p[5] != 0;
     if (enhanced_ && world_camera_) {
@@ -466,6 +774,9 @@ void Renderer::camera(const Mat4& view, const Mat4& projection, bool interface) 
     glUniform4fv(uniforms_[3], 1, light_.data());
 }
 void Renderer::hud_camera() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->hud_camera(); return; }
+#endif
     auto projection = interface_projection();
     if (static_cast<std::int64_t>(width_)*3 < static_cast<std::int64_t>(height_)*4) {
         camera(identity_matrix(), projection, true);
@@ -475,6 +786,9 @@ void Renderer::hud_camera() {
     }
 }
 void Renderer::finish_world() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->finish_world(); return; }
+#endif
     if (!enhanced_ || !world_camera_ || world_finished_ ||
         std::all_of(effects_.begin(), effects_.end(), [](float strength) { return strength == 0; })) return;
     // Preserve scene state across both fullscreen draws; their shaders never
@@ -536,6 +850,9 @@ void Renderer::finish_world() {
     gl_check("World composition");
 }
 unsigned Renderer::upload_mesh(std::span<const Vertex> vertices, std::span<const std::uint16_t> indices) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->upload_mesh(vertices, indices);
+#endif
     if (vertices.empty() || indices.empty() || indices.size()%3 ||
         indices.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         throw std::runtime_error("Invalid triangle mesh");
@@ -569,6 +886,9 @@ unsigned Renderer::upload_mesh(std::span<const Vertex> vertices, std::span<const
     return id;
 }
 void Renderer::release_mesh(unsigned id) noexcept {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->release_mesh(id); return; }
+#endif
     if (!id || id > meshes_.size() || !meshes_[id-1].vao) return;
     auto& mesh = meshes_[id-1];
     glDeleteVertexArrays(1, &mesh.vao);
@@ -578,6 +898,9 @@ void Renderer::release_mesh(unsigned id) noexcept {
     free_mesh_ = id;
 }
 void Renderer::update_mesh(unsigned id, std::span<const Vertex> vertices) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->update_mesh(id, vertices); return; }
+#endif
     if (!id || id > meshes_.size() || vertices.size() != meshes_[id-1].vertex_count)
         throw std::runtime_error("Invalid animated mesh update");
     glBindBuffer(GL_ARRAY_BUFFER, meshes_[id-1].vertices);
@@ -585,6 +908,9 @@ void Renderer::update_mesh(unsigned id, std::span<const Vertex> vertices) {
 }
 unsigned Renderer::upload_texture(int width, int height, std::span<const std::uint8_t> rgba,
                                   bool mipmaps, bool flip_vertical) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->upload_texture(width, height, rgba, mipmaps, flip_vertical);
+#endif
     if (width <= 0 || height <= 0 || width > max_texture_size_ || height > max_texture_size_ ||
         rgba.size() != static_cast<std::size_t>(width)*height*4)
         throw std::runtime_error("Invalid texture dimensions or RGBA byte count");
@@ -605,6 +931,9 @@ unsigned Renderer::upload_texture(int width, int height, std::span<const std::ui
 }
 void Renderer::update_texture(unsigned id, int width, int height,
                               std::span<const std::uint8_t> rgba, int x, int y) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->update_texture(id, width, height, rgba, x, y); return; }
+#endif
     if (!id || id > textures_.size()) throw std::runtime_error("Unknown texture");
     const auto& texture = textures_[id-1];
     if (width <= 0 || height <= 0 || x < 0 || y < 0 ||
@@ -618,8 +947,13 @@ void Renderer::update_texture(unsigned id, int width, int height,
 }
 void Renderer::draw(unsigned id, unsigned texture, const Material& material, const MaterialPass& pass,
                     const DrawState& state) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->draw(id, texture, material, pass, state); return; }
+#endif
     if (!id || id > meshes_.size() || !meshes_[id-1].vao || texture > textures_.size())
         throw std::runtime_error("Unknown mesh or texture");
+    if (shadow_pass_ && (!state.ray_geometry || !state.ray_primary || pass.blend ||
+                        !pass.depth_write || pass.video)) return;
     const auto enabled = [](unsigned capability, bool value) { if (value) glEnable(capability); else glDisable(capability); };
     enabled(GL_CULL_FACE, material.cull);
     if (material.cull) glCullFace(material.cull_face);
@@ -632,6 +966,32 @@ void Renderer::draw(unsigned id, unsigned texture, const Material& material, con
     if (pass.depth_test) glDepthFunc(pass.depth_function);
     glDepthMask(pass.depth_write);
     glColorMask(pass.color_write[0], pass.color_write[1], pass.color_write[2], pass.color_write[3]);
+    if (shadow_pass_) {
+        const auto matrix = multiply(shadow_matrix_,state.model);
+        glUniformMatrix4fv(shadow_uniforms_[0],1,GL_FALSE,matrix.values.data());
+        glUniform4fv(shadow_uniforms_[1],1,state.uv_transform.data());
+        glUniform1f(shadow_uniforms_[2],state.lighting ? 1.f : state.color[3]);
+        glUniform1i(shadow_uniforms_[3],pass.alpha_test ? pass.alpha_function : 0);
+        glUniform1f(shadow_uniforms_[4],std::clamp(pass.alpha_reference,0.f,1.f));
+        glUniform1i(shadow_uniforms_[5],texture != 0);
+        if (texture) glUniform1i(shadow_uniforms_[6],textures_[texture-1].flip_vertical);
+        glBindTexture(GL_TEXTURE_2D,texture ? textures_[texture-1].id : 0);
+        glBindVertexArray(meshes_[id-1].vao);
+        glDrawElements(GL_TRIANGLES,static_cast<int>(meshes_[id-1].index_count),GL_UNSIGNED_SHORT,nullptr);
+        shadow_drawn_ = true;
+        return;
+    }
+    const bool receiver = shadow_valid_ && shadow_enabled() && world_camera_ && state.lighting &&
+        state.ray_geometry && state.ray_primary && !pass.blend && pass.depth_write && !pass.video;
+    glUniform1f(shadow_strength_uniform_,receiver ? desired_.shadows : 0);
+    if (receiver) {
+        const auto matrix = multiply(shadow_matrix_,state.model);
+        glUniformMatrix4fv(shadow_model_uniform_,1,GL_FALSE,matrix.values.data());
+        glUniform2f(shadow_filter_uniform_,1.f/shadow_size_,shadow_bias_);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D,shadow_texture_);
+        glActiveTexture(GL_TEXTURE0);
+    }
     if (!model_valid_ || last_model_.values != state.model.values) {
         last_model_ = state.model;
         last_model_view_ = multiply(view_, state.model);
@@ -682,8 +1042,16 @@ void Renderer::finish_frame() {
     frame_finished_ = true;
     gl_check("Frame composition");
 }
-void Renderer::present() { finish_frame(); sdl_check(SDL_GL_SwapWindow(window_)); }
+void Renderer::present() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->present(); return; }
+#endif
+    finish_frame(); sdl_check(SDL_GL_SwapWindow(window_));
+}
 std::vector<std::uint8_t> Renderer::capture_rgba() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->capture_rgba();
+#endif
     finish_frame();
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(width_)*height_*4);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);

@@ -67,11 +67,18 @@ void check_graphics(Menu& menu) {
     auto settings=menu.settings();
     settings.brightness=1.25f; settings.sensitivity=63;
     settings.graphics={};
+    settings.graphics.backend=yami::GraphicsBackend::Vulkan;
+    settings.graphics.ray_tracing=false; settings.graphics.temporal_aa=false;
+    settings.graphics.shadows=.713f; settings.graphics.indirect_lighting=.413f;
+    settings.graphics.exposure=1.713f; settings.graphics.render_scale=.713f;
+    settings.graphics.roughness=.613f;
     settings.graphics.ambient_occlusion=.973f;
     settings.graphics.reflections=.237f;
     settings.graphics.bloom=.113f;
     settings.graphics.sharpen=.187f;
     menu.set_settings(settings); menu.clear_commands();
+    assert(menu.settings().graphics==settings.graphics);
+    assert(menu.settings_effect().values.graphics==settings.graphics);
     const auto original=menu.settings();
     const auto plus=graphics_button(menu,"Ortam gölgesi",true);
     const auto rect=menu.pages()[3].buttons[plus].rect;
@@ -104,15 +111,33 @@ void check_graphics(Menu& menu) {
     const auto effects=menu.settings().graphics;
     assert(near(effects.ambient_occlusion,.05f) && near(effects.reflections,.05f));
     assert(near(effects.bloom,.05f) && near(effects.sharpen,.05f));
+    auto retained=original.graphics;
+    retained.ambient_occlusion=effects.ambient_occlusion; retained.reflections=effects.reflections;
+    retained.bloom=effects.bloom; retained.sharpen=effects.sharpen;
+    assert(effects==retained);
     assert(near(menu.settings().brightness,original.brightness));
     assert(near(menu.settings().sensitivity,original.sensitivity));
     for (const auto name:{"Işıklandırma","Tam ekran"}) {
+        auto expected=menu.settings().graphics;
+        if (name==std::string_view("Işıklandırma")) expected.enhanced=false;
+        else expected.fullscreen=false;
         menu.clear_commands(); click_button(menu,graphics_button(menu,name,false));
         assert(name==std::string_view("Işıklandırma") ? !menu.settings().graphics.enhanced :
                                                      !menu.settings().graphics.fullscreen);
+        assert(menu.settings().graphics==expected);
+        if (name==std::string_view("Işıklandırma")) {
+            changed_graphics(menu);
+            const auto apply=std::find_if(menu.commands().begin(),menu.commands().end(),[](const Command& c) {
+                return c.kind==CommandKind::ApplySettings;
+            });
+            assert(apply->settings.values.graphics==expected);
+        }
         menu.clear_commands(); click_button(menu,graphics_button(menu,name,false));
         assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
+        if (name==std::string_view("Işıklandırma")) expected.enhanced=true;
+        else expected.fullscreen=true;
         menu.clear_commands(); click_button(menu,graphics_button(menu,name,true)); changed_graphics(menu);
+        assert(menu.settings().graphics==expected);
         menu.clear_commands(); click_button(menu,graphics_button(menu,name,true));
         assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
     }
@@ -140,6 +165,15 @@ void check_graphics(Menu& menu) {
         menu.clear_commands(); click_button(menu,graphics_button(menu,"Doku filtresi",true));
         assert(menu.settings().graphics.anisotropy==filtering); changed_graphics(menu);
     }
+    menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
+    menu.set_graphics_device(false,false);
+    menu.clear_commands(); click_button(menu,32);
+    const auto beforeShadow=menu.settings().graphics;
+    menu.clear_commands(); click_button(menu,21); // Existing advanced shadow increase index.
+    auto afterShadow=beforeShadow; afterShadow.shadows+=.05f;
+    assert(menu.settings().graphics==afterShadow && !afterShadow.ray_tracing);
+    changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,32);
     std::ostringstream output; write_settings(output,menu.settings());
     std::istringstream input(output.str()); const auto restored=read_settings(input);
     assert(restored.graphics==menu.settings().graphics);
@@ -148,6 +182,22 @@ void check_graphics(Menu& menu) {
                              "efektses=50.000000\nhedefleme=otomatik\n";
     std::istringstream old(legacy);
     const auto legacySettings=read_settings(old);
+    const yami::GraphicsSettings defaults;
+    assert(defaults.backend==yami::GraphicsBackend::OpenGL);
+    assert(defaults.ray_tracing && defaults.temporal_aa);
+    assert(near(defaults.shadows,.75f) && near(defaults.indirect_lighting,.35f));
+    assert(near(defaults.exposure,1) && near(defaults.render_scale,1) && near(defaults.roughness,.85f));
+    assert(legacySettings.graphics==defaults);
+    for (const auto backend:{yami::GraphicsBackend::OpenGL,yami::GraphicsBackend::Vulkan}) {
+        auto selected=restored; selected.graphics.backend=backend;
+        selected.graphics.ray_tracing=true; selected.graphics.temporal_aa=true;
+        std::ostringstream saved; write_settings(saved,selected);
+        std::istringstream loaded(saved.str());
+        assert(read_settings(loaded).graphics==selected.graphics);
+        menu.set_settings(selected);
+        assert(menu.settings().graphics==selected.graphics);
+    }
+    menu.set_settings(restored);
     std::ostringstream prefix; write_settings(prefix,legacySettings);
     assert(prefix.str().starts_with(legacy));
     for (const auto extension:{"grafik_ao=nan\n","grafik_ao=1.01\n","grafik_ao=-.01\n",
@@ -156,12 +206,70 @@ void check_graphics(Menu& menu) {
                               "grafik_anizotropi=inf\n","grafik_tamekran=2\n",
                               "grafik_gelistirilmis=true\n","grafik_yansima=\n",
                               "grafik_ao=.5\n grafık_ao=.3\n","grafik_ao=.5\ngrafik_ao=.3\n",
-                              "grafik_bilinmeyen=1\n","grafik_parlama=.2junk\n"}) {
+                              "grafik_bilinmeyen=1\n","grafik_parlama=.2junk\n",
+                              "grafik_backend=\n","grafik_backend=Vulkan\n","grafik_backend=metal\n",
+                              "grafik_backend=opengl\ngrafik_backend=vulkan\n",
+                              "grafik_rt=2\n","grafik_rt=-1\n","grafik_rt=true\n","grafik_rt=\n",
+                              "grafik_taa=2\n","grafik_taa=-1\n","grafik_taa=true\n","grafik_taa=\n",
+                              "grafik_rt=0\ngrafik_rt=1\n","grafik_taa=0\ngrafik_taa=1\n"}) {
         std::istringstream malformed(legacy+extension);
         bool rejected=false;
         try { (void)read_settings(malformed); } catch (const std::exception&) { rejected=true; }
         assert(rejected);
     }
+    struct FloatSetting {
+        const char* key;
+        float yami::GraphicsSettings::*field;
+        float minimum,maximum;
+    };
+    for (const auto setting:{
+        FloatSetting{"grafik_golge",&yami::GraphicsSettings::shadows,0,1},
+        FloatSetting{"grafik_gi",&yami::GraphicsSettings::indirect_lighting,0,1},
+        FloatSetting{"grafik_pozlama",&yami::GraphicsSettings::exposure,.1f,4},
+        FloatSetting{"grafik_olcek",&yami::GraphicsSettings::render_scale,.5f,1},
+        FloatSetting{"grafik_puruz",&yami::GraphicsSettings::roughness,.05f,1}}) {
+        for (const float boundary:{setting.minimum,setting.maximum}) {
+            std::ostringstream extension; extension<<setting.key<<'='<<boundary<<'\n';
+            std::istringstream input(legacy+extension.str());
+            const auto parsed=read_settings(input);
+            assert(parsed.graphics.*setting.field==boundary);
+            std::ostringstream saved; write_settings(saved,parsed);
+            std::istringstream loaded(saved.str());
+            assert(read_settings(loaded).graphics==parsed.graphics);
+        }
+        for (const auto value:{"","nan","inf","-inf","0,5","1junk","1e1000"}) {
+            std::istringstream input(legacy+setting.key+"="+value+"\n");
+            bool rejected=false;
+            try { (void)read_settings(input); } catch (const std::exception&) { rejected=true; }
+            assert(rejected);
+        }
+        for (const float value:{setting.minimum-.01f,setting.maximum+.01f,
+                              std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::infinity(),
+                              -std::numeric_limits<float>::infinity()}) {
+            std::ostringstream extension; extension<<setting.key<<'='<<value<<'\n';
+            std::istringstream input(legacy+extension.str());
+            bool rejected=false;
+            try { (void)read_settings(input); } catch (const std::exception&) { rejected=true; }
+            assert(rejected);
+            auto invalid=restored; invalid.graphics.*setting.field=value;
+            std::ostringstream output; rejected=false;
+            try { write_settings(output,invalid); } catch (const std::exception&) { rejected=true; }
+            assert(rejected);
+        }
+        std::ostringstream duplicate;
+        duplicate<<setting.key<<'='<<setting.maximum<<'\n'<<setting.key<<'='<<setting.maximum<<'\n';
+        std::istringstream input(legacy+duplicate.str());
+        bool rejected=false;
+        try { (void)read_settings(input); } catch (const std::exception&) { rejected=true; }
+        assert(rejected);
+    }
+    auto invalidBackend=restored;
+    invalidBackend.graphics.backend=static_cast<yami::GraphicsBackend>(-1);
+    std::ostringstream invalidOutput;
+    bool rejected=false;
+    try { write_settings(invalidOutput,invalidBackend); } catch (const std::exception&) { rejected=true; }
+    assert(rejected);
     settings=menu.settings();
     settings.graphics.anisotropy=std::numeric_limits<float>::max();
     settings.graphics.reflections=.237123f;
@@ -196,6 +304,11 @@ void check_settings_file() {
     } cleanup{directory};
     const auto path=directory/fs::path(u8"ayarlar-ş.ini");
     Settings first; first.graphics.samples=0; first.graphics.ambient_occlusion=.37123f;
+    first.graphics.backend=yami::GraphicsBackend::Vulkan;
+    first.graphics.ray_tracing=false; first.graphics.temporal_aa=false;
+    first.graphics.shadows=.71234f; first.graphics.indirect_lighting=.41234f;
+    first.graphics.exposure=1.71234f; first.graphics.render_scale=.71234f;
+    first.graphics.roughness=.61234f;
     save_settings(path,first);
     auto second=first; second.graphics.samples=4; second.graphics.fullscreen=true;
     save_settings(path,second); // Existing files must be replaced, including Windows.
@@ -203,12 +316,16 @@ void check_settings_file() {
         std::ifstream file(path); const auto restored=read_settings(file);
         assert(restored.graphics==second.graphics);
     }
-    auto invalid=second; invalid.graphics.bloom=std::numeric_limits<float>::quiet_NaN();
-    bool rejected=false;
-    try { save_settings(path,invalid); } catch (const std::exception&) { rejected=true; }
-    assert(rejected);
-    std::ifstream unchanged(path);
-    assert(read_settings(unchanged).graphics==second.graphics);
+    for (const auto field:{&yami::GraphicsSettings::bloom,&yami::GraphicsSettings::shadows,
+                          &yami::GraphicsSettings::indirect_lighting,&yami::GraphicsSettings::exposure,
+                          &yami::GraphicsSettings::render_scale,&yami::GraphicsSettings::roughness}) {
+        auto invalid=second; invalid.graphics.*field=std::numeric_limits<float>::quiet_NaN();
+        bool rejected=false;
+        try { save_settings(path,invalid); } catch (const std::exception&) { rejected=true; }
+        assert(rejected);
+        std::ifstream unchanged(path);
+        assert(read_settings(unchanged).graphics==second.graphics);
+    }
     for (const auto& entry:fs::directory_iterator(directory))
         assert(entry.path()==path); // Failed writes cannot leave temporary files behind.
 }

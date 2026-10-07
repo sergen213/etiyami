@@ -139,6 +139,8 @@ public:
     Settings settings() const noexcept;
     void set_graphics_limits(int maxSamples, float maxAnisotropy);
     void set_fullscreen(bool); // F11 already applies SDL/renderer; persist actual state only.
+    void set_launcher_backend(GraphicsBackend); // Desired backend only; launcher owns selection.
+    void set_graphics_device(bool vulkan, bool rayTracing) noexcept;
     SettingsEffect settings_effect() const noexcept;
     void update(const Input&, const Context&);
     // Reuses capacity; returned views live until subsequent mutation. Material
@@ -158,6 +160,8 @@ private:
     unsigned saveFrames_ = 0;
     std::array<std::size_t,24> activeCounts_{};
     bool previousLeft_ = false, gameStarted_ = false;
+    bool advancedGraphics_ = false;
+    bool activeVulkan_ = false, rayTracingAvailable_ = false;
     bool originalSettingsDirty_ = false;
     std::array<char, 32> scoreText_{};
     std::array<char, 64> jumpText_{};

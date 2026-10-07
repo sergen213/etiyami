@@ -12,6 +12,7 @@ struct MeshResource {
     Mesh mesh;
     std::vector<Animation> animations;
     unsigned static_gpu = 0;
+    ShadowBounds static_bounds;
 };
 struct MaterialResource { Material material; std::vector<unsigned> textures; };
 struct ModelResource {
@@ -26,11 +27,14 @@ public:
     ModelInstance(const ModelInstance&) = delete;
     ModelInstance& operator=(const ModelInstance&) = delete;
     const ModelResource& resource() const noexcept { return model_; }
+    ShadowBounds bounds(const Mat4&) const;
     struct Part {
         unsigned gpu = 0;
         bool owned = false;
         std::size_t animation = static_cast<std::size_t>(-1), frame = static_cast<std::size_t>(-1);
         SkinningState skin;
+        ShadowBounds bounds;
+        std::size_t primary_pass = static_cast<std::size_t>(-1);
     };
     std::vector<Part> parts;
 private:
@@ -46,6 +50,8 @@ public:
     ModelResource& model(std::string_view descriptor); // game-relative model.dat path
     MaterialResource& material(std::string_view name); // data/materials/<name>.dat
     unsigned image(std::string_view filename); // original missing-image white semantics
+    void prepare(ModelInstance&, std::size_t animation, std::uint32_t elapsed);
+    void draw_shadow(ModelInstance&, DrawState);
     void draw(ModelInstance&, DrawState, std::size_t animation, std::uint32_t elapsed,
               std::uint32_t wall_clock);
     void draw_ui(std::span<const menu::Draw>, std::uint32_t wall_clock);

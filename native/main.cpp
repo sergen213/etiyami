@@ -49,7 +49,8 @@ struct SdlLifetime {
     ~SdlLifetime() { SDL_Quit(); }
 };
 enum GraphicsOption { Msaa, Filtering, Occlusion, Reflections, Bloom, Sharpen,
-                      EnhancedLighting, Fullscreen, GraphicsOptionCount };
+                      EnhancedLighting, Fullscreen, Backend, RayTracing, TemporalAA,
+                      Shadows, IndirectLighting, Exposure, RenderScale, Roughness, GraphicsOptionCount };
 struct Options {
     DisplayOptions display;
     fs::path assets, saves, capture;
@@ -93,6 +94,23 @@ Options options(int argc, char** argv) {
         else if (name == "--reflections") { result.display.reflections = number<float>(value(), name); result.graphicsOverrides[Reflections] = true; }
         else if (name == "--bloom") { result.display.bloom = number<float>(value(), name); result.graphicsOverrides[Bloom] = true; }
         else if (name == "--sharpen") { result.display.sharpen = number<float>(value(), name); result.graphicsOverrides[Sharpen] = true; }
+        else if (name == "--renderer") {
+            const auto backend=value();
+            require(backend=="opengl" || backend=="vulkan", "Renderer must be opengl or vulkan");
+            result.display.backend=backend=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
+            result.graphicsOverrides[Backend]=true;
+        }
+        else if (name == "--ray-tracing" || name == "--taa") {
+            const auto enabled=value();
+            require(enabled=="on" || enabled=="off", "Graphics boolean must be on or off");
+            (name=="--taa"?result.display.temporal_aa:result.display.ray_tracing)=enabled=="on";
+            result.graphicsOverrides[name=="--taa"?TemporalAA:RayTracing]=true;
+        }
+        else if (name == "--shadows") { result.display.shadows=number<float>(value(),name); result.graphicsOverrides[Shadows]=true; }
+        else if (name == "--gi") { result.display.indirect_lighting=number<float>(value(),name); result.graphicsOverrides[IndirectLighting]=true; }
+        else if (name == "--exposure") { result.display.exposure=number<float>(value(),name); result.graphicsOverrides[Exposure]=true; }
+        else if (name == "--render-scale") { result.display.render_scale=number<float>(value(),name); result.graphicsOverrides[RenderScale]=true; }
+        else if (name == "--roughness") { result.display.roughness=number<float>(value(),name); result.graphicsOverrides[Roughness]=true; }
         else if (name == "--level") {
             result.level = number<int>(value(), name);
             require(result.level >= 1 && result.level <= 4, "Level must be in 1..4");
@@ -100,7 +118,10 @@ Options options(int argc, char** argv) {
         else {
             require(split == std::string_view::npos, "Boolean options do not take a value");
             if (name == "--fullscreen") { result.display.fullscreen = true; result.graphicsOverrides[Fullscreen] = true; }
-            else if (name == "--gles") result.display.gles = true;
+            else if (name == "--gles") {
+                result.display.gles=true; result.display.backend=GraphicsBackend::OpenGL;
+                result.graphicsOverrides[Backend]=true;
+            }
             else if (name == "--classic-graphics") { result.display.enhanced = false; result.graphicsOverrides[EnhancedLighting] = true; }
             else if (name == "--skip-intro") result.skipIntro = true;
             else if (name == "--launcher") result.launcher = true;
@@ -113,13 +134,7 @@ Options options(int argc, char** argv) {
         }
     }
     require(result.display.width > 0 && result.display.height > 0, "Window dimensions must be positive");
-    require(result.display.samples >= 0, "MSAA samples must be nonnegative");
-    require(std::isfinite(result.display.anisotropy) && result.display.anisotropy >= 1,
-            "Anisotropy must be finite and at least 1");
-    for (const auto strength : {result.display.ambient_occlusion, result.display.reflections,
-                               result.display.bloom, result.display.sharpen})
-        require(std::isfinite(strength) && strength >= 0 && strength <= 1,
-                "Graphics effect strengths must be finite and in 0..1");
+    require(valid_graphics(result.display), "Invalid or nonfinite graphics value outside its supported range");
     require(result.level >= 0 && result.level <= 4, "Level must be in 1..4");
     if (result.smoke) result.launcher = false;
     return result;
@@ -135,6 +150,14 @@ GraphicsSettings merge_graphics(const Options& options, GraphicsSettings saved) 
     if (flags[Sharpen]) saved.sharpen = requested.sharpen;
     if (flags[EnhancedLighting]) saved.enhanced = requested.enhanced;
     if (flags[Fullscreen]) saved.fullscreen = requested.fullscreen;
+    if (flags[Backend]) saved.backend=requested.backend;
+    if (flags[RayTracing]) saved.ray_tracing=requested.ray_tracing;
+    if (flags[TemporalAA]) saved.temporal_aa=requested.temporal_aa;
+    if (flags[Shadows]) saved.shadows=requested.shadows;
+    if (flags[IndirectLighting]) saved.indirect_lighting=requested.indirect_lighting;
+    if (flags[Exposure]) saved.exposure=requested.exposure;
+    if (flags[RenderScale]) saved.render_scale=requested.render_scale;
+    if (flags[Roughness]) saved.roughness=requested.roughness;
     return saved;
 }
 
@@ -597,6 +620,7 @@ void smoke(Platform& host, const Options& opts) {
     if (!opts.capture.empty()) capture_ppm(host.renderer, opts.capture);
     host.renderer.present();
     const auto position = game.player_position();
+    const auto activeGraphics=host.renderer.graphics_settings();
     std::cout << "smoke active phase=" << static_cast<unsigned>(game.clock().phase)
               << " level=" << game.clock().level << " ticks=" << (game.clock().nextTick-firstTick)/33
               << " player=" << position.x << ',' << position.y << ',' << position.z
@@ -605,10 +629,15 @@ void smoke(Platform& host, const Options& opts) {
               << " SDL=" << SDL_GetCurrentVideoDriver()
               << " pixels=" << host.renderer.pixel_width() << 'x' << host.renderer.pixel_height()
               << " samples=" << host.renderer.samples() << " anisotropy=" << host.renderer.anisotropy()
-              << " graphics=" << (opts.display.enhanced ? "enhanced" : "classic")
-              << " ao=" << opts.display.ambient_occlusion << " reflections=" << opts.display.reflections
-              << " bloom=" << opts.display.bloom << " sharpen=" << opts.display.sharpen
-              << " api=" << (opts.display.gles ? "GLES" : "OpenGL") << '\n';
+              << " graphics=" << (activeGraphics.enhanced ? "enhanced" : "classic")
+              << " ao=" << activeGraphics.ambient_occlusion
+              << " reflections=" << activeGraphics.reflections
+              << " bloom=" << activeGraphics.bloom
+              << " sharpen=" << activeGraphics.sharpen
+              << " api=" << host.renderer.backend_name()
+              << " rtAvailable=" << host.renderer.ray_tracing_available()
+              << " rtEnabled=" << (host.renderer.ray_tracing_available() &&
+                                    activeGraphics.enhanced && activeGraphics.ray_tracing) << '\n';
 }
 } // namespace
 
@@ -626,6 +655,9 @@ int main(int argc, char** argv) {
                          "  --fullscreen --samples N --anisotropy N --gles --skip-intro\n"
                          "  --level 1..4 --smoke (bypasses launcher) --capture FILE.ppm --classic-graphics\n"
                          "  --ao 0..1 --reflections 0..1 --bloom 0..1 --sharpen 0..1\n"
+                         "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off\n"
+                         "  --shadows 0..1 --gi 0..1 --exposure .1..4\n"
+                         "  --render-scale .5..1 --roughness .05..1 (Vulkan only)\n"
 #ifdef YAMI_LAUNCHER_DEFAULT
                          "  Default: launcher; assets discovered beside executable or in game/.\n";
 #else
@@ -648,30 +680,63 @@ int main(int argc, char** argv) {
         }
         settings.graphics = merge_graphics(opts, settings.graphics);
         static_cast<GraphicsSettings&>(opts.display) = settings.graphics;
-        if (opts.launcher) opts.display.fullscreen = false;
-        Renderer renderer(opts.display);
-        // Wayland maps/focuses a window only after its first buffer commit.
-        // Present before the focus-gated loop, otherwise neither can happen.
-        renderer.clear();
-        renderer.present();
-        SceneCache scene(renderer, assets);
+        auto initialDisplay=opts.display;
+        if (opts.launcher) {
+            initialDisplay.fullscreen=false;
+            initialDisplay.backend=GraphicsBackend::OpenGL;
+        }
+        auto rendererOwner=std::make_unique<Renderer>(initialDisplay);
+        // Commit a framebuffer before waiting for Wayland focus.
+        rendererOwner->clear(); rendererOwner->present();
+        auto sceneOwner=std::make_unique<SceneCache>(*rendererOwner,assets);
         menu::Menu menu(assets);
-        menu.set_graphics_limits(renderer.max_samples(), renderer.max_anisotropy());
-        settings.graphics.samples = renderer.samples();
-        settings.graphics.anisotropy = renderer.anisotropy();
+        menu.set_graphics_limits(rendererOwner->max_samples(),rendererOwner->max_anisotropy());
         menu.set_settings(settings);
         if (opts.launcher) {
-            if (!run_launcher(renderer, scene, menu, saves.path, opts.checkUpdates)) return 0;
-            settings = menu.settings();
-            renderer.set_graphics(settings.graphics);
-            settings.graphics.samples = renderer.samples();
-            settings.graphics.anisotropy = renderer.anisotropy();
+            std::string recovery;
+            bool checkUpdates=opts.checkUpdates;
+            for (;;) {
+                if (!run_launcher(*rendererOwner,*sceneOwner,menu,saves.path,checkUpdates,recovery)) return 0;
+                checkUpdates=false;
+                settings=menu.settings();
+                static_cast<GraphicsSettings&>(opts.display)=settings.graphics;
+                // Destroy all context-bound scene resources before their owning renderer.
+                sceneOwner.reset();
+                rendererOwner.reset();
+                try {
+                    rendererOwner=std::make_unique<Renderer>(opts.display);
+                    rendererOwner->clear(); rendererOwner->present();
+                    sceneOwner=std::make_unique<SceneCache>(*rendererOwner,assets);
+                    break;
+                } catch (const std::exception& error) {
+                    recovery=error.what();
+                    std::cerr << "Yami selected renderer: " << recovery << '\n';
+                    sceneOwner.reset(); rendererOwner.reset();
+                    auto preview=opts.display;
+                    preview.backend=GraphicsBackend::OpenGL; preview.fullscreen=false;
+                    rendererOwner=std::make_unique<Renderer>(preview);
+                    rendererOwner->clear(); rendererOwner->present();
+                    sceneOwner=std::make_unique<SceneCache>(*rendererOwner,assets);
+                    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,"ETI Yami - renderer",
+                        (recovery+"\n\nSelect OpenGL in the launcher or retry. Your preferences are unchanged.").c_str(),
+                        rendererOwner->window());
+                }
+            }
             menu.clear_commands();
             menu.set_settings(settings);
             menu.show(1);
-            sdl_check(SDL_SetWindowTitle(renderer.window(), "ETI Yami — native"));
         }
-        static_cast<GraphicsSettings&>(opts.display) = settings.graphics;
+        Renderer& renderer=*rendererOwner;
+        SceneCache& scene=*sceneOwner;
+        menu.set_graphics_limits(renderer.max_samples(),renderer.max_anisotropy());
+        menu.set_graphics_device(settings.graphics.backend==GraphicsBackend::Vulkan,
+                                 renderer.ray_tracing_available());
+        static_cast<GraphicsSettings&>(opts.display)=settings.graphics;
+        std::cout << "renderer active=" << renderer.backend_name()
+                  << " rtAvailable=" << renderer.ray_tracing_available()
+                  << " rtEnabled=" << (settings.graphics.enhanced && settings.graphics.ray_tracing &&
+                                        renderer.ray_tracing_available())
+                  << " samples=" << renderer.samples() << " anisotropy=" << renderer.anisotropy() << '\n';
         AudioSystem audio;
         audio.open_device();
         Platform host{renderer, scene, menu, audio};
