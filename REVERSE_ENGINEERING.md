@@ -114,6 +114,8 @@ Security boundary: removal trusts the installing/current UID and unsigned privat
 
 Both installer formats include this complete support pair offline. `.run` validation checks required members, exact executable/nonexecutable modes, matching script bytes, helper architecture/glibc floor/host-only dependencies, closed application-library membership, and byte-for-byte agreement with the paired engine ZIP. AppImage verification inherits that verified payload and checks exact SquashFS membership/modes/bytes. New regressions mutate real support members rather than mock command output. Existing pinned archiver/runtime caches, attribution/notices, corresponding-source policy, and original-asset exclusions remain unchanged.
 
+The installer self-test also extracts its verified real removal ELF into private temporary storage and injects `DT_NEEDED` entries with `patchelf`: the matching x86_64/ARM64 glibc loader must pass (including real `--help` execution on the native architecture), while the opposite architecture's loader, SDL3, and `libGL` must fail with the exact rejected name. This checks the host-only boundary without broadening it to GPU/application libraries.
+
 ### Local 1.0.3 uninstall verification
 
 The final integrated suite passed **14/14 CTests in 10.86 seconds**. The real original-ISO installer check passed in **9.34 seconds**, including legacy migration, custom-icon preservation, and pinned-source checks. `ldd` on the removal helper showed only host `libstdc++`, `libm`, `libgcc_s`, `libc`, and the loader. The `.run` and AppImage self-tests passed their real integrity, membership, byte/mode, corruption, and bounds checks.

@@ -42,6 +42,7 @@ LICENSES = {
 PROVENANCE_PATH = "licenses/7zip/provenance.json"
 MARKER = re.compile(rb"# YAMI_SETUP_PAYLOAD ([0-9a-f]{64}) ([0-9]+) (x86_64|arm64) ([0-9.]+)\n")
 RUNTIME_PROGRAMS = ("yami-setup", "yami-remove", "uninstall.sh", "7zz")
+REMOVER_LOADERS = {"x86_64": "ld-linux-x86-64.so.2", "arm64": "ld-linux-aarch64.so.1"}
 REMOVER_SYSTEM = re.compile(
     r"(?:lib(?:c|m|dl|pthread|rt|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z")
 UNINSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "native" / "uninstall.sh"
@@ -136,8 +137,11 @@ def check_elf(path: Path, arch: str, siblings: set[str], glibc_max: str | None) 
     if command("patchelf", "--print-rpath", path).strip() != "$ORIGIN":
         fail(f"Non-flat runtime search path: {path.name}")
     needed = set(command("patchelf", "--print-needed", path).splitlines())
-    if path.name == "yami-remove" and any(not REMOVER_SYSTEM.fullmatch(name) for name in needed):
-        fail("Removal helper must depend only on the host C/C++ runtime")
+    if path.name == "yami-remove":
+        loader = REMOVER_LOADERS[arch]
+        unexpected = sorted(name for name in needed if name != loader and not REMOVER_SYSTEM.fullmatch(name))
+        if unexpected:
+            fail(f"Removal helper must depend only on the host C/C++ runtime; unexpected: {', '.join(unexpected)}")
     for library in needed:
         if "/" in library or (not LINUX_SYSTEM.fullmatch(library) and library not in siblings):
             fail(f"Unbundled dependency: {path.name} -> {library}")
@@ -319,6 +323,38 @@ def regression_checks(archive: Path, arch: str, glibc_max: str | None) -> None:
     header = shell_header(sha, int(size), arch, version)
     with tempfile.TemporaryDirectory(prefix="yami-setup-regression-") as temporary:
         broken = Path(temporary) / archive.name
+        pristine = Path(temporary) / "pristine-remove"
+        with archive.open("rb") as stream:
+            stream.seek(len(header))
+            with tarfile.open(fileobj=stream, mode="r|gz") as payload:
+                for member in payload:
+                    if member.name == "runtime/yami-remove":
+                        with payload.extractfile(member) as source, pristine.open("xb") as destination:
+                            shutil.copyfileobj(source, destination)
+                        break
+        if not pristine.is_file():
+            fail("Regression: verified installer lacks removal helper")
+        other_arch = "arm64" if arch == "x86_64" else "x86_64"
+        for index, dependency in enumerate((REMOVER_LOADERS[arch], REMOVER_LOADERS[other_arch],
+                                            "libSDL3.so.0", "libGL.so.1")):
+            directory = Path(temporary) / f"remover-dependency-{index}"
+            directory.mkdir()
+            helper = directory / "yami-remove"
+            shutil.copyfile(pristine, helper)
+            helper.chmod(0o755)
+            command("patchelf", "--add-needed", dependency, helper)
+            if dependency == REMOVER_LOADERS[arch]:
+                check_elf(helper, arch, set(), glibc_max)
+                if os.uname().machine in ({"x86_64"} if arch == "x86_64" else {"aarch64", "arm64"}):
+                    command(helper, "--help")
+                continue
+            try:
+                check_elf(helper, arch, set(), glibc_max)
+            except RuntimeError as error:
+                if dependency not in str(error):
+                    fail(f"Regression: dependency rejection lacks diagnostic: {dependency}")
+            else:
+                fail(f"Regression: removal helper accepted unexpected dependency: {dependency}")
         for mutation in ("truncate", "append", "payload", "shell"):
             shutil.copyfile(archive, broken)
             with broken.open("r+b") as stream:
@@ -393,7 +429,7 @@ def regression_checks(archive: Path, arch: str, glibc_max: str | None) -> None:
                 pass
             else:
                 fail(f"Regression: verifier accepted {mutation}")
-    print("Passed installer integrity, shell/path policy and uninstall-support membership/byte/mode regressions")
+    print("Passed installer integrity, shell/path policy, uninstall-support membership/byte/mode and host-loader dependency regressions")
 
 
 def main() -> None:
