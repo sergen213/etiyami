@@ -115,6 +115,10 @@ Installer verification on x86_64 COSMIC Wayland:
 - The freshly installed game exercised menu New Game and active level-2 gameplay: Wayland/OpenGL, 1280×720 actual pixels, 123 ticks, movement and action changes, exit 0.
 - Offline installer integrity/path regressions and AppImage runtime/policy/filesystem/payload/crate-attribution corruption regressions passed. No physical ARM64 GPU proof or complete manual campaign playthrough is claimed.
 
+Published [v1.0.2](https://github.com/sergen213/etiyami/releases/tag/v1.0.2) from commit `0f9314e1f974c48dd538adc4bf4d2e58b53c3471`: native Ubuntu 22.04 x86_64/ARM64 build, forced-extraction execution, all-six-asset verification, and GitHub digest-gated publication passed in [run 37554476782](https://github.com/sergen213/etiyami/actions/runs/37554476782). Anonymous downloads of the x86_64 AppImage and `.run` matched GitHub SHA256 (`913a7942bb52c28e0e150bbb118a1590c80eb846c1e867fba256f2c8ef9a3bb1` and `87e9ff860d899871078ef46275946f4b60f609178f44901a328ee369c9448569`). The downloaded AppImage installed the real ISO into a fresh isolated root and launched the installed native settings window; its high-DPI artwork and launcher captures were inspected. Normal AppImage startup also reached the native CLI with mount/namespace syscalls deliberately denied, proving automatic no-FUSE extraction fallback.
+
+The source-built game smoke above passed. A subsequent published-game automated smoke was interrupted by concurrent physical mouse motion and then focus loss; SDL queue tracing identified external mouse ID 1 alongside the smoke-owned input. That interrupted attempt is not reported as a passing gameplay smoke. Keep the desktop idle while exercising the automated input checks.
+
 
 ## Graphics and platform changes
 
