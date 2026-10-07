@@ -260,7 +260,12 @@ int graphical(const InstallRequest& request) {
         // The asynchronous native picker owns State and no renderer/window references.
         if (closeWhenIdle && !state->busy) quit=true;
         SDL_Event event;
-        while (SDL_PollEvent(&event)) {
+        while (true) {
+            // Portal picker callbacks may run inline while SDL pumps events.
+            lock.unlock();
+            const bool hasEvent=SDL_PollEvent(&event);
+            lock.lock();
+            if (!hasEvent) break;
             SDL_ConvertEventToRenderCoordinates(renderer.get(),&event);
             if (event.type==SDL_EVENT_MOUSE_MOTION) {
                 int next=-1;

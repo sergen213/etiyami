@@ -116,6 +116,12 @@ Both installer formats include this complete support pair offline. `.run` valida
 
 The installer self-test also extracts its verified real removal ELF into private temporary storage and injects `DT_NEEDED` entries with `patchelf`: the matching x86_64/ARM64 glibc loader must pass (including real `--help` execution on the native architecture), while the opposite architecture's loader, SDL3, and `libGL` must fail with the exact rejected name. This checks the host-only boundary without broadening it to GPU/application libraries.
 
+### Local 1.0.4 installer picker verification
+
+The installer held `State::mutex` across `SDL_PollEvent`; Linux portal responses can deliver the `selected` callback inline during that call, and the callback tried to take the same mutex, deadlocking Choose ISO, Change-folder, cancellation, and error responses. The fix releases the mutex around every poll, including a poll returning false, and reacquires it before event handlers. Extraction, rendering, and uninstall behavior are unchanged. Redownload installer 1.0.4 or newer to repair an old downloaded installer; automatic game-engine updates do not replace it.
+
+The integrated local suite passed **15/15 CTests in 25.77 seconds**, including the headless `setup_gui` regression (**0.23 seconds**) using SDL dummy video/software rendering. That harness simulates inline portal callback delivery. Its separate source-built Wayland/software GUI exercise with the original ISO passed in **1.99 seconds**: the artwork-ready framebuffer was visually inspected, and a separate active-preview cancellation exited responsively. No live native portal popup or human selection was exercised, and no public 1.0.4 artifact verification is claimed here. Optional graphical invocation: `./build/check_setup_gui "/path/to/original.iso" "/absolute/path/to/7zz" "/path/to/new-frame-directory"`; the frame directory must not exist and captures containing original artwork remain private.
+
 ### Local 1.0.3 uninstall verification
 
 The final integrated suite passed **14/14 CTests in 10.86 seconds**. The real original-ISO installer check passed in **9.34 seconds**, including legacy migration, custom-icon preservation, and pinned-source checks. `ldd` on the removal helper showed only host `libstdc++`, `libm`, `libgcc_s`, `libc`, and the loader. The `.run` and AppImage self-tests passed their real integrity, membership, byte/mode, corruption, and bounds checks.
