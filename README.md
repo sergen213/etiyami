@@ -4,7 +4,7 @@ A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's ar
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows/macOS releases are deferred.
 
-Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**; the 1.0.2 installer does not provide them.
+Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**, available in [the public v1.0.3 release](https://github.com/sergen213/etiyami/releases/tag/v1.0.3); the 1.0.2 installer does not provide them.
 
 [Install](#install-on-linux-recommended-appimage) · [Uninstall](#uninstall-an-installer-created-game) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
 
@@ -258,7 +258,7 @@ cmake --build build --target check_setup_install
   "/absolute/path/to/7zz" "$PWD/build/yami-remove" "/path/to/new-isolated-check-directory"
 ```
 
-The Linux `uninstall` CTest runs the standalone helper/script safety checks using isolated temporary installations. Local x86_64 verification covered all 14 CTests, real-ISO installation/repair, actual application-menu/Desktop terminal shortcuts, saved/unknown-file preservation, trusted update ownership, and both installer packaging self-tests. See the technical notes for measured evidence, security boundaries, and public-release status.
+The Linux `uninstall` CTest runs the standalone helper/script safety checks using isolated temporary installations. Local x86_64 verification covered all 14 CTests, real-ISO installation/repair, actual application-menu/Desktop terminal shortcuts, saved/unknown-file preservation, trusted update ownership, and both installer packaging self-tests. Public v1.0.3 passed Ubuntu 22.04 x86_64/ARM64 build/package checks; downloaded x86_64 AppImage and `.run` installers also passed real installation, terminal cancellation, repair, and confirmed removal without deleting saves or unknown files. See the technical notes for measured evidence and security boundaries. ARM64 packaging is verified, not physical ARM GPU/gameplay execution.
 
 The smoke command exercises real menu input, New Game, gameplay, and rendering; it needs an actual focused window. Keep the mouse/keyboard idle and do not switch windows during this automated check: concurrent physical input or focus loss intentionally fails it. By default it uses a new temporary save directory. Existing checks cover assets, scripts, gameplay, audio, settings, rendering, and safe update installation. Full campaign progression has not been manually played end-to-end.
 
