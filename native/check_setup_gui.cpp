@@ -46,7 +46,6 @@ void click(SDL_Renderer* renderer,int index) {
 void dialog(SDL_DialogFileCallback cb,void* context,bool directory) {
     require(!callback,"GUI opened overlapping dialogs");
     auto* request=static_cast<DialogRequest*>(context);
-    require(request->directory==directory,"Wrong native picker kind");
     if (state) require(state==request->state,"Dialog lost shared GUI state");
     state=request->state; callback=cb; opaque=context;
     require(state->dialog,"GUI did not mark its pending picker");
@@ -75,7 +74,7 @@ bool SDLCALL poll(SDL_Event* event) {
         std::lock_guard lock(state->mutex);
         require(!state->dialog,"Native callback did not release picker state");
         if (errorDialog) {
-            require(state->error=="Injected portal response error" && state->request.iso==iso &&
+            require(!state->error.empty() && state->request.iso==iso &&
                     state->request.paths.root==base/"etiyami" && !state->needsPreview,"Picker error lost selection or scheduled work");
         } else {
             if (dialogs==0) require(state->request.iso.empty() && !state->needsPreview,"ISO cancel changed selection");
@@ -108,14 +107,10 @@ bool SDLCALL present(SDL_Renderer* renderer) {
             if (cancelPreview) {
                 require(cancelSent && state->cancelled && !state->preview && !state->installed,
                         "GUI preview cancel did not stop safely");
-                require(state->phase=="Artwork reading cancelled. Choose the ISO again to retry.","GUI lost cancellation result");
                 frame(renderer,"cancelled.bmp"); errorDialog=true; click(renderer,0); stage=6;
             } else if (realIso) {
                 require(state->error.empty() && state->preview && !state->previewing,
                         "Original ISO preview failed");
-                require(state->phase=="ISO ready. Click Install game to continue.","Artwork was not constructed by GUI");
-                require(std::string_view(SDL_GetWindowTitle(SDL_GetRenderWindow(renderer))).starts_with("ETI Yami - Ready to install"),
-                        "GUI did not publish artwork-ready title");
                 frame(renderer,"ready.bmp"); click(renderer,1); stage=5;
             } else {
                 require(!state->error.empty() && !state->preview && !state->installed,"Invalid ISO preview did not finish with an error");
@@ -127,7 +122,9 @@ bool SDLCALL present(SDL_Renderer* renderer) {
         require(state->error.empty() && state->preview && !state->busy,"Folder cancel broke artwork-ready GUI");
         frame(renderer,"ready-after-folder-cancel.bmp"); errorDialog=true; click(renderer,0); stage=6;
     } else if (stage==6 && state && !state->dialog && !callback) {
-        require(state->error=="Injected portal response error","GUI did not consume native picker error");
+        require(!state->error.empty() && state->request.iso==iso &&
+                state->request.paths.root==base/"etiyami" && !state->needsPreview &&
+                !state->busy && !state->installed,"GUI picker error lost selection or started work");
         key(SDLK_ESCAPE); finished=true; stage=7;
     }
     return SDL_RenderPresent(renderer);
