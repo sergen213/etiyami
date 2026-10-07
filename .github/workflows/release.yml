@@ -134,7 +134,7 @@ jobs:
             -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
             -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
             '-DCMAKE_INSTALL_RPATH=$ORIGIN'
-          cmake --build build --target yami-native yami-updater yami-launcher yami-setup --parallel "$(nproc)"
+          cmake --build build --target yami-native yami-updater yami-launcher yami-setup yami-remove --parallel "$(nproc)"
           cmake --install build --component runtime --prefix "$RUNNER_TEMP/yami-install"
           python3 tools/package_release.py --install-root "$RUNNER_TEMP/yami-install" \
             --platform linux --arch '${{ matrix.arch }}' --version "$RELEASE_VERSION" \

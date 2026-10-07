@@ -498,16 +498,23 @@ def regression_checks(args, runtime: bytes, expected, root: Path) -> None:
             fail(f"Regression: accepted AppImage {mutation} corruption")
     appdir = root / "AppDir"
     apprun = appdir / "AppRun"
-    for mutation in ("copyright-member", "symlink", "changed-payload", "crate-notice", "crate-provenance"):
+    for mutation in ("copyright-member", "symlink", "changed-payload", "crate-notice", "crate-provenance",
+                     "missing-remover", "remover-bytes", "script-bytes"):
         folder = root / mutation
         folder.mkdir()
         changed = appdir / {
             "crate-notice": "licenses/uruntime/crates/goblin-0.10.7/LICENSE",
             "crate-provenance": "licenses/uruntime/crates/provenance.json",
+            "missing-remover": "runtime/yami-remove",
+            "remover-bytes": "runtime/yami-remove",
+            "script-bytes": "runtime/uninstall.sh",
         }.get(mutation, "AppRun")
         original = changed.read_bytes()
+        original_mode = changed.stat().st_mode & 0o777
         if mutation == "copyright-member":
             (appdir / "game.ini").write_bytes(b"unexpected original-game data")
+        elif mutation == "missing-remover":
+            changed.unlink()
         elif mutation == "symlink":
             apprun.unlink()
             apprun.symlink_to("/etc/passwd")
@@ -533,6 +540,7 @@ def regression_checks(args, runtime: bytes, expected, root: Path) -> None:
             apprun.chmod(0o755)
         else:
             changed.write_bytes(original)
+            changed.chmod(original_mode)
     print("Passed AppImage runtime/policy, filesystem, bounds, symlink, unexpected-member, payload-byte and crate-attribution regressions")
 
 

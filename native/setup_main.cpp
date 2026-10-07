@@ -27,7 +27,7 @@ std::atomic<bool> interrupted{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 void interrupt(int) { interrupted.store(true,std::memory_order_relaxed); }
 struct Options {
-    fs::path iso, destination, engine, archiver;
+    fs::path iso, destination, engine, archiver, remover;
     bool unattended=false;
 };
 Options arguments(int argc,char** argv) {
@@ -37,20 +37,23 @@ Options arguments(int argc,char** argv) {
         if (argument=="--help" || argument=="-h") {
             std::cout << "ETI Yami Linux setup " YAMI_VERSION "\n"
                 "Usage: yami-setup [--iso GAME.iso] [--install-dir DIRECTORY]\n"
-                "                 [--engine DIRECTORY] [--archiver FILE] [--unattended]\n"
+                "                 [--engine DIRECTORY] [--archiver FILE] [--remover FILE]\n"
+                "                 [--unattended]\n"
                 "Default: game artwork from your ISO, per-user installation, desktop shortcuts.\n"
                 "--unattended installs the supplied ISO without opening a window.\n";
             std::exit(0);
         }
         if (argument=="--version") { std::cout << YAMI_VERSION << '\n'; std::exit(0); }
         if (argument=="--unattended") { options.unattended=true; continue; }
-        if (argument!="--iso" && argument!="--install-dir" && argument!="--engine" && argument!="--archiver")
+        if (argument!="--iso" && argument!="--install-dir" && argument!="--engine" &&
+            argument!="--archiver" && argument!="--remover")
             throw std::runtime_error("Unknown option: "+argument);
         if (++i==argc) throw std::runtime_error("Missing value for "+argument);
         if (argument=="--iso") options.iso=fs::absolute(argv[i]);
         else if (argument=="--install-dir") options.destination=fs::absolute(argv[i]);
         else if (argument=="--engine") options.engine=fs::absolute(argv[i]);
-        else options.archiver=fs::absolute(argv[i]);
+        else if (argument=="--archiver") options.archiver=fs::absolute(argv[i]);
+        else options.remover=fs::absolute(argv[i]);
     }
     if (options.unattended && options.iso.empty()) throw std::runtime_error("--unattended requires --iso GAME.iso");
     return options;
@@ -329,7 +332,7 @@ int graphical(const InstallRequest& request) {
         paintText(382,301,"INSTALL FOLDER",Olive,22,380);
         paintText(382,351,rootLabel,Ink,20);
         paintButton(1,"Change...");
-        paintText(382,401,"Desktop + application-menu shortcuts included.",Muted,20);
+        paintText(382,401,"Play + uninstall shortcuts: Desktop and app menu.",Muted,20);
         paintText(382,450,state->installed?"INSTALLED":state->busy?(state->previewing?"READING ORIGINAL ART":"INSTALLING GAME"):
                   artwork?"READY TO INSTALL":"SELECT YOUR ISO",Olive,20);
         wrapped(382,484,state->error.empty()?state->phase:state->error,state->error.empty()?Ink:Error);
@@ -364,6 +367,7 @@ int main(int argc,char** argv) {
         request.iso=options.iso;
         request.engine=options.engine.empty()?(fs::is_directory(directory/"../engine")?directory/"../engine":directory):options.engine;
         request.archiver=options.archiver.empty()?directory/"7zz":options.archiver;
+        request.remover=options.remover.empty()?directory/"yami-remove":options.remover;
         if (options.unattended) {
             std::string previous;
             const auto result=install(request,[&](std::string_view phase,std::uint64_t,std::uint64_t) {

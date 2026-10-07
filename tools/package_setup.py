@@ -41,6 +41,10 @@ LICENSES = {
 }
 PROVENANCE_PATH = "licenses/7zip/provenance.json"
 MARKER = re.compile(rb"# YAMI_SETUP_PAYLOAD ([0-9a-f]{64}) ([0-9]+) (x86_64|arm64) ([0-9.]+)\n")
+RUNTIME_PROGRAMS = ("yami-setup", "yami-remove", "uninstall.sh", "7zz")
+REMOVER_SYSTEM = re.compile(
+    r"(?:lib(?:c|m|dl|pthread|rt|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z")
+UNINSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "native" / "uninstall.sh"
 
 
 def provenance(arch: str) -> bytes:
@@ -118,20 +122,23 @@ def permitted(name: str) -> bool:
         leaf = parts[1]
         if parts[0] == "engine":
             return allowed_path(leaf, "linux") and not LINUX_SYSTEM.fullmatch(leaf)
-        return (leaf in ("yami-setup", "7zz") or
+        return (leaf in RUNTIME_PROGRAMS or
                 (leaf.startswith("lib") and allowed_path(leaf, "linux") and not LINUX_SYSTEM.fullmatch(leaf)))
     return name == PROVENANCE_PATH or name in {f"licenses/7zip/{name}" for name in LICENSES}
 
 
-def check_elf(path: Path, arch: str, siblings: set[str], glibc_max: str | None) -> None:
+def check_elf(path: Path, arch: str, siblings: set[str], glibc_max: str | None) -> set[str]:
     architecture(path, "linux", arch)
     if path.name == "7zz":
         if digest(path) != SEVENZIP[arch][2] or "INTERP" in command("readelf", "--program-headers", path):
             fail("7zz must be the pinned official fully static 7zzs binary")
-        return
+        return set()
     if command("patchelf", "--print-rpath", path).strip() != "$ORIGIN":
         fail(f"Non-flat runtime search path: {path.name}")
-    for library in command("patchelf", "--print-needed", path).splitlines():
+    needed = set(command("patchelf", "--print-needed", path).splitlines())
+    if path.name == "yami-remove" and any(not REMOVER_SYSTEM.fullmatch(name) for name in needed):
+        fail("Removal helper must depend only on the host C/C++ runtime")
+    for library in needed:
         if "/" in library or (not LINUX_SYSTEM.fullmatch(library) and library not in siblings):
             fail(f"Unbundled dependency: {path.name} -> {library}")
     if glibc_max:
@@ -140,6 +147,7 @@ def check_elf(path: Path, arch: str, siblings: set[str], glibc_max: str | None) 
                               command("readelf", "--version-info", path))
         if any(tuple(map(int, version.split("."))) > maximum for version in versions):
             fail(f"{path.name} needs glibc newer than {glibc_max}")
+    return {name for name in needed if not LINUX_SYSTEM.fullmatch(name)}
 
 
 def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_archive: Path | None = None) -> None:
@@ -183,9 +191,9 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
                         fail(f"Installer payload bounds/collision: {name}")
                     names.add(key)
                     executable = name.startswith("engine/") and name.split("/")[1] in BINARIES
-                    executable |= name in ("runtime/yami-setup", "runtime/7zz")
-                    if executable and member.mode != 0o755:
-                        fail(f"Installer binary is not executable: {name}")
+                    executable |= name in {"runtime/" + program for program in RUNTIME_PROGRAMS}
+                    if member.mode != (0o755 if executable else 0o644):
+                        fail(f"Wrong installer member mode: {name}")
                     target = root / name
                     target.parent.mkdir(parents=True, exist_ok=True)
                     source = tar.extractfile(member)
@@ -195,10 +203,13 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
                         shutil.copyfileobj(source, destination)
                     if target.stat().st_size != member.size:
                         fail(f"Truncated installer member: {name}")
-            required = {"engine/" + name for name in BINARIES} | {"runtime/yami-setup", "runtime/7zz", PROVENANCE_PATH}
+            required = {"engine/" + name for name in BINARIES}
+            required |= {"runtime/" + name for name in RUNTIME_PROGRAMS} | {PROVENANCE_PATH}
             required |= {"licenses/7zip/" + name for name in LICENSES}
             if not {name.casefold() for name in required}.issubset(names):
-                fail("Installer lacks engine/setup/archiver/license files")
+                fail("Installer lacks engine/setup/remover/script/archiver/license files")
+            if (root / "runtime/uninstall.sh").read_bytes() != UNINSTALL_SCRIPT.read_bytes():
+                fail("Installer uninstall script differs from the trusted source")
             if (root / PROVENANCE_PATH).read_bytes() != provenance(arch):
                 fail("Unverified 7-Zip source provenance")
             for name, expected in LICENSES.items():
@@ -210,8 +221,18 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
                     fail("Installer engine differs from the accompanying update ZIP")
             for directory in (root / "engine", root / "runtime"):
                 siblings = {path.name for path in directory.iterdir()}
+                dependencies = {}
                 for path in directory.iterdir():
-                    check_elf(path, arch, siblings, glibc_max)
+                    if path.name != "uninstall.sh":
+                        dependencies[path.name] = check_elf(path, arch, siblings, glibc_max)
+                reachable = set(BINARIES if directory.name == "engine" else RUNTIME_PROGRAMS)
+                pending = list(reachable - {"uninstall.sh"})
+                while pending:
+                    for library in dependencies[pending.pop()] - reachable:
+                        reachable.add(library)
+                        pending.append(library)
+                if siblings != reachable:
+                    fail(f"Unexpected files outside the closed {directory.name} dependency set")
 
 
 def unpack_sevenzip(archive: Path, root: Path, arch: str) -> Path:
@@ -238,12 +259,23 @@ def package(args) -> None:
         fail("Expected a new installer asset following the release filename contract")
     verify_archive(args.engine_archive, "linux", args.arch)
     architecture(args.setup_binary, "linux", args.arch)
+    remover = args.setup_binary.parent / "yami-remove"
+    script = args.setup_binary.parent / "uninstall.sh"
+    for source in (args.setup_binary, remover, script):
+        if source.is_symlink() or not source.is_file():
+            fail(f"Missing regular installer input: {source}")
+    if script.read_bytes() != UNINSTALL_SCRIPT.read_bytes():
+        fail("Sibling uninstall script differs from the trusted source")
+    architecture(remover, "linux", args.arch)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="yami-setup-package-") as temporary:
         root = Path(temporary) / "payload"
-        payload = Payload(root / "runtime", "linux", args.arch, extra_paths=("yami-setup",))
+        payload = Payload(root / "runtime", "linux", args.arch, extra_paths=("yami-setup", "yami-remove"))
         payload.copy(args.setup_binary, "yami-setup")
-        package_linux(payload, [args.setup_binary.resolve()], args.linux_glibc_max)
+        payload.copy(remover, "yami-remove")
+        package_linux(payload, [args.setup_binary.resolve(), remover.resolve()], args.linux_glibc_max)
+        shutil.copyfile(script, root / "runtime/uninstall.sh")
+        (root / "runtime/uninstall.sh").chmod(0o755)
         unpack_sevenzip(args.sevenzip_archive, root, args.arch)
         (root / "engine").mkdir()
         with zipfile.ZipFile(args.engine_archive) as engine:
@@ -264,12 +296,14 @@ def package(args) -> None:
                     member = tar.gettarinfo(str(source), arcname=name)
                     member.uid = member.gid = member.mtime = 0
                     member.uname = member.gname = ""
-                    member.mode = 0o755 if source.stat().st_mode & 0o111 else 0o644
+                    executable = name.startswith("engine/") and source.name in BINARIES
+                    executable |= name.startswith("runtime/") and source.name in RUNTIME_PROGRAMS
+                    member.mode = 0o755 if executable else 0o644
                     with source.open("rb") as stream:
                         tar.addfile(member, stream)
         staged = Path(temporary) / args.output.name
         make_sfx(compressed, staged, args.arch, args.version)
-        verify_sfx(staged, args.arch, args.linux_glibc_max)
+        verify_sfx(staged, args.arch, args.linux_glibc_max, args.engine_archive)
         shutil.copyfile(staged, args.output)
         args.output.chmod(0o755)
 
@@ -327,7 +361,39 @@ def regression_checks(archive: Path, arch: str, glibc_max: str | None) -> None:
                 pass
             else:
                 fail("Regression: verifier accepted unsafe tar member")
-    print("Passed installer integrity, truncation, shell-policy, traversal and symlink regressions")
+        # Rehash real payloads: support files must remain complete and exact.
+        for mutation in ("missing-remover", "missing-script", "extra-helper", "extra-library",
+                         "remover-bytes", "script-bytes", "remover-mode", "script-mode"):
+            compressed = Path(temporary) / "changed.tar.gz"
+            with archive.open("rb") as stream, tarfile.open(compressed, "w:gz", format=tarfile.USTAR_FORMAT) as output:
+                stream.seek(len(header))
+                with tarfile.open(fileobj=stream, mode="r|gz") as original:
+                    for member in original:
+                        target = "runtime/uninstall.sh" if "script" in mutation else "runtime/yami-remove"
+                        if member.name == target and mutation.startswith("missing-"):
+                            continue
+                        source = original.extractfile(member)
+                        if member.name == target and mutation.endswith("-bytes"):
+                            data = source.read()
+                            source = io.BytesIO(bytes([data[0] ^ 1]) + data[1:])
+                        if member.name == target and mutation.endswith("-mode"):
+                            member.mode = 0o644
+                        if member.name == "runtime/yami-remove" and mutation.startswith("extra-"):
+                            data = source.read()
+                            output.addfile(member, io.BytesIO(data))
+                            member.name = "runtime/yami-extra" if mutation == "extra-helper" else "runtime/libunowned.so"
+                            member.mode = 0o644
+                            source = io.BytesIO(data)
+                        output.addfile(member, source)
+            broken.unlink()
+            make_sfx(compressed, broken, arch, version)
+            try:
+                verify_sfx(broken, arch, glibc_max)
+            except RuntimeError:
+                pass
+            else:
+                fail(f"Regression: verifier accepted {mutation}")
+    print("Passed installer integrity, shell/path policy and uninstall-support membership/byte/mode regressions")
 
 
 def main() -> None:

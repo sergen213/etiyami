@@ -28,6 +28,7 @@ InstallPaths default_install_paths();
 struct InstallRequest {
     InstallPaths paths;
     std::filesystem::path iso, engine, archiver;
+    std::filesystem::path remover;
 };
 struct InstallResult {
     InstallPaths paths;

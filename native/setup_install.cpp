@@ -1,4 +1,5 @@
 #include "setup.hpp"
+#include "install_ownership.hpp"
 #include "media.hpp"
 #include <SDL3/SDL.h>
 extern "C" {
@@ -26,9 +27,8 @@ extern "C" {
 namespace yami::setup {
 namespace {
 namespace fs = std::filesystem;
-constexpr std::string_view markerName = ".eti-yami-install";
-constexpr std::string_view marker = "ETI Yami native Linux installation\nformat=1\n";
-constexpr std::string_view shortcutName = "eti-yami.desktop";
+using namespace yami::ownership;
+constexpr auto shortcutName = playShortcut;
 constexpr std::array executables{"yami-native", "yami-updater", "yami-launcher"};
 void require(bool condition, const std::string& message) {
     if (!condition) throw std::runtime_error(message);
@@ -59,13 +59,26 @@ void owned_file(const fs::path& path) {
             info.st_uid == geteuid() && info.st_nlink == 1 && !(info.st_mode & (S_IWGRP | S_IWOTH)),
             "File must be a private, user-owned regular file: " + path.string());
 }
-std::string read_small(const fs::path& path) {
+std::string read_small(const fs::path& path, std::size_t maximum = 65536) {
     owned_file(path);
-    require(fs::file_size(path) <= 65536, "Ownership record is too large: " + path.string());
-    std::ifstream stream(path, std::ios::binary);
-    require(bool(stream), "Cannot read ownership record: " + path.string());
-    std::string result{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
-    require(!stream.bad(), "Cannot read ownership record: " + path.string());
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    require(fd >= 0, "Cannot open ownership record: " + path.string());
+    struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
+    struct stat info{}, current{};
+    require(::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_uid == geteuid() &&
+            info.st_nlink == 1 && !(info.st_mode & (S_IWGRP | S_IWOTH)) && info.st_size >= 0 &&
+            static_cast<std::uint64_t>(info.st_size) <= maximum,
+            "Invalid or oversized private ownership record: " + path.string());
+    std::string result(static_cast<std::size_t>(info.st_size), '\0');
+    std::size_t offset = 0;
+    while (offset < result.size()) {
+        const auto count = ::read(fd, result.data() + offset, result.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        require(count > 0, "Cannot read ownership record: " + path.string());
+        offset += static_cast<std::size_t>(count);
+    }
+    require(::lstat(path.c_str(), &current) == 0 && current.st_dev == info.st_dev && current.st_ino == info.st_ino,
+            "Ownership record changed while reading: " + path.string());
     return result;
 }
 void write_file(const fs::path& path, std::string_view content) {
@@ -116,12 +129,20 @@ struct CreatedDirectories {
 struct TemporaryDirectory {
     fs::path path;
     bool retain = false;
+    struct stat identity{};
     explicit TemporaryDirectory(const fs::path& parent) {
         auto pattern = (parent/".yami-setup-XXXXXX").string();
         require(::mkdtemp(pattern.data()) != nullptr, "Cannot stage installation in " + parent.string() + ": " + std::strerror(errno));
         path = pattern;
+        require(::lstat(path.c_str(), &identity) == 0, "Cannot inspect installer staging directory");
     }
-    ~TemporaryDirectory() { if (!retain) { std::error_code error; fs::remove_all(path, error); } }
+    ~TemporaryDirectory() {
+        struct stat current{};
+        if (!retain && ::lstat(path.c_str(), &current) == 0 && S_ISDIR(current.st_mode) &&
+            current.st_dev == identity.st_dev && current.st_ino == identity.st_ino) {
+            std::error_code error; fs::remove_all(path, error);
+        }
+    }
 };
 void rename_new(const fs::path& from, const fs::path& to) {
     // RENAME_NOREPLACE prevents a concurrently created unrelated target from being clobbered.
@@ -171,6 +192,14 @@ std::string desktop_entry(const fs::path& root) {
            "\nPath=" + desktop_value(root.string()) +
            "\nTerminal=false\nCategories=Game;\nX-ETIYami-Setup=true\n" + shortcut_owner(root);
 }
+std::string uninstall_entry(const fs::path& root) {
+    return "[Desktop Entry]\nType=Application\nVersion=1.0\nName=Uninstall ETI Yami\n"
+           "Comment=Remove installed ETI Yami files; preserve saves and settings\n"
+           "Exec=/usr/bin/env -- /bin/sh " + exec_argument((root/scriptName).string()) +
+           "\nIcon=" + desktop_value((root/"eti-yami.png").string()) +
+           "\nPath=" + desktop_value(root.string()) +
+           "\nTerminal=true\nCategories=Game;\nX-ETIYami-Setup=true\n" + shortcut_owner(root);
+}
 bool shortcut_exists(const fs::path& path, const fs::path& root) {
     if (!fs::exists(checked_status(path))) return false;
     const auto content = read_small(path);
@@ -217,7 +246,7 @@ std::vector<fs::path> engine_files(const fs::path& engine) {
         require(fs::is_regular_file(checked_status(entry.path())), "Runtime payload member is not a regular file: " + entry.path().string());
         files.push_back(entry.path());
     }
-    require(files.size() <= 8192, "Engine payload has too many members");
+    require(files.size() <= maxEnginePaths, "Engine payload has too many members");
     return files;
 }
 void validate_icon(const fs::path& path) {
@@ -282,16 +311,20 @@ struct ShortcutPublication {
     TemporaryDirectory staging;
     bool backedUp = false, published = false;
     struct stat publishedIdentity{};
-    ShortcutPublication(const fs::path& folder, const fs::path& installation, std::string_view content)
-        : destination(folder/shortcutName), root(installation), staging(folder) {
+    ShortcutPublication(const fs::path& folder, std::string_view name, const fs::path& installation, std::string_view content)
+        : destination(folder/name), root(installation), staging(folder) {
         write_file(staging.path/"new", content);
         fs::permissions(staging.path/"new", fs::perms::owner_exec, fs::perm_options::add);
         require(::lstat((staging.path/"new").c_str(), &publishedIdentity) == 0, "Cannot inspect staged shortcut");
     }
     void publish() {
         if (shortcut_exists(destination, root)) {
+            struct stat expected{}, moved{};
+            require(::lstat(destination.c_str(), &expected) == 0, "Cannot inspect owned shortcut");
             rename_new(destination, staging.path/"backup"); backedUp = true;
-            require(shortcut_exists(staging.path/"backup", root), "Shortcut ownership changed while publishing");
+            require(::lstat((staging.path/"backup").c_str(), &moved) == 0 &&
+                    moved.st_dev == expected.st_dev && moved.st_ino == expected.st_ino &&
+                    shortcut_exists(staging.path/"backup", root), "Shortcut ownership changed while publishing");
         }
         rename_new(staging.path/"new", destination); published = true;
     }
@@ -301,9 +334,149 @@ struct ShortcutPublication {
             require(::lstat(destination.c_str(), &current) == 0 &&
                     current.st_dev == publishedIdentity.st_dev && current.st_ino == publishedIdentity.st_ino,
                     "Shortcut changed concurrently; refusing to remove it during rollback: " + destination.string());
-            fs::remove(destination); published = false;
+            rename_new(destination, staging.path/"withdrawn"); published = false;
+            require(::lstat((staging.path/"withdrawn").c_str(), &current) == 0 &&
+                    current.st_dev == publishedIdentity.st_dev && current.st_ino == publishedIdentity.st_ino,
+                    "Substituted shortcut retained for recovery; refusing deletion");
         }
         if (backedUp) { rename_new(staging.path/"backup", destination); backedUp = false; }
+    }
+};
+bool asset_owned_path(const fs::path& relative) {
+    for (const auto& part : relative) {
+        const auto& name = part.native();
+        for (const std::string_view reserved : {"game.ini", "checkpoints", "save", "saves"})
+            if (name.size() == reserved.size() && std::equal(name.begin(), name.end(), reserved.begin(),
+                    [](char value, char expected) {
+                        return (value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value) == expected;
+                    })) return false;
+    }
+    return true;
+}
+bool same_bytes(const fs::path& a, const fs::path& b) {
+    owned_file(a); owned_file(b);
+    if (fs::file_size(a) != fs::file_size(b)) return false;
+    std::ifstream left(a, std::ios::binary), right(b, std::ios::binary);
+    require(bool(left) && bool(right), "Cannot compare original ISO provenance");
+    std::array<char, 65536> x{}, y{};
+    while (left) {
+        left.read(x.data(), x.size()); right.read(y.data(), y.size());
+        if (left.gcount() != right.gcount() || !std::equal(x.begin(), x.begin() + left.gcount(), y.begin())) return false;
+    }
+    require(!left.bad() && !right.bad(), "Cannot compare original ISO provenance");
+    return true;
+}
+void provision_remover(const fs::path& source, const fs::path& destination, const Progress& progress) {
+    directory_chain(source.parent_path());
+    struct Input {
+        int fd = -1;
+        struct stat identity{};
+        Input(const fs::path& path, std::uint64_t maximum, bool executable) {
+            fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+            require(fd >= 0, "Trusted removal support is missing or cannot be opened safely: " + path.string() +
+                    "; provide yami-remove and adjacent uninstall.sh");
+            if (::fstat(fd, &identity) != 0 || !S_ISREG(identity.st_mode) || identity.st_nlink != 1 ||
+                (identity.st_uid != geteuid() && identity.st_uid != 0) ||
+                (identity.st_mode & (S_IWGRP | S_IWOTH)) || identity.st_size <= 0 ||
+                static_cast<std::uint64_t>(identity.st_size) > maximum ||
+                (executable && !(identity.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)))) {
+                ::close(fd); fd = -1;
+                throw std::runtime_error("Trusted removal support must be a bounded, private regular file: " + path.string());
+            }
+        }
+        ~Input() { if (fd >= 0) ::close(fd); }
+    };
+    Input helper(source, 512ULL * 1024 * 1024, true);
+    Input script(source.parent_path()/scriptName, 65536, false);
+    report(progress, "Copying pinned removal support");
+    fs::create_directory(destination/helperDirectory);
+    fs::permissions(destination/helperDirectory, fs::perms::owner_all, fs::perm_options::replace);
+    const auto copy = [&](const Input& input, const fs::path& target) {
+        const int fd = ::open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
+        require(fd >= 0, "Cannot create private removal support: " + target.string());
+        struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
+        std::array<char, 65536> buffer{};
+        std::uint64_t copied = 0;
+        while (copied < static_cast<std::uint64_t>(input.identity.st_size)) {
+            const auto count = ::read(input.fd, buffer.data(), std::min<std::uint64_t>(buffer.size(), input.identity.st_size - copied));
+            if (count < 0 && errno == EINTR) continue;
+            require(count > 0, "Cannot read pinned removal support");
+            std::size_t written = 0;
+            while (written < static_cast<std::size_t>(count)) {
+                const auto bytes = ::write(fd, buffer.data() + written, static_cast<std::size_t>(count) - written);
+                if (bytes < 0 && errno == EINTR) continue;
+                require(bytes > 0, "Cannot write private removal support");
+                written += static_cast<std::size_t>(bytes);
+            }
+            copied += static_cast<std::uint64_t>(count);
+        }
+        struct stat current{};
+        require(::fstat(input.fd, &current) == 0 && current.st_dev == input.identity.st_dev &&
+                current.st_ino == input.identity.st_ino && current.st_size == input.identity.st_size &&
+                current.st_uid == input.identity.st_uid && current.st_mode == input.identity.st_mode && current.st_nlink == 1 &&
+                current.st_mtim.tv_sec == input.identity.st_mtim.tv_sec && current.st_mtim.tv_nsec == input.identity.st_mtim.tv_nsec,
+                "Pinned removal support changed while copying");
+        require(::fchmod(fd, 0700) == 0, "Cannot secure private removal support");
+    };
+    copy(helper, destination/helperDirectory/helperName);
+    copy(script, destination/scriptName);
+}
+struct FilePublication {
+    fs::path destination, staged, backup;
+    struct stat identity{};
+    bool backedUp = false, published = false;
+    FilePublication(fs::path target, fs::path fresh, fs::path previous)
+        : destination(std::move(target)), staged(std::move(fresh)), backup(std::move(previous)) {
+        require(::lstat(staged.c_str(), &identity) == 0, "Cannot inspect staged removal support");
+    }
+    void publish() {
+        if (fs::exists(checked_status(destination))) {
+            owned_file(destination);
+            struct stat expected{}, moved{};
+            require(::lstat(destination.c_str(), &expected) == 0, "Cannot inspect existing removal support");
+            rename_new(destination, backup); backedUp = true;
+            require(::lstat(backup.c_str(), &moved) == 0 && moved.st_dev == expected.st_dev && moved.st_ino == expected.st_ino,
+                    "Removal support changed during publication");
+        }
+        rename_new(staged, destination); published = true;
+    }
+    void rollback() {
+        if (published) {
+            struct stat current{};
+            require(::lstat(destination.c_str(), &current) == 0 && current.st_dev == identity.st_dev &&
+                    current.st_ino == identity.st_ino, "Removal support changed; refusing rollback deletion");
+            rename_new(destination, staged); published = false;
+            require(::lstat(staged.c_str(), &current) == 0 && current.st_dev == identity.st_dev &&
+                    current.st_ino == identity.st_ino, "Substituted removal support retained for recovery");
+        }
+        if (backedUp) { rename_new(backup, destination); backedUp = false; }
+    }
+};
+struct RepairLock {
+    fs::path root, path;
+    struct stat rootIdentity{}, identity{}, ownerIdentity{};
+    bool retain = false;
+    RepairLock(const fs::path& installation, const fs::path& stage) : root(installation), path(root/".yami-update-lock") {
+        require(::lstat(root.c_str(), &rootIdentity) == 0, "Cannot inspect root before repair lock");
+        require(fs::create_directory(path), "Another update, removal or repair owns .yami-update-lock; do not break the lock");
+        try {
+            fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace);
+            require(::lstat(path.c_str(), &identity) == 0, "Cannot inspect repair lock");
+            write_file(path/"owner", "pid=" + std::to_string(getpid()) + "\nstage=" + stage.string() + "\n");
+            require(::lstat((path/"owner").c_str(), &ownerIdentity) == 0, "Cannot inspect repair lock owner");
+        } catch (...) {
+            std::error_code error; fs::remove(path/"owner", error); fs::remove(path, error); throw;
+        }
+    }
+    ~RepairLock() {
+        if (retain) return;
+        struct stat current{}, lock{}, owner{};
+        if (::lstat(root.c_str(), &current) != 0 || current.st_dev != rootIdentity.st_dev || current.st_ino != rootIdentity.st_ino ||
+            ::lstat(path.c_str(), &lock) != 0 || lock.st_dev != identity.st_dev || lock.st_ino != identity.st_ino) return;
+        if (::lstat((path/"owner").c_str(), &owner) == 0 &&
+            owner.st_dev == ownerIdentity.st_dev && owner.st_ino == ownerIdentity.st_ino) {
+            std::error_code error; fs::remove(path/"owner", error); fs::remove(path, error);
+        }
     }
 };
 } // namespace
@@ -322,6 +495,7 @@ InstallPaths default_install_paths() {
 
 InstallResult install(const InstallRequest& request, const Progress& progress) {
     require(geteuid() != 0, "Run the installer as your ordinary user, never with root or sudo");
+    require(!request.remover.empty(), "Trusted removal helper is required; provide --remover FILE pointing to yami-remove beside uninstall.sh");
     InstallResult result{{absolute_path(request.paths.root), absolute_path(request.paths.applications),
                           absolute_path(request.paths.desktop)}, false};
     const auto& paths = result.paths;
@@ -329,14 +503,51 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
             "Shortcut folders must be outside the installation root");
     directory_chain(paths.root.parent_path());
     result.reused = fs::exists(checked_status(paths.root));
-    if (result.reused) validate_owned_installation(paths.root);
+    std::unique_ptr<TemporaryDirectory> repairStage;
+    std::unique_ptr<RepairLock> repairLock;
+    struct stat rootIdentity{};
+    if (result.reused) {
+        validate_owned_installation(paths.root);
+        require(::lstat(paths.root.c_str(), &rootIdentity) == 0, "Cannot inspect owned installation");
+        writable_parent(paths.root.parent_path());
+        repairStage = std::make_unique<TemporaryDirectory>(paths.root.parent_path());
+        repairLock = std::make_unique<RepairLock>(paths.root, repairStage->path);
+    }
+    const auto checkRoot = [&] {
+        directory_chain(paths.root.parent_path());
+        struct stat current{};
+        require(::lstat(paths.root.c_str(), &current) == 0 && S_ISDIR(current.st_mode) &&
+                current.st_dev == rootIdentity.st_dev && current.st_ino == rootIdentity.st_ino,
+                "Installation path changed concurrently; refusing its replacement");
+    };
+    InstalledFiles inventory;
+    std::vector<std::string> engineInventory;
+    bool legacy = false;
+    std::string installedRecord, engineRecord;
+    if (result.reused) {
+        const bool installed = fs::exists(checked_status(paths.root/installedName));
+        const bool engine = fs::exists(checked_status(paths.root/engineName));
+        require(installed == engine, "Incomplete ownership inventories; restore both records before repairing");
+        legacy = !installed;
+        if (!legacy) {
+            installedRecord = read_small(paths.root/installedName, maxInstalledBytes);
+            inventory = parse_installed(installedRecord);
+            engineRecord = read_small(paths.root/engineName, maxEngineBytes);
+            engineInventory = parse_engine(engineRecord);
+        } else {
+            require(!request.iso.empty() && fs::is_regular_file(checked_status(absolute_path(request.iso))),
+                    "Legacy installation needs the original YAMI.iso to establish exact asset ownership; unknown files will be preserved");
+            for (const auto* name : executables) engineInventory.emplace_back(name);
+        }
+    }
     writable_parent(paths.root.parent_path());
     for (const auto& folder : {paths.applications, paths.desktop}) {
         const auto ancestor = writable_parent(folder);
         require(fs::space(ancestor).available >= 65536, "Not enough space to publish shortcuts in " + folder.string());
         shortcut_exists(folder/shortcutName, paths.root);
+        shortcut_exists(folder/uninstallShortcut, paths.root);
     }
-    report(progress, result.reused ? "Repairing owned shortcuts" : "Preparing installation");
+    report(progress, result.reused ? (legacy ? "Verifying legacy ownership from original ISO" : "Repairing uninstaller and shortcuts") : "Preparing installation");
     std::vector<fs::path> files;
     std::uint64_t engineBytes = 0;
     if (!result.reused) {
@@ -357,10 +568,17 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
     directory_chain(paths.root.parent_path(), &created.paths);
     directory_chain(paths.applications, &created.paths);
     directory_chain(paths.desktop, &created.paths);
-    TemporaryDirectory stage(paths.root.parent_path());
+    if (legacy)
+        require(fs::space(paths.root.parent_path()).available >= 1536ULL * 1024 * 1024,
+                "Legacy ownership migration needs 1.5 GiB to verify the original ISO without overwriting installed assets");
+    std::unique_ptr<TemporaryDirectory> freshStage;
+    if (!result.reused) freshStage = std::make_unique<TemporaryDirectory>(paths.root.parent_path());
+    auto& stage = result.reused ? *repairStage : *freshStage;
+    fs::create_directory(stage.path/"install");
+    fs::permissions(stage.path/"install", fs::perms::owner_all, fs::perm_options::replace);
+    provision_remover(absolute_path(request.remover), stage.path/"install", progress);
     if (!result.reused) {
-        fs::create_directory(stage.path/"install");
-        fs::permissions(stage.path/"install", fs::perms::owner_all, fs::perm_options::replace);
+        for (const auto& file : files) engineInventory.push_back(file.filename().string());
         std::uint64_t copied = 0;
         for (const auto& file : files) {
             report(progress, "Copying native engine", copied, engineBytes);
@@ -377,20 +595,87 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
         write_file(stage.path/"install"/markerName, marker);
         validate_owned_installation(stage.path/"install");
     }
-    const auto content = desktop_entry(paths.root);
+    if (legacy) {
+        fs::create_directory(stage.path/"install/game"); fs::create_directory(stage.path/"scratch");
+        extract_iso_assets(absolute_path(request.iso), stage.path/"install/game", stage.path/"scratch",
+                           absolute_path(request.archiver), progress);
+        checkRoot();
+        report(progress, "Verifying original shortcut icon provenance");
+        encode_icon(stage.path/"install/game", stage.path/"install/eti-yami.png");
+    }
+    if (!result.reused || legacy) {
+        for (const auto& entry : fs::recursive_directory_iterator(stage.path/"install/game")) {
+            if (!entry.is_regular_file()) continue;
+            const auto relative = entry.path().lexically_relative(stage.path/"install");
+            if (!asset_owned_path(relative)) continue;
+            require(valid_relative_file(relative.generic_string()), "Original asset path cannot be recorded safely");
+            if (legacy) {
+                const auto installed = paths.root/relative;
+                directory_chain(installed.parent_path());
+                if (!fs::exists(checked_status(installed))) continue;
+                if (!same_bytes(entry.path(), installed)) continue; // Modified/user data has no ISO provenance.
+            }
+            inventory.files.push_back(relative.generic_string());
+        }
+        for (const auto name : {markerName, installedName, engineName, scriptName})
+            inventory.files.emplace_back(name);
+        if (!legacy || same_bytes(stage.path/"install/eti-yami.png", paths.root/"eti-yami.png"))
+            inventory.files.emplace_back("eti-yami.png");
+        inventory.files.emplace_back(std::string(helperDirectory) + "/" + std::string(helperName));
+    }
+    for (const auto& folder : {paths.applications, paths.desktop})
+        for (const auto name : {playShortcut, uninstallShortcut})
+            inventory.shortcuts.push_back((folder/name).string());
+    const auto newInstalledRecord = serialize_installed(inventory);
+    const auto newEngineRecord = serialize_engine(engineInventory);
+    write_file(stage.path/"install"/installedName, newInstalledRecord);
+    write_file(stage.path/"install"/engineName, newEngineRecord);
+    std::vector<std::unique_ptr<FilePublication>> support;
+    if (result.reused) {
+        checkRoot();
+        const auto helperFolder = paths.root/helperDirectory;
+        directory_chain(helperFolder);
+        if (fs::exists(checked_status(helperFolder))) {
+            struct stat info{};
+            require(::lstat(helperFolder.c_str(), &info) == 0 && S_ISDIR(info.st_mode) &&
+                    info.st_uid == geteuid() && !(info.st_mode & (S_IWGRP | S_IWOTH)), "Removal support directory is not private");
+        }
+        const std::array<fs::path, 4> names{fs::path(scriptName), fs::path(helperDirectory)/helperName,
+                                          fs::path(installedName), fs::path(engineName)};
+        for (std::size_t index = 0; index < names.size(); ++index) {
+            const auto& name = names[index];
+            if (name == engineName && !legacy) continue; // Preserve the authoritative updater ledger byte-for-byte.
+            if (name == installedName && newInstalledRecord == installedRecord) continue;
+            if (legacy && (name == scriptName || name == fs::path(helperDirectory)/helperName) &&
+                fs::exists(checked_status(paths.root/name)))
+                require(same_bytes(paths.root/name, stage.path/"install"/name),
+                        "Legacy removal support has unknown provenance; move it aside yourself before migration");
+            support.push_back(std::make_unique<FilePublication>(paths.root/name, stage.path/"install"/name,
+                              stage.path/("backup-" + std::to_string(index))));
+        }
+    }
     std::vector<std::unique_ptr<ShortcutPublication>> shortcuts;
-    shortcuts.push_back(std::make_unique<ShortcutPublication>(paths.applications, paths.root, content));
-    if (paths.desktop != paths.applications)
-        shortcuts.push_back(std::make_unique<ShortcutPublication>(paths.desktop, paths.root, content));
+    for (const auto& folder : {paths.applications, paths.desktop}) {
+        if (folder == paths.desktop && paths.desktop == paths.applications && !shortcuts.empty()) continue;
+        shortcuts.push_back(std::make_unique<ShortcutPublication>(folder, playShortcut, paths.root, desktop_entry(paths.root)));
+        shortcuts.push_back(std::make_unique<ShortcutPublication>(folder, uninstallShortcut, paths.root, uninstall_entry(paths.root)));
+    }
     bool rootPublished = false;
-    struct stat rootIdentity{};
     if (!result.reused)
         require(::lstat((stage.path/"install").c_str(), &rootIdentity) == 0, "Cannot inspect staged installation");
+    if (legacy) report(progress, "Legacy ISO provenance verified; unproven libraries, modified assets and user files will be preserved");
     try {
         report(progress, "Publishing installation");
         if (!result.reused) { rename_new(stage.path/"install", paths.root); rootPublished = true; }
+        checkRoot();
+        if (!result.reused) repairLock = std::make_unique<RepairLock>(paths.root, stage.path);
+        if (result.reused) {
+            directory_chain(paths.root/helperDirectory, &created.paths);
+            for (auto& file : support) { checkRoot(); file->publish(); }
+        }
         report(progress, "Creating shortcuts");
-        for (auto& shortcut : shortcuts) shortcut->publish();
+        for (auto& shortcut : shortcuts) { checkRoot(); shortcut->publish(); }
+        checkRoot();
     } catch (...) {
         const auto original = std::current_exception();
         std::string recovery;
@@ -399,6 +684,14 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
             catch (const std::exception& error) {
                 (*it)->staging.retain = true;
                 recovery += "\nShortcut backup retained at " + (*it)->staging.path.string() + ": " + error.what();
+            }
+        }
+        for (auto it = support.rbegin(); it != support.rend(); ++it) {
+            if (!(*it)->published && !(*it)->backedUp) continue;
+            try { checkRoot(); (*it)->rollback(); }
+            catch (const std::exception& error) {
+                stage.retain = true;
+                recovery += "\nRemoval support backup retained at " + stage.path.string() + ": " + error.what();
             }
         }
         if (rootPublished) {
@@ -416,7 +709,10 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
             }
             catch (const std::exception& error) { recovery += "\nInstallation retained at " + paths.root.string() + ": " + error.what(); }
         }
-        if (!recovery.empty()) throw std::runtime_error("Installation failed and automatic rollback needs manual recovery:" + recovery);
+        if (!recovery.empty()) {
+            if (repairLock) repairLock->retain = true;
+            throw std::runtime_error("Installation failed and automatic rollback needs manual recovery:" + recovery);
+        }
         std::rethrow_exception(original);
     }
     return result;

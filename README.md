@@ -4,7 +4,9 @@ A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's ar
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows/macOS releases are deferred.
 
-[Install](#install-on-linux-recommended-appimage) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
+Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**; the 1.0.2 installer does not provide them.
+
+[Install](#install-on-linux-recommended-appimage) · [Uninstall](#uninstall-an-installer-created-game) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
 
 ## Install on Linux (recommended: AppImage)
 
@@ -46,17 +48,31 @@ The `.run` wrapper needs the ordinary shell, `tar`, `gzip`, and coreutils suppli
 1. Click **Choose ISO** and select your legally owned original Turkish Yami game ISO. The installer reads its MSI/CAB data natively; it never executes the disc's Windows setup or codec/DirectX installers.
 2. Wait for the original artwork and bitmap font to load from that ISO into a private temporary preview.
 3. Keep the default installation location, `${XDG_DATA_HOME:-$HOME/.local/share}/etiyami`, or click **Change...** to select a parent folder; the installer creates `etiyami` inside it.
-4. Click **Install game**, then **Launch game**. Application-menu and Desktop shortcuts are created automatically using the original game icon. Your desktop may ask you to trust/allow launching its shortcut.
+4. Click **Install game**, then **Launch game**. Play and **Uninstall ETI Yami** shortcuts are created in the application menu and on the Desktop, using the original game icon. Your desktop may ask you to trust/allow launching its shortcuts.
 
 The ISO can remain anywhere you can read it; you do **not** need to move it beside the installer or game. It is **not needed after installation**. Installation works offline once you have downloaded the installer. Allow 640 MiB free temporary space for the artwork preview and 1.5 GiB plus the native engine on the installation volume for extraction/staging.
 
 **Tab / Shift+Tab** moves between installer controls, **Enter / Space** activates them, and **Escape** cancels a preview/installation or closes an idle installer. Cancellation cleans private staging rather than publishing a partial fresh installation.
 
-Running Install again against a valid installer-owned installation preserves its existing assets, engine, settings, and saves and repairs its own shortcuts; it is not an engine downgrade/replacement. Unrelated folders, symlink destinations, and unrelated shortcuts are refused rather than overwritten. Use the launcher's automatic updates for new engine versions.
+Running Install again against an inventory-bearing installer-owned installation preserves its existing assets, engine, settings, and saves and repairs its play/uninstall shortcuts and uninstall support; it is not an engine downgrade/replacement. An older installer-owned installation without ownership inventories needs the original ISO once to establish which assets belong to the installer; files without proven ownership are kept. Unrelated folders, symlink destinations, and unrelated shortcuts are refused rather than overwritten. Use the launcher's automatic updates for new engine versions.
 
 ### 3. Play
 
 Launch opens the settings launcher. Choose **OYNA / PLAY**, then **Yeni Oyun / New Game** in the game's main menu. Subsequently use the application-menu or Desktop shortcut; the downloaded installer is no longer required.
+
+## Uninstall an installer-created game
+
+Close the game, launcher, and updater, then open **Uninstall ETI Yami** from the Desktop or application menu. This shortcut runs the installed `uninstall.sh` in your desktop's terminal, not another AppImage or a graphical uninstaller. The script invokes a small private native removal helper using only the host C/C++ runtime.
+
+The terminal shows the exact installation path and asks for confirmation; answering no or pressing Enter cancels without removing files. After confirmation, only files and shortcuts recorded as installer-owned are removed. Saves, settings, custom files, and any other unknown/unproven files are kept. Only empty recorded child directories are pruned; the installation root itself is always kept, even when empty, and any remaining files are reported.
+
+Neither the original ISO, the downloaded installer, an Internet connection, nor sudo is needed. You can also run the installed script from an existing terminal:
+
+```sh
+/bin/sh "${XDG_DATA_HOME:-$HOME/.local/share}/etiyami/uninstall.sh"
+```
+
+For a custom location, use that installation's exact `uninstall.sh` path. A manual ZIP installation does not gain uninstall ownership records or these shortcuts automatically. For an older installer installation, rerun the new installer with your original ISO first; missing or invalid ownership records cause removal to refuse rather than guess.
 
 ## Advanced: manual ZIP installation
 
@@ -171,7 +187,7 @@ For other distributions, install equivalent development packages: a C++20 compil
 
 ### Build the Linux ISO installer
 
-The Linux source build also provides `yami-setup`. Unlike release installers, a source invocation needs an engine directory containing the three native executables and their required libraries, plus a trusted `7zz` executable:
+The Linux source build also provides `yami-setup`, the stdlib/POSIX-only `yami-remove`, and a sibling `uninstall.sh`. Building `yami-setup` also builds the removal helper and copies the script beside it. Unlike release installers, a source invocation needs an engine directory containing the three native executables and their required libraries, plus a trusted `7zz` executable:
 
 ```sh
 cmake --build build --target yami-setup
@@ -179,6 +195,8 @@ cmake --build build --target yami-setup
 ```
 
 Select your original ISO in the GUI; pre-extracting `game/` is not required for this path. Source builds use your installed development/runtime dependencies rather than the release's bundled library set.
+
+The remover defaults to `yami-remove` beside `yami-setup`. If using a different build location, pass `--remover "/absolute/path/to/yami-remove"`; its directory must also contain the matching `uninstall.sh`. Both release installer formats carry this pair offline; the manual engine ZIP remains unchanged.
 
 ### Extracting from the original installer
 
@@ -237,8 +255,10 @@ ctest --test-dir build --output-on-failure
 # Optional Linux installer regression using your own original ISO
 cmake --build build --target check_setup_install
 ./build/check_setup_install "/path/to/original.iso" "$PWD/build" \
-  "/absolute/path/to/7zz" "/path/to/new-isolated-check-directory"
+  "/absolute/path/to/7zz" "$PWD/build/yami-remove" "/path/to/new-isolated-check-directory"
 ```
+
+The Linux `uninstall` CTest runs the standalone helper/script safety checks using isolated temporary installations. Local x86_64 verification covered all 14 CTests, real-ISO installation/repair, actual application-menu/Desktop terminal shortcuts, saved/unknown-file preservation, trusted update ownership, and both installer packaging self-tests. See the technical notes for measured evidence, security boundaries, and public-release status.
 
 The smoke command exercises real menu input, New Game, gameplay, and rendering; it needs an actual focused window. Keep the mouse/keyboard idle and do not switch windows during this automated check: concurrent physical input or focus loss intentionally fails it. By default it uses a new temporary save directory. Existing checks cover assets, scripts, gameplay, audio, settings, rendering, and safe update installation. Full campaign progression has not been manually played end-to-end.
 

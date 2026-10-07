@@ -1,4 +1,7 @@
 #include "update_install.hpp"
+#if defined(__linux__)
+#include "install_ownership.hpp"
+#endif
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
@@ -22,6 +25,9 @@
 #else
 #include <cerrno>
 #include <csignal>
+#if defined(__linux__)
+#include <fcntl.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -241,6 +247,46 @@ struct InstallLock {
         }
     }
 };
+#if defined(__linux__)
+std::string ownership_text(const fs::path& path, std::size_t limit) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    require(fd >= 0, "Cannot open installer ownership metadata: " + text(path));
+    struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
+    struct stat info{};
+    require(::fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
+            info.st_uid == geteuid() && !(info.st_mode & (S_IRWXG | S_IRWXO | S_ISUID | S_ISGID | S_ISVTX)) &&
+            info.st_size >= 0 && static_cast<std::uint64_t>(info.st_size) <= limit,
+            "Installer ownership metadata is not a private owned regular file: " + text(path));
+    std::string contents(static_cast<std::size_t>(info.st_size), '\0');
+    std::size_t offset = 0;
+    while (offset < contents.size()) {
+        const auto count = ::read(fd, contents.data() + offset, contents.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        require(count > 0, "Cannot read installer ownership metadata: " + text(path));
+        offset += static_cast<std::size_t>(count);
+    }
+    char extra;
+    ssize_t count;
+    do { count = ::read(fd, &extra, 1); } while (count < 0 && errno == EINTR);
+    require(count == 0, "Installer ownership metadata changed while reading: " + text(path));
+    return contents;
+}
+bool installer_engine_files(const fs::path& root, std::vector<std::string>& files) {
+    // A marker alone is a legacy/manual installation, not permission to claim its live files.
+    const bool installed = fs::exists(checked_status(root/ownership::installedName));
+    const bool engine = fs::exists(checked_status(root/ownership::engineName));
+    if (!installed && !engine) return false;
+    require(installed && engine, "Incomplete installer ownership inventories; repair with the installer");
+    struct stat info{};
+    require(::stat(root.c_str(), &info) == 0 && info.st_uid == geteuid() &&
+            !(info.st_mode & (S_IWGRP | S_IWOTH)), "Installer-owned root is not privately controlled");
+    require(ownership_text(root/ownership::markerName, ownership::marker.size()) == ownership::marker,
+            "Invalid installer ownership marker");
+    ownership::parse_installed(ownership_text(root/ownership::installedName, ownership::maxInstalledBytes));
+    files = ownership::parse_engine(ownership_text(root/ownership::engineName, ownership::maxEngineBytes));
+    return true;
+}
+#endif
 void create_parents(const fs::path& root, const fs::path& relative, std::vector<fs::path>* created = nullptr) {
     auto parent = root;
     for (const auto& component : relative.parent_path()) {
@@ -461,36 +507,58 @@ void install_prepared(const fs::path& stagePath, const fs::path& rootPath) {
     verify_stage(stage, root);
     const auto payload = stage/"payload", backup = stage/"backup";
     detail::validate_payload(payload);
-    struct Member { fs::path relative; std::string name; bool backed = false, installed = false; };
+    struct Member { fs::path relative; std::string name; fs::path source; bool backed = false, installed = false; };
     std::vector<Member> members;
     for (const auto& entry : fs::recursive_directory_iterator(payload)) {
         if (!fs::is_regular_file(entry.symlink_status())) continue;
         auto relative = entry.path().lexically_relative(payload);
-        members.push_back({relative, text(relative)});
+        members.push_back({relative, text(relative), entry.path()});
     }
     std::sort(members.begin(), members.end(), [](const Member& a, const Member& b) {
         if (binary(a.name) != binary(b.name)) return binary(a.name);
         return a.name < b.name;
     });
-    for (const auto& member : members) destination(root, member.relative);
     InstallLock lock(root, stage);
+    std::string engineInventory;
+#if defined(__linux__)
+    std::vector<std::string> ownedEngine;
+    if (installer_engine_files(root, ownedEngine)) {
+        for (const auto& member : members) ownedEngine.push_back(member.name);
+        engineInventory = ownership::serialize_engine(std::move(ownedEngine));
+        members.push_back({utf8_path(ownership::engineName), std::string(ownership::engineName), stage/"engine-ownership"});
+    }
+#endif
+    for (const auto& member : members) destination(root, member.relative);
     require(fs::create_directory(backup), "Cannot create transaction backup");
     private_directory(backup);
     std::vector<fs::path> created;
     created.reserve(16);
     Clock::time_point lockDeadline{};
+    bool inventoryStaged = false;
     try {
+        if (!engineInventory.empty()) {
+            const auto& source = members.back().source;
+            require(!fs::exists(checked_status(source)), "Local engine ownership stage already exists");
+            std::ofstream output(source, std::ios::binary);
+            require(bool(output), "Cannot stage local engine ownership inventory");
+            inventoryStaged = true;
+            fs::permissions(source, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+            output << engineInventory;
+            output.close();
+            require(bool(output), "Cannot write local engine ownership inventory");
+        }
         for (const auto& member : members) {
             create_parents(root, member.relative, &created);
             create_parents(backup, member.relative);
             const auto mode = fs::perms::owner_read | fs::perms::owner_write |
                               fs::perms::group_read | fs::perms::others_read;
-            fs::permissions(payload/member.relative, binary(member.name) ?
+            fs::permissions(member.source, member.name == ".eti-yami-engine-files" ?
+                            fs::perms::owner_read | fs::perms::owner_write : binary(member.name) ?
                             mode | fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec : mode,
                             fs::perm_options::replace);
         }
         for (auto& member : members) {
-            const auto source = payload/member.relative, target = root/member.relative, saved = backup/member.relative;
+            const auto source = member.source, target = root/member.relative, saved = backup/member.relative;
             directory_chain(target.parent_path());
             directory_chain(source.parent_path());
             regular_file(source);
@@ -511,8 +579,8 @@ void install_prepared(const fs::path& stagePath, const fs::path& rootPath) {
                 if (it->installed) {
                     directory_chain((root/it->relative).parent_path());
                     regular_file(root/it->relative);
-                    require(!fs::exists(checked_status(payload/it->relative)), "Staged rollback member unexpectedly exists");
-                    rename_file(root/it->relative, payload/it->relative, rollbackDeadline);
+                    require(!fs::exists(checked_status(it->source)), "Staged rollback member unexpectedly exists");
+                    rename_file(root/it->relative, it->source, rollbackDeadline);
                 }
                 if (it->backed) {
                     directory_chain((backup/it->relative).parent_path());
@@ -531,6 +599,7 @@ void install_prepared(const fs::path& stagePath, const fs::path& rootPath) {
             throw std::runtime_error(reason + ". Rollback incomplete: " + rollbackError +
                                      ". Recovery backup retained at " + text(backup));
         }
+        if (inventoryStaged) fs::remove(members.back().source);
         fs::remove_all(backup);
         throw std::runtime_error("Update failed; previous installation restored: " + reason);
     }

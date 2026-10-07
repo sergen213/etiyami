@@ -78,6 +78,7 @@ struct Temporary {
 };
 }
 
+
 int main() {
     Temporary temporary;
     const auto& root = temporary.root;
@@ -101,10 +102,55 @@ int main() {
     for (const auto* path : {native, updater, launcher, library}) assert(get(root/path) == "old-engine");
     assert(!fs::exists(stage/"backup"));
     fs::remove(root/".yami-update-lock");
+#if defined(__linux__)
+    // Old installer markers without inventories remain update-compatible, but unowned.
+    put(root/".eti-yami-install", "ETI Yami native Linux installation\nformat=1\n");
+    fs::permissions(root/".eti-yami-install", fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace);
+#endif
     install_prepared(stage, root);
     for (const auto* path : {native, updater, launcher, library}) assert(get(root/path) == "new-engine");
     assert(!fs::exists(stage/"backup"));
     assert(!fs::exists(root/".yami-update-lock"));
+#if defined(__linux__)
+    // Manual engine ZIP installations must never acquire uninstall authority.
+    assert(!fs::exists(root/".eti-yami-engine-files"));
+    assert(!fs::exists(root/".eti-yami-installed-files"));
+    const auto ownedMetadata = [&](const fs::path& path, std::string_view contents) {
+        put(path, contents);
+        fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+    };
+    ownedMetadata(root/".eti-yami-install", "ETI Yami native Linux installation\nformat=1\n");
+    const std::string installedInventory =
+        "ETI Yami installed ownership\nformat=1\n"
+        "F\t.eti-yami-engine-files\nF\t.eti-yami-install\nF\t.eti-yami-installed-files\n"
+        "F\t.eti-yami-uninstall/yami-remove\nF\tgame/data/original.bin\nF\tuninstall.sh\n";
+    ownedMetadata(root/".eti-yami-installed-files", installedInventory);
+    ownedMetadata(root/".eti-yami-engine-files",
+        "ETI Yami engine ownership\nformat=1\nlib-retired-check.so.1\nyami-launcher\nyami-native\nyami-updater\n");
+    put(root/"uninstall.sh", "installer-owned-script");
+    put(root/".eti-yami-uninstall/yami-remove", "installer-owned-helper");
+    put(root/"lib-user-check.so.1", "unknown-library");
+    put(root/"lib-retired-check.so.1", "previously-owned-library");
+    fs::remove_all(stage);
+    payload(stage, "new-engine");
+    put(stage/"payload/lib-owned-check.so.2", "trusted-added-library");
+    protectStage();
+    install_prepared(stage, root);
+    const auto mergedInventory = get(root/".eti-yami-engine-files");
+    assert(mergedInventory ==
+        "ETI Yami engine ownership\nformat=1\nlib-owned-check.so.2\nlib-retired-check.so.1\n"
+        "lib/libzz-check.so.1\nyami-launcher\nyami-native\nyami-updater\n");
+    assert(get(root/"lib-owned-check.so.2") == "trusted-added-library");
+    assert(get(root/"lib-retired-check.so.1") == "previously-owned-library");
+    assert(get(root/".eti-yami-install") == "ETI Yami native Linux installation\nformat=1\n");
+    assert(get(root/"lib-user-check.so.1") == "unknown-library");
+    assert(get(root/".eti-yami-installed-files") == installedInventory);
+    assert(get(root/"uninstall.sh") == "installer-owned-script");
+    assert(get(root/".eti-yami-uninstall/yami-remove") == "installer-owned-helper");
+    assert(fs::status(root/".eti-yami-engine-files").permissions() ==
+           (fs::perms::owner_read | fs::perms::owner_write));
+#endif
     detail::mark_completed(stage);
     cleanup_completed_updates(root);
     assert(fs::exists(stage)); // A live helper's marked stage must not be deleted.
@@ -116,6 +162,21 @@ int main() {
     put(stage/"payload/game.ini", "stolen-preferences");
     fails(stage, root);
     fs::remove(stage/"payload/game.ini");
+#if defined(__linux__)
+    put(stage/"payload/.eti-yami-engine-files", "wire-ownership-is-forbidden");
+    fails(stage, root);
+    fs::remove(stage/"payload/.eti-yami-engine-files");
+    put(stage/"payload/yami-remove", "fourth-executable-is-forbidden");
+    fails(stage, root);
+    fs::remove(stage/"payload/yami-remove");
+    ownedMetadata(root/".eti-yami-engine-files",
+                  "ETI Yami engine ownership\nformat=1\n../game.ini\n");
+    fails(stage, root);
+    ownedMetadata(root/".eti-yami-engine-files", mergedInventory);
+    fs::create_hard_link(root/".eti-yami-engine-files", root/"ownership-hardlink");
+    fails(stage, root);
+    fs::remove(root/"ownership-hardlink");
+#endif
     fs::create_hard_link(stage/"payload"/native, stage/"extra-link");
     fails(stage, root);
     fs::remove(stage/"extra-link");
@@ -153,6 +214,15 @@ int main() {
     }
     assert(!fs::exists(stage/"backup"));
     assert(!fs::exists(root/".yami-update-lock"));
+#if defined(__linux__)
+    assert(get(root/".eti-yami-engine-files") == mergedInventory);
+    assert(mergedInventory.find(addedLibrary) == std::string::npos);
+    assert(get(root/".eti-yami-installed-files") == installedInventory);
+    assert(get(root/"uninstall.sh") == "installer-owned-script");
+    assert(get(root/".eti-yami-uninstall/yami-remove") == "installer-owned-helper");
+    assert(get(root/"lib-user-check.so.1") == "unknown-library");
+    assert(get(root/"lib-owned-check.so.2") == "trusted-added-library");
+#endif
     assert(get(root/"game/data/original.bin") == "original-assets");
     assert(get(root/"game.ini") == "preferences");
     assert(get(root/"checkpoints/slot1") == "checkpoint");
@@ -163,5 +233,5 @@ int main() {
     assert(!detail::valid_payload_path("lib/../game.ini", false));
     assert(!detail::valid_payload_path("lib/test.dll:stream", false));
     assert(!detail::valid_payload_path("Resources/game/data/a", false));
-    std::cout << "Installer replacement, late-failure rollback, unsafe-file rejection, and user/assets preservation checked\n";
+    std::cout << "Installer replacement, local ownership provenance, late-failure rollback, unsafe-file rejection, and user/assets preservation checked\n";
 }
