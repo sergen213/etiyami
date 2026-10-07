@@ -72,7 +72,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            build-essential cmake ninja-build pkg-config python3 curl ca-certificates xz-utils bzip2 \
+            build-essential cmake ninja-build pkg-config python3 curl ca-certificates xz-utils bzip2 squashfs-tools \
             nasm patchelf libepoxy-dev libxml2-dev libssl-dev libc-ares-dev zlib1g-dev libarchive-dev libjson-c-dev \
             libwayland-dev libxkbcommon-dev libdecor-0-dev libx11-dev libxext-dev libxrandr-dev \
             libxcursor-dev libxi-dev libxfixes-dev libxss-dev libxtst-dev libasound2-dev libpulse-dev \
@@ -101,9 +101,9 @@ jobs:
           tar -xf "$RUNNER_TEMP/yami-deps/ffmpeg.tar.xz" -C "$RUNNER_TEMP/yami-deps"
           pushd "$RUNNER_TEMP/yami-deps/ffmpeg-7.1.5"
           ./configure --prefix=/opt/yami-deps --libdir=/opt/yami-deps/lib \
-            --enable-shared --disable-static --enable-pic --disable-autodetect \
+            --enable-shared --disable-static --enable-pic --disable-autodetect --enable-zlib \
             --disable-programs --disable-doc --disable-avdevice --disable-avfilter \
-            --disable-encoders --disable-muxers --disable-network
+            --disable-encoders --enable-encoder=png --disable-muxers --disable-network
           make -j"$(nproc)"
           sudo make install
           popd
@@ -126,7 +126,7 @@ jobs:
           pkg-config --atleast-version=7.85.0 libcurl
           /opt/yami-deps/bin/curl --version
           /opt/yami-deps/bin/curl --version | grep -q AsynchDNS
-      - name: Build and install all three engine targets (no proprietary assets/tests)
+      - name: Build engine and GUI installer (no proprietary assets/tests)
         shell: bash
         run: |
           set -euo pipefail
@@ -134,15 +134,73 @@ jobs:
             -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
             -DBUILD_TESTING=OFF -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF \
             '-DCMAKE_INSTALL_RPATH=$ORIGIN'
-          cmake --build build --target yami-native yami-updater yami-launcher --parallel "$(nproc)"
-          cmake --install build --prefix "$RUNNER_TEMP/yami-install"
+          cmake --build build --target yami-native yami-updater yami-launcher yami-setup --parallel "$(nproc)"
+          cmake --install build --component runtime --prefix "$RUNNER_TEMP/yami-install"
           python3 tools/package_release.py --install-root "$RUNNER_TEMP/yami-install" \
             --platform linux --arch '${{ matrix.arch }}' --version "$RELEASE_VERSION" \
             --linux-glibc-max 2.35 --output 'dist/yami-linux-${{ matrix.arch }}.zip'
+          cmake --install build --component setup --prefix "$RUNNER_TEMP/yami-setup-install"
+      - name: Bundle the pinned official static archiver and offline GUI installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          case '${{ matrix.arch }}' in
+            x86_64)
+              archive=7z2604-linux-x64.tar.xz
+              expected=fc0327ba27e89bd086cf426dff17d77de582953cdbbc10a6576540a06853ffcd
+              ;;
+            arm64)
+              archive=7z2604-linux-arm64.tar.xz
+              expected=5b0ac3aa91c1e3499f011d6af69d7f6b4de3ef2f011d9e2ff44c58ebd04aa388
+              ;;
+          esac
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/ip7z/7zip/releases/download/26.04/$archive" \
+            --output "$RUNNER_TEMP/$archive"
+          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$archive" | sha256sum --check
+          python3 tools/package_setup.py --setup-binary "$RUNNER_TEMP/yami-setup-install/yami-setup" \
+            --engine-archive 'dist/yami-linux-${{ matrix.arch }}.zip' \
+            --sevenzip-archive "$RUNNER_TEMP/$archive" --arch '${{ matrix.arch }}' \
+            --version "$RELEASE_VERSION" --linux-glibc-max 2.35 \
+            --output 'dist/yami-setup-linux-${{ matrix.arch }}.run'
+          python3 tools/package_setup.py --self-test --arch '${{ matrix.arch }}' \
+            --linux-glibc-max 2.35 --output 'dist/yami-setup-linux-${{ matrix.arch }}.run'
+      - name: Build genuine static-runtime AppImage and exercise forced extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_arch='${{ matrix.arch }}'
+          [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+          runtime="uruntime-appimage-squashfs-lite-$runtime_arch"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://github.com/VHSgunzo/uruntime/releases/download/v0.8.1/$runtime" \
+            --output "$RUNNER_TEMP/$runtime"
+          python3 tools/package_appimage.py \
+            --setup-archive 'dist/yami-setup-linux-${{ matrix.arch }}.run' \
+            --engine-archive 'dist/yami-linux-${{ matrix.arch }}.zip' \
+            --runtime-file "$RUNNER_TEMP/$runtime" --arch '${{ matrix.arch }}' \
+            --version "$RELEASE_VERSION" --linux-glibc-max 2.35 \
+            --output 'dist/yami-setup-linux-${{ matrix.arch }}.AppImage'
+          python3 tools/package_appimage.py --self-test \
+            --setup-archive 'dist/yami-setup-linux-${{ matrix.arch }}.run' \
+            --engine-archive 'dist/yami-linux-${{ matrix.arch }}.zip' \
+            --runtime-file "$RUNNER_TEMP/$runtime" --arch '${{ matrix.arch }}' \
+            --version "$RELEASE_VERSION" --linux-glibc-max 2.35 \
+            --output 'dist/yami-setup-linux-${{ matrix.arch }}.AppImage'
+          image="$PWD/dist/yami-setup-linux-${{ matrix.arch }}.AppImage"
+          "$image" --appimage-version
+          "$image" --appimage-help
+          # Exercise the real native AppRun, argv and ../engine layout without a
+          # display, FUSE, root, or a real installation. Never use CI's loader override.
+          (cd "$RUNNER_TEMP"; env -u LD_LIBRARY_PATH -u LD_PRELOAD \
+            REUSE_CHECK_DELAY=0 "$image" --appimage-extract-and-run --help)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/yami-linux-${{ matrix.arch }}.zip
+          path: |
+            dist/yami-linux-${{ matrix.arch }}.zip
+            dist/yami-setup-linux-${{ matrix.arch }}.run
+            dist/yami-setup-linux-${{ matrix.arch }}.AppImage
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -161,13 +219,17 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Recheck both Linux release assets before creating a draft
+      - name: Recheck all six Linux assets before creating a draft
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y patchelf binutils squashfs-tools
           python3 - <<'PY'
           from pathlib import Path
           expected = {f'yami-linux-{arch}.zip' for arch in ('x86_64', 'arm64')}
+          expected |= {f'yami-setup-linux-{arch}.run' for arch in ('x86_64', 'arm64')}
+          expected |= {f'yami-setup-linux-{arch}.AppImage' for arch in ('x86_64', 'arm64')}
           actual = {path.name for path in Path('dist').iterdir()}
           if actual != expected:
               raise SystemExit(f'Incomplete release asset set: {actual ^ expected}')
@@ -175,6 +237,19 @@ jobs:
           for arch in x86_64 arm64; do
             python3 tools/package_release.py --verify-only --platform linux --arch "$arch" \
               --output "dist/yami-linux-$arch.zip"
+            python3 tools/package_setup.py --verify-only --arch "$arch" --linux-glibc-max 2.35 \
+              --engine-archive "dist/yami-linux-$arch.zip" --output "dist/yami-setup-linux-$arch.run"
+            runtime_arch="$arch"
+            [[ "$runtime_arch" != arm64 ]] || runtime_arch=aarch64
+            runtime="uruntime-appimage-squashfs-lite-$runtime_arch"
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              "https://github.com/VHSgunzo/uruntime/releases/download/v0.8.1/$runtime" \
+              --output "$RUNNER_TEMP/$runtime"
+            python3 tools/package_appimage.py --verify-only --arch "$arch" --linux-glibc-max 2.35 \
+              --version '${{ needs.metadata.outputs.version }}' \
+              --runtime-file "$RUNNER_TEMP/$runtime" \
+              --setup-archive "dist/yami-setup-linux-$arch.run" \
+              --engine-archive "dist/yami-linux-$arch.zip" --output "dist/yami-setup-linux-$arch.AppImage"
           done
       - name: Upload complete draft, verify GitHub SHA256 digests, then publish
         env:
@@ -189,22 +264,27 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes 'Linux engine/launcher updates only: original game assets and saves are not included. Requires glibc 2.35+ and host graphics drivers. Windows/macOS releases are deferred.'
-          gh release upload "$RELEASE_TAG" dist/*.zip
-          release_api="$(gh release view "$RELEASE_TAG" --json apiUrl --jq .apiUrl)"
+            --notes 'Linux offline GUI installers (.AppImage or .run) accept your original ISO, display its original game artwork, and create app-menu/Desktop shortcuts; engine/launcher ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves. Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
+          gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage
+          # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          release_api="repos/$GITHUB_REPOSITORY/releases/$release_id"
           gh api "$release_api" > "$RUNNER_TEMP/yami-release.json"
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
           release = json.loads((Path(os.environ['RUNNER_TEMP']) / 'yami-release.json').read_text())
           local = {path.name: 'sha256:' + hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
-                   for path in Path('dist').glob('*.zip')}
+                   for path in Path('dist').iterdir() if path.is_file()}
           assets = {asset['name']: asset for asset in release['assets']}
-          if not release['draft'] or set(assets) != set(local):
+          if (not release['draft'] or len(release['assets']) != 6 or len(local) != 6
+                  or set(assets) != set(local)):
               raise SystemExit('Release is not a complete draft.')
           for name, expected in local.items():
               asset = assets[name]
               if asset['state'] != 'uploaded' or asset.get('digest') != expected:
                   raise SystemExit(f'GitHub SHA256 validation failed for {name}')
           PY
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+          gh api --method PATCH "$release_api" -F draft=false -f make_latest=true

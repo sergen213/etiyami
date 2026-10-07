@@ -243,13 +243,14 @@ def mac_dependencies(path: Path, executable: Path) -> list[tuple[str, Path]]:
 
 
 class Payload:
-    def __init__(self, root: Path, platform: str, arch: str):
+    def __init__(self, root: Path, platform: str, arch: str, *, extra_paths: tuple[str, ...] = ()):
         self.root, self.platform, self.arch = root, platform, arch
+        self.extra_paths = extra_paths
         self.sources: dict[str, Path] = {}
         self.names: dict[str, str] = {}
 
     def copy(self, source: Path, name: str) -> tuple[Path, bool]:
-        if not allowed_path(name, self.platform):
+        if not allowed_path(name, self.platform) and name not in self.extra_paths:
             fail(f"Not an update-owned path: {name}")
         source = source.resolve(strict=True)
         if not source.is_file() or source.stat().st_size > MAX_MEMBER:

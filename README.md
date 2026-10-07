@@ -4,18 +4,63 @@ A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's ar
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows/macOS releases are deferred.
 
-## Quick start: download and play
+[Install](#install-on-linux-recommended-appimage) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
 
-### 1. Download the Linux release
+## Install on Linux (recommended: AppImage)
 
-Open [the latest release](https://github.com/sergen213/etiyami/releases/latest) and choose:
+Download the installer for your CPU from [the latest public release](https://github.com/sergen213/etiyami/releases/latest). No GitHub account or token is required.
 
-| Computer | Download |
-|---|---|
-| Intel/AMD 64-bit Linux | `yami-linux-x86_64.zip` |
-| 64-bit ARM Linux | `yami-linux-arm64.zip` |
+| Computer | Recommended installer | Shell fallback | Advanced manual package |
+|---|---|---|---|
+| Intel/AMD 64-bit Linux | [x86_64 AppImage](https://github.com/sergen213/etiyami/releases/latest/download/yami-setup-linux-x86_64.AppImage) | [x86_64 .run](https://github.com/sergen213/etiyami/releases/latest/download/yami-setup-linux-x86_64.run) | [x86_64 ZIP](https://github.com/sergen213/etiyami/releases/latest/download/yami-linux-x86_64.zip) |
+| 64-bit ARM Linux | [ARM64 AppImage](https://github.com/sergen213/etiyami/releases/latest/download/yami-setup-linux-arm64.AppImage) | [ARM64 .run](https://github.com/sergen213/etiyami/releases/latest/download/yami-setup-linux-arm64.run) | [ARM64 ZIP](https://github.com/sergen213/etiyami/releases/latest/download/yami-linux-arm64.zip) |
 
-Requirements: **glibc 2.35 or newer**, your distribution's graphics drivers and C++ runtime, and an OpenGL 3.3 or GLES 3-capable desktop. Release packages include application libraries, not graphics drivers or the host C++ runtime. ARM64 packages are built and validated in CI; live graphics/gameplay verification has been performed on x86_64 Linux.
+Requirements: **glibc 2.35 or newer**, your distribution's graphics drivers and C++ runtime, and an OpenGL 3.3 or GLES 3-capable desktop. Installers bundle application libraries and the offline ISO extraction tool, **not** glibc, `libstdc++`, `libgcc`, or graphics drivers. No Wine, root access, separately installed 7-Zip, or manual asset extraction is needed. ARM64 release builds do not imply physical ARM GPU/gameplay verification; live gameplay verification has been performed on x86_64 Linux.
+
+### 1. Run the installer
+
+For an x86_64 download saved in `~/Downloads`:
+
+```sh
+chmod +x "$HOME/Downloads/yami-setup-linux-x86_64.AppImage"
+"$HOME/Downloads/yami-setup-linux-x86_64.AppImage"
+```
+
+For ARM64, substitute `arm64` for `x86_64`. The AppImage uses a static runtime with automatic extraction fallback when FUSE is unavailable; it does not require installing FUSE2. To explicitly run without FUSE:
+
+```sh
+"$HOME/Downloads/yami-setup-linux-x86_64.AppImage" --appimage-extract-and-run
+```
+
+Alternatively, the `.run` download opens the same installer:
+
+```sh
+chmod +x "$HOME/Downloads/yami-setup-linux-x86_64.run"
+"$HOME/Downloads/yami-setup-linux-x86_64.run"
+```
+
+The `.run` wrapper needs the ordinary shell, `tar`, `gzip`, and coreutils supplied by standard Linux installations. Run either format as your normal desktop user, **never with sudo**.
+
+### 2. Choose your ISO, install, and launch
+
+1. Click **Choose ISO** and select your legally owned original Turkish Yami game ISO. The installer reads its MSI/CAB data natively; it never executes the disc's Windows setup or codec/DirectX installers.
+2. Wait for the original artwork and bitmap font to load from that ISO into a private temporary preview.
+3. Keep the default installation location, `${XDG_DATA_HOME:-$HOME/.local/share}/etiyami`, or click **Change...** to select a parent folder; the installer creates `etiyami` inside it.
+4. Click **Install game**, then **Launch game**. Application-menu and Desktop shortcuts are created automatically using the original game icon. Your desktop may ask you to trust/allow launching its shortcut.
+
+The ISO can remain anywhere you can read it; you do **not** need to move it beside the installer or game. It is **not needed after installation**. Installation works offline once you have downloaded the installer. Allow 640 MiB free temporary space for the artwork preview and 1.5 GiB plus the native engine on the installation volume for extraction/staging.
+
+**Tab / Shift+Tab** moves between installer controls, **Enter / Space** activates them, and **Escape** cancels a preview/installation or closes an idle installer. Cancellation cleans private staging rather than publishing a partial fresh installation.
+
+Running Install again against a valid installer-owned installation preserves its existing assets, engine, settings, and saves and repairs its own shortcuts; it is not an engine downgrade/replacement. Unrelated folders, symlink destinations, and unrelated shortcuts are refused rather than overwritten. Use the launcher's automatic updates for new engine versions.
+
+### 3. Play
+
+Launch opens the settings launcher. Choose **OYNA / PLAY**, then **Yeni Oyun / New Game** in the game's main menu. Subsequently use the application-menu or Desktop shortcut; the downloaded installer is no longer required.
+
+## Advanced: manual ZIP installation
+
+Use the ZIP only if you already have an extracted original asset tree or want to manage the installation yourself.
 
 Extract the **entire ZIP**, keeping its libraries beside the executables. Use a directory you can write to so automatic updates can install without administrator access. For an x86_64 download saved in `~/Downloads`:
 
@@ -105,7 +150,7 @@ Start **`yami-launcher`** to check for new releases in the background. A newer m
 
 ## Build from source
 
-The release ZIP is the easiest way to play. To build on Arch Linux / CachyOS:
+The AppImage installer is the easiest way to play. To build on Arch Linux / CachyOS:
 
 ```sh
 sudo pacman -S --needed git gcc cmake ninja pkgconf sdl3 libepoxy libxml2 ffmpeg curl libarchive json-c
@@ -122,7 +167,18 @@ cmake --build build --parallel
 ./build/yami-launcher
 ```
 
-For other distributions, install equivalent development packages: a C++20 compiler, CMake 3.20+, Ninja, pkg-config, SDL3, libepoxy, libxml2, FFmpeg (`libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample`), libcurl 7.85+, libarchive, and json-c. FFmpeg must include the Indeo 5 decoder. **SDL2 is not a substitute for SDL3.** The Linux release workflow builds its dependencies on Ubuntu 22.04; distribution packages may be too old for a source build.
+For other distributions, install equivalent development packages: a C++20 compiler, CMake 3.20+, Ninja, pkg-config, SDL3, libepoxy, libxml2, FFmpeg (`libavformat`, `libavcodec`, `libavutil`, `libswscale`, `libswresample`), libcurl 7.85+, libarchive, and json-c. FFmpeg must include the Indeo 5/JPEG/TGA/BMP decoders and PNG encoder. **SDL2 is not a substitute for SDL3.** The Linux release workflow builds its dependencies on Ubuntu 22.04; distribution packages may be too old for a source build.
+
+### Build the Linux ISO installer
+
+The Linux source build also provides `yami-setup`. Unlike release installers, a source invocation needs an engine directory containing the three native executables and their required libraries, plus a trusted `7zz` executable:
+
+```sh
+cmake --build build --target yami-setup
+./build/yami-setup --engine "$PWD/build" --archiver "/absolute/path/to/7zz"
+```
+
+Select your original ISO in the GUI; pre-extracting `game/` is not required for this path. Source builds use your installed development/runtime dependencies rather than the release's bundled library set.
 
 ### Extracting from the original installer
 
@@ -177,6 +233,15 @@ ctest --test-dir build --output-on-failure
 ./build/yami-native --smoke --skip-intro --no-updates
 ```
 
+```sh
+# Optional Linux installer regression using your own original ISO
+cmake --build build --target check_setup_install
+./build/check_setup_install "/path/to/original.iso" "$PWD/build" \
+  "/absolute/path/to/7zz" "/path/to/new-isolated-check-directory"
+```
+
 The smoke command exercises real menu input, New Game, gameplay, and rendering; it needs an actual focused window. By default it uses a new temporary save directory. Existing checks cover assets, scripts, gameplay, audio, settings, rendering, and safe update installation. Full campaign progression has not been manually played end-to-end.
+
+The optional installer check performs real extraction and isolated install/cancellation/safety/shortcut checks. Its final directory argument must not already exist; it creates an installation there and needs the same free space as an ordinary install. These commands are instructions, not a claim that your ISO or desktop has already been verified.
 
 For reconstruction notes, implementation details, and verification evidence, see [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md).
