@@ -39,7 +39,8 @@ Options arguments(int argc,char** argv) {
                 "Usage: yami-setup [--iso GAME.iso] [--install-dir DIRECTORY]\n"
                 "                 [--engine DIRECTORY] [--archiver FILE] [--remover FILE]\n"
                 "                 [--unattended]\n"
-                "Default: game artwork from your ISO, per-user installation, desktop shortcuts.\n"
+                "Default: game artwork from your ISO, per-user installation, application-menu entries.\n"
+                "Desktop shortcuts are added when the desktop directory is available.\n"
                 "--unattended installs the supplied ISO without opening a window.\n";
             std::exit(0);
         }
@@ -170,7 +171,8 @@ int graphical(const InstallRequest& request) {
                 } else {
                     const auto result=install(input,progress);
                     std::lock_guard lock(state->mutex); state->result=result; state->installed=true;
-                    state->phase=result.reused?"Existing game kept; shortcuts repaired.":"Installation complete. Your game is ready.";
+                    state->phase=std::string(result.reused?"Existing game kept. ":"Installation complete. ") +
+                        "Use ETI Yami in Apps." + (result.paths.desktop.empty()?" Desktop shortcuts unavailable.":" Desktop files also created; visibility depends on your desktop.");
                 }
             } catch (const std::exception& error) {
                 std::lock_guard lock(state->mutex);
@@ -337,7 +339,7 @@ int graphical(const InstallRequest& request) {
         paintText(382,301,"INSTALL FOLDER",Olive,22,380);
         paintText(382,351,rootLabel,Ink,20);
         paintButton(1,"Change...");
-        paintText(382,401,"Play + uninstall shortcuts: Desktop and app menu.",Muted,20);
+        paintText(382,401,"Apps: play + uninstall. Desktop files when available.",Muted,20);
         paintText(382,450,state->installed?"INSTALLED":state->busy?(state->previewing?"READING ORIGINAL ART":"INSTALLING GAME"):
                   artwork?"READY TO INSTALL":"SELECT YOUR ISO",Olive,20);
         wrapped(382,484,state->error.empty()?state->phase:state->error,state->error.empty()?Ink:Error);

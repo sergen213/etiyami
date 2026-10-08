@@ -25,6 +25,7 @@ struct DrawState {
     std::array<float, 4> color{{1, 1, 1, 1}};
     std::array<float, 4> diffuse_light{{1, 1, 1, 1}};
     std::array<float, 4> uv_transform{{1, 1, 0, 0}}; // scale.xy, offset.xy
+    std::uint64_t temporal_id = 0; // Stable instance/part identity; zero has no dynamic correspondence.
 };
 struct ShadowBounds {
     Vec3 min{}, max{};

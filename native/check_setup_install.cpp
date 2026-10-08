@@ -9,6 +9,8 @@
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace yami::setup;
@@ -46,10 +48,10 @@ int main(int argc, char** argv) {
         rejected(request);
         require(get(request.paths.applications/"eti-yami.desktop") == "unowned shortcut", "Unowned shortcut changed");
         fs::remove(request.paths.applications/"eti-yami.desktop");
-        put(request.paths.desktop/"eti-yami-uninstall.desktop", "unowned removal shortcut");
+        put(request.paths.applications/"eti-yami-uninstall.desktop", "unowned removal shortcut");
         rejected(request);
-        require(get(request.paths.desktop/"eti-yami-uninstall.desktop") == "unowned removal shortcut", "Unowned removal shortcut changed");
-        fs::remove(request.paths.desktop/"eti-yami-uninstall.desktop");
+        require(get(request.paths.applications/"eti-yami-uninstall.desktop") == "unowned removal shortcut", "Unowned removal shortcut changed");
+        fs::remove(request.paths.applications/"eti-yami-uninstall.desktop");
         auto missingRemover = request; missingRemover.remover = base/"missing-remover";
         rejected(missingRemover);
         require(!fs::exists(request.paths.root), "Missing removal helper published installation");
@@ -91,14 +93,12 @@ int main(int argc, char** argv) {
         require(ico.next(a) && png.next(b) && a.width == b.width && a.height == b.height &&
                 std::equal(a.rgba.begin(), a.rgba.end(), b.rgba.begin(), b.rgba.end()), "Shortcut icon is not the original icon");
         const auto shortcut = get(result.paths.applications/"eti-yami.desktop");
-        require(shortcut == get(result.paths.desktop/"eti-yami.desktop"), "Desktop/app-menu entries differ");
         require((fs::status(result.paths.desktop/"eti-yami.desktop").permissions() & fs::perms::owner_exec) != fs::perms::none,
                 "Desktop shortcut is not executable");
         const auto uninstall = get(result.paths.applications/"eti-yami-uninstall.desktop");
-        require(uninstall == get(result.paths.desktop/"eti-yami-uninstall.desktop") &&
-                uninstall.find("\nTerminal=true\n") != std::string::npos &&
+        require(uninstall.find("\nTerminal=true\n") != std::string::npos &&
                 uninstall.find("Exec=/usr/bin/env -- /bin/sh ") != std::string::npos,
-                "Uninstall shortcuts missing terminal-safe script command");
+                "Uninstall shortcut missing terminal-safe script command");
         require(get(result.paths.root/"uninstall.sh") == get(fs::path(argv[4]).parent_path()/"uninstall.sh") &&
                 get(result.paths.root/".eti-yami-uninstall/yami-remove") == get(argv[4]), "Removal support differs from trusted source");
         const auto ownership = yami::ownership::parse_installed(get(result.paths.root/yami::ownership::installedName));
@@ -128,6 +128,13 @@ int main(int argc, char** argv) {
                 get(result.paths.root/"game/user-created.txt") == "preserved unknown file" &&
                 get(result.paths.root/"libuser.so") == "preserved unknown library",
                 "Repair failed removal support or changed unknown files");
+        auto disabledDesktop = reuse; disabledDesktop.paths.desktop.clear();
+        const auto disabledRepair = install(disabledDesktop, {});
+        require(disabledRepair.reused && disabledRepair.paths.desktop.empty() &&
+                get(result.paths.root/yami::ownership::installedName) == yami::ownership::serialize_installed(ownership) &&
+                fs::is_regular_file(result.paths.desktop/"eti-yami.desktop") &&
+                fs::is_regular_file(result.paths.desktop/"eti-yami-uninstall.desktop"),
+                "Disabled Desktop repair forgot existing owned shortcuts");
         rejected(reuse, [](std::string_view phase, std::uint64_t, std::uint64_t) { return phase != "Publishing installation"; });
         require(get(result.paths.root/"game.ini") == "preserved settings" &&
                 get(result.paths.root/yami::ownership::installedName) == yami::ownership::serialize_installed(ownership),
@@ -198,16 +205,63 @@ int main(int argc, char** argv) {
                 "Legacy migration claimed unknown/modified data or overwrote engine");
         put(result.paths.root/"game/yami.ico", originalIco);
         put(result.paths.root/"eti-yami.png", icon);
-        // Preserve the old app-menu entry when the second publication collides.
-        fs::remove(result.paths.desktop/"eti-yami.desktop");
-        rejected(reuse, [&](std::string_view phase, std::uint64_t, std::uint64_t) {
-            if (phase == "Publishing installation") put(result.paths.desktop/"eti-yami.desktop", "unrelated");
+        // Optional Desktop repair restores the first entry when the second collides.
+        put(result.paths.desktop/"eti-yami.desktop", shortcut + "Comment=keep previous Desktop state\n");
+        const auto previousDesktop = get(result.paths.desktop/"eti-yami.desktop");
+        fs::remove(result.paths.desktop/"eti-yami-uninstall.desktop");
+        const auto desktopSkipped = install(reuse, [&](std::string_view phase, std::uint64_t, std::uint64_t) {
+            if (phase == "Publishing installation")
+                put(result.paths.desktop/"eti-yami-uninstall.desktop", "unrelated");
             return true;
         });
-        require(get(result.paths.applications/"eti-yami.desktop") == shortcut &&
-                get(result.paths.desktop/"eti-yami.desktop") == "unrelated" &&
-                get(result.paths.root/"yami-launcher") == engine, "Owned reinstall rollback damaged existing data");
-        fs::remove(result.paths.desktop/"eti-yami.desktop");
+        require(desktopSkipped.reused && desktopSkipped.paths.desktop.empty() &&
+                get(result.paths.applications/"eti-yami.desktop") == shortcut &&
+                get(result.paths.desktop/"eti-yami.desktop") == previousDesktop &&
+                get(result.paths.desktop/"eti-yami-uninstall.desktop") == "unrelated" &&
+                get(result.paths.root/"yami-launcher") == engine &&
+                yami::ownership::parse_installed(get(result.paths.root/yami::ownership::installedName)).shortcuts ==
+                    migratedOwnership.shortcuts, "Optional Desktop failure lost previous state or ownership");
+        fs::remove(result.paths.desktop/"eti-yami-uninstall.desktop");
+        install(reuse, {});
+        // Obstruct the real withdrawal destination, then collide the second Desktop entry.
+        // This forces incomplete rollback without depending on UID/permission behavior.
+        put(result.paths.desktop/"eti-yami.desktop", shortcut + "Comment=retain previous Desktop backup\n");
+        const auto recoveryDesktop = get(result.paths.desktop/"eti-yami.desktop");
+        const auto recoveryInventory = get(result.paths.root/yami::ownership::installedName);
+        std::vector<fs::path> obstructedStages;
+        fs::remove(result.paths.desktop/"eti-yami-uninstall.desktop");
+        rejected(reuse, [&](std::string_view phase, std::uint64_t, std::uint64_t) {
+            if (phase == "Publishing installation") {
+                for (const auto& entry : fs::directory_iterator(result.paths.desktop)) {
+                    if (!entry.is_directory() || !entry.path().filename().string().starts_with(".yami-setup-")) continue;
+                    put(entry.path()/"withdrawn", "keep unrelated withdrawal obstruction");
+                    obstructedStages.push_back(entry.path());
+                }
+                put(result.paths.desktop/"eti-yami-uninstall.desktop", "keep unrelated publication collision");
+            }
+            return true;
+        });
+        require(!obstructedStages.empty() &&
+                get(result.paths.root/yami::ownership::installedName) == recoveryInventory &&
+                get(result.paths.applications/"eti-yami.desktop") == shortcut &&
+                get(result.paths.applications/"eti-yami-uninstall.desktop") == uninstall &&
+                get(result.paths.desktop/"eti-yami-uninstall.desktop") == "keep unrelated publication collision" &&
+                fs::is_directory(result.paths.root/".yami-update-lock"),
+                "Incomplete optional rollback committed core changes or erased unrelated files");
+        bool retainedBackup = false;
+        for (const auto& path : obstructedStages) {
+            if (!fs::exists(path)) continue;
+            require(get(path/"backup") == recoveryDesktop &&
+                    get(path/"withdrawn") == "keep unrelated withdrawal obstruction",
+                    "Incomplete Desktop rollback did not retain previous state and obstruction");
+            retainedBackup = true;
+            fs::remove(result.paths.desktop/"eti-yami.desktop");
+            fs::rename(path/"backup", result.paths.desktop/"eti-yami.desktop");
+            fs::remove_all(path); // Private test recovery; all injected files belong to this fixture.
+        }
+        require(retainedBackup, "Incomplete Desktop rollback lost its recovery backup");
+        fs::remove(result.paths.desktop/"eti-yami-uninstall.desktop");
+        fs::remove_all(result.paths.root/".yami-update-lock");
         install(reuse, {});
         // Fail after the app-menu publication to exercise rollback of both a repaired
         // shortcut and the newly published root, without touching a real user folder.
@@ -218,15 +272,58 @@ int main(int argc, char** argv) {
         bool blocked = false;
         rejected(rollback, [&](std::string_view phase, std::uint64_t, std::uint64_t) {
             if (phase == "Publishing installation" && !blocked) {
-                put(rollback.paths.desktop/"eti-yami-uninstall.desktop", "concurrent unrelated shortcut"); blocked = true;
+                put(rollback.paths.applications/"eti-yami-uninstall.desktop", "concurrent unrelated shortcut"); blocked = true;
             }
             return true;
         });
         require(blocked && !fs::exists(rollback.paths.root) &&
                 !fs::exists(rollback.paths.applications/"eti-yami.desktop") &&
-                !fs::exists(rollback.paths.applications/"eti-yami-uninstall.desktop") &&
+                get(rollback.paths.applications/"eti-yami-uninstall.desktop") == "concurrent unrelated shortcut" &&
                 !fs::exists(rollback.paths.desktop/"eti-yami.desktop") &&
-                get(rollback.paths.desktop/"eti-yami-uninstall.desktop") == "concurrent unrelated shortcut", "Four-entry publication failure did not roll back");
+                !fs::exists(rollback.paths.desktop/"eti-yami-uninstall.desktop"), "Mandatory app-menu publication failure did not roll back");
+        fs::remove(rollback.paths.applications/"eti-yami-uninstall.desktop");
+        // A private regular-file obstruction is deterministic even when run with unusual permissions.
+        put(rollback.paths.desktop, "keep unrelated Desktop obstruction");
+        const auto noDesktop = install(rollback, {});
+        const auto menuOnly = yami::ownership::parse_installed(get(noDesktop.paths.root/yami::ownership::installedName));
+        require(!noDesktop.reused && noDesktop.paths.desktop.empty() &&
+                fs::is_regular_file(noDesktop.paths.root/"game/data/menu/menulist.xml") &&
+                fs::is_regular_file(noDesktop.paths.root/"yami-launcher") &&
+                fs::is_regular_file(noDesktop.paths.root/"uninstall.sh") &&
+                fs::is_regular_file(noDesktop.paths.applications/"eti-yami.desktop") &&
+                fs::is_regular_file(noDesktop.paths.applications/"eti-yami-uninstall.desktop") &&
+                menuOnly.shortcuts == std::vector<std::string>{
+                    (noDesktop.paths.applications/"eti-yami-uninstall.desktop").string(),
+                    (noDesktop.paths.applications/"eti-yami.desktop").string()} &&
+                get(rollback.paths.desktop) == "keep unrelated Desktop obstruction",
+                "Unavailable Desktop blocked core installation or claimed unrelated files");
+        auto menuRepair = rollback;
+        menuRepair.paths.desktop.clear();
+        menuRepair.iso = base/"missing.iso"; menuRepair.engine = base/"missing-engine";
+        const auto repairedMenu = install(menuRepair, {});
+        require(repairedMenu.reused && repairedMenu.paths.desktop.empty() &&
+                get(repairedMenu.paths.root/yami::ownership::installedName) ==
+                    yami::ownership::serialize_installed(menuOnly) &&
+                get(rollback.paths.desktop) == "keep unrelated Desktop obstruction",
+                "Disabled Desktop repair changed ownership or unrelated obstruction");
+        put(noDesktop.paths.root/"game.ini", "keep menu-only settings");
+        const auto removal = ::fork();
+        require(removal >= 0, "Cannot launch menu-only removal check");
+        if (removal == 0) {
+            ::unsetenv("SUDO_USER"); ::unsetenv("SUDO_UID"); ::unsetenv("SUDO_COMMAND");
+            ::execl((noDesktop.paths.root/".eti-yami-uninstall/yami-remove").c_str(), "yami-remove",
+                    "--root", noDesktop.paths.root.c_str(), "--yes", nullptr);
+            ::_exit(127);
+        }
+        int removalStatus = 0;
+        require(::waitpid(removal, &removalStatus, 0) == removal &&
+                WIFEXITED(removalStatus) && WEXITSTATUS(removalStatus) == 0 &&
+                !fs::exists(noDesktop.paths.root/"yami-launcher") &&
+                !fs::exists(noDesktop.paths.applications/"eti-yami.desktop") &&
+                !fs::exists(noDesktop.paths.applications/"eti-yami-uninstall.desktop") &&
+                get(noDesktop.paths.root/"game.ini") == "keep menu-only settings" &&
+                get(rollback.paths.desktop) == "keep unrelated Desktop obstruction",
+                "Menu-only uninstall lost settings/obstruction or failed to remove owned entries");
         // A directory substituted after publication is not ours to roll back.
         auto substituted = request;
         substituted.paths.root = base/"substituted-install";

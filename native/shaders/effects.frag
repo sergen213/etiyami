@@ -6,13 +6,31 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #endif
 layout(location=0) in vec2 vUv;
-layout(location=0) out vec4 outColor;
+layout(location=0) out vec4 gainOut;
+layout(location=1) out vec4 reflectionOut;
 layout(set=0,binding=0) uniform sampler2D worldColor;
 layout(set=0,binding=1) uniform sampler2D worldDepth;
 layout(set=0,binding=2) uniform isampler2D worldNormal;
+layout(set=0,binding=7) uniform isampler2D surfaceMetadata;
+#ifdef YAMI_MSAA_METADATA
+layout(set=0,binding=8) uniform isampler2DMS finalMotion;
+layout(set=0,binding=9) uniform isampler2DMS finalNormal;
+layout(set=0,binding=10) uniform isampler2DMS finalCenterDepth;
+layout(set=0,binding=11) uniform sampler2DMS artistMask;
+#else
+layout(set=0,binding=11) uniform sampler2D artistMask;
+#endif
 layout(std140,set=0,binding=3) uniform Parameters {
     mat4 inverseVP, currentVP, previousVP;
     vec4 camera, extent, jitter, strengths, post, temporal;
+    mat4 inversePreviousVP;
+    vec4 rayBasisX;
+    vec4 rayBasisY;
+    vec4 rayBasisZ;
+    vec4 previousRayBasisX;
+    vec4 previousRayBasisY;
+    vec4 previousRayBasisZ;
+    vec4 previousCamera;
 } p;
 #ifdef YAMI_RAY_QUERY
 layout(set=0,binding=4) uniform accelerationStructureEXT scene;
@@ -34,9 +52,75 @@ vec4 normalAt(ivec2 texel) {
     ivec4 value=texelFetch(worldNormal,texel,0);
     return vec4(vec3(value.xyz)/32767.0,float(value.w));
 }
+bool orthographic(mat4 vp) {
+    return length(vec3(vp[0][3],vp[1][3],vp[2][3]))<1e-8;
+}
+vec3 centerPosition(vec2 uv,float encodedDepth) {
+    vec2 coordinate=(uv-p.jitter.xy)*2-1;
+    if(p.temporal.w<=0 || orthographic(p.currentVP)) {
+        float z=p.temporal.w>0?encodedDepth-1:encodedDepth;
+        vec4 h=p.inverseVP*vec4(coordinate,z,1);
+        return h.xyz/h.w;
+    }
+    // CPU-qualified camera-relative rays avoid inverse-VP translation cancellation.
+    if(p.camera.w>.5)
+        return p.camera.xyz+encodedDepth*(coordinate.x*p.rayBasisX.xyz+
+            coordinate.y*p.rayBasisY.xyz+p.rayBasisZ.xyz);
+    vec4 h=p.inverseVP*vec4(coordinate,0,1);
+    vec4 depthColumn=p.inverseVP[2];
+    float z=(1/encodedDepth-h.w)/depthColumn.w;
+    return (h.xyz+depthColumn.xyz*z)*encodedDepth;
+}
+bool sourceComplete(ivec2 texel) {
+#ifdef YAMI_MSAA_METADATA
+    ivec4 selected=texelFetch(finalNormal,texel,0);
+    int token=texelFetch(finalMotion,texel,0).w;
+    vec3 normal=vec3(selected.xyz)/32767.0;
+    float depth=intBitsToFloat(texelFetch(finalCenterDepth,texel,0).y);
+    if(token<0 || selected.w<0 || dot(normal,normal)<=.01 ||
+       isnan(depth) || isinf(depth) || depth<=0) return false;
+    normal=normalize(normal);
+    vec2 uv=(vec2(texel)+.5)/p.extent.xy;
+    vec3 at=centerPosition(uv,depth);
+    float tolerance=abs(orthographic(p.currentVP)?1:depth)*.001;
+    if(any(isnan(at)) || any(isinf(at)) || isnan(tolerance) || isinf(tolerance)) return false;
+    // Compare FINAL retained samples, not a primitive's coverage mask. Every
+    // sample's interpolants describe the same pixel center, even on a slope.
+    for(int i=1;i<textureSamples(finalNormal);++i) {
+        ivec4 adjacent=texelFetch(finalNormal,texel,i);
+        if(adjacent.w!=selected.w || texelFetch(finalMotion,texel,i).w!=token) return false;
+        vec3 n=vec3(adjacent.xyz)/32767.0;
+        if(dot(n,n)<=.01) return false;
+        n=normalize(n);
+        if(dot(n,normal)<(token>0?.8:.9)) return false;
+        float z=intBitsToFloat(texelFetch(finalCenterDepth,texel,i).y);
+        if(isnan(z) || isinf(z) || z<=0) return false;
+        vec3 delta=centerPosition(uv,z)-at;
+        if(any(isnan(delta)) || any(isinf(delta)) ||
+           abs(dot(delta,normalize(n+normal)))>tolerance) return false;
+    }
+#endif
+    return true;
+}
+bool artistClean(ivec2 texel) {
+    if(p.post.z<=0) return true;
+#ifdef YAMI_MSAA_METADATA
+    // Averaged artwork includes every final colour sample, not only sample zero.
+    for(int i=0;i<textureSamples(artistMask);++i)
+        if(texelFetch(artistMask,texel,i).r<.5) return false;
+    return true;
+#else
+    return texelFetch(artistMask,texel,0).r>.5;
+#endif
+}
 vec3 worldPosition(vec2 uv,float depth) {
-    vec4 h=p.inverseVP*vec4((uv-p.jitter.xy)*2-1,depth,1);
-    return h.xyz/h.w;
+    // Visibility depth resolves sample zero; interpolation metadata is at the
+    // primitive's pixel center. Keep ray origins and normals at that center.
+    if(p.temporal.w>0) {
+        ivec2 t=clamp(ivec2(floor(uv*p.extent.xy)),ivec2(0),ivec2(p.extent.xy)-1);
+        depth=intBitsToFloat(texelFetch(surfaceMetadata,t,0).y);
+    }
+    return centerPosition(uv,depth);
 }
 vec3 hemisphere(vec3 n,vec2 random) {
     float phi=6.2831853*random.x, r=sqrt(random.y);
@@ -108,9 +192,10 @@ float rasterAO(vec3 position,vec3 normal) {
     for(int i=0;i<12;++i) {
         float a=(float(i)+noise(gl_FragCoord.xy))*2.399963;
         vec2 uv=vUv+vec2(cos(a),sin(a))*(2+float(i)*1.8)/p.extent.xy;
-        if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))) continue;
-        float z=texture(worldDepth,uv).r; if(z>=.999999) continue;
-        vec3 d=worldPosition(uv,z)-position;
+        if(any(lessThan(uv,vec2(0)))||any(greaterThanEqual(uv,vec2(1)))) continue;
+        ivec2 t=ivec2(floor(uv*p.extent.xy));
+        float z=texelFetch(worldDepth,t,0).r; if(z>=.999999) continue;
+        vec3 d=worldPosition((vec2(t)+.5)/p.extent.xy,z)-position;
         float len=length(d);
         obscured+=step(.05,dot(normal,d))*max(0,1-len/12.0); valid+=1;
     }
@@ -139,14 +224,11 @@ vec3 screenReflection(vec3 origin,vec3 direction) {
 }
 void main() {
     ivec2 texel=ivec2(gl_FragCoord.xy);
-    vec4 base=texelFetch(worldColor,texel,0);
-    // Original texture/tint/light/fog and alpha layers resolve together in
-    // their display-authored floating raster domain. Enter linear HDR here,
-    // uniformly for all world pixels, before RT, filtering and tone mapping.
-    base.rgb=pow(max(base.rgb,vec3(0)),vec3(2.2));
     float depth=texelFetch(worldDepth,texel,0).r;
     vec4 validity=normalAt(texel);
-    if(depth>=.999999 || validity.w<0 || length(validity.xyz)<.1) { outColor=vec4(base.rgb,1); return; }
+    float complete=sourceComplete(texel)?(artistClean(texel)?1:2):0;
+    gainOut=vec4(1,1,1,1); reflectionOut=vec4(0,0,0,complete);
+    if(depth>=.999999 || validity.w<0 || length(validity.xyz)<.1) return;
     vec3 position=worldPosition(vUv,depth), n=normalize(validity.xyz);
     vec3 view=normalize(p.camera.xyz-position);
     float ao=1, visibility=1; vec3 reflected=vec3(0), indirect=vec3(0);
@@ -166,10 +248,11 @@ void main() {
     if(p.strengths.y>0) reflected=screenReflection(position+n*.1,reflectedDirection);
 #endif
     float fresnel=.04+.96*pow(1-max(dot(n,view),0),5);
-    vec3 color=base.rgb*mix(1,ao,p.strengths.x)*mix(1,.3+.7*visibility,p.strengths.z);
-    color+=reflected*p.strengths.y*fresnel*(1-.65*p.post.w);
-    color+=base.rgb*indirect*p.strengths.w;
-    // Temporal history validates hard-shadow changes separately from geometry.
-    // Authored alpha remains in worldColor and is restored by the temporal pass.
-    outColor=vec4(max(color,vec3(0)),visibility);
+    // Keep multiplicative illumination independent of authored texture colors.
+    // This is the exact lighting equation, not a radiance/base division (which
+    // loses information on black texels and starves textured actor kernels).
+    vec3 gain=vec3(mix(1,ao,p.strengths.x)*mix(1,.3+.7*visibility,p.strengths.z));
+    gain+=indirect*p.strengths.w;
+    gainOut=vec4(max(gain,vec3(0)),visibility);
+    reflectionOut=vec4(max(reflected*p.strengths.y*fresnel*(1-.65*p.post.w),vec3(0)),complete);
 }

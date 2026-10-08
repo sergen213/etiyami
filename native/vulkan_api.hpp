@@ -72,5 +72,14 @@ struct VulkanEffectsFrame {
     std::span<const VkDescriptorImageInfo> textures;
     GraphicsSettings settings{};
     bool history_valid = false;
+    // Sample-zero integer prior UV/depth/token (clip-W for perspective,
+    // 1+device depth for orthographic), and packed oct prior normal/current center clip-W.
+    const VulkanImage *motion = nullptr, *previous_normal = nullptr;
+    // Final retained MSAA ownership/normal/current-center-clip-W, absent at 1x.
+    const VulkanImage *ms_motion = nullptr, *ms_normal = nullptr, *ms_previous_normal = nullptr;
+    // Optional normalized authored-history mask at the world's actual sample count.
+    const VulkanImage *artist_mask = nullptr;
+    // Existing retained float MS world color: type-correct optional-mask fallback.
+    const VulkanImage *ms_color = nullptr;
 };
 } // namespace yami

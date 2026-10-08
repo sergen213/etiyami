@@ -29,8 +29,38 @@ bool same(VkExtent2D a,VkExtent2D b) { return a.width==b.width && a.height==b.he
 struct alignas(16) Parameters {
     Mat4 inverse_vp, current_vp, previous_vp;
     std::array<float,4> camera,extent,jitter,strengths,post,temporal;
+    Mat4 inverse_previous_vp;
+    std::array<float,4> ray_basis_x,ray_basis_y,ray_basis_z;
+    std::array<float,4> previous_ray_basis_x,previous_ray_basis_y,previous_ray_basis_z;
+    std::array<float,4> previous_camera;
 };
-static_assert(sizeof(Parameters)==288);
+static_assert(sizeof(Parameters)==464);
+bool camera_ray_basis(Parameters& p,const Mat4& view,const Mat4& projection) {
+    const auto& v=view.values; const auto& projection_values=projection.values;
+    if(v[3]!=0 || v[7]!=0 || v[11]!=0 || v[15]!=1 ||
+       projection_values[12]!=0 || projection_values[13]!=0 || projection_values[15]!=0) return false;
+    for(float value:v) if(!std::isfinite(value)) return false;
+    for(float value:projection_values) if(!std::isfinite(value)) return false;
+    for(float value:p.current_vp.values) if(!std::isfinite(value)) return false;
+    for(int i=0;i<3;++i) if(!std::isfinite(p.camera[i])) return false;
+    // These factors put the ideal camera at zero in clip X/Y/W. Avoid
+    // cancelling the rounded VP translation against a large world camera.
+    const auto& m=p.current_vp.values;
+    const double a[3]{m[0],m[4],m[8]},b[3]{m[1],m[5],m[9]},c[3]{m[3],m[7],m[11]};
+    const double columns[3][3]{
+        {b[1]*c[2]-b[2]*c[1],b[2]*c[0]-b[0]*c[2],b[0]*c[1]-b[1]*c[0]},
+        {c[1]*a[2]-c[2]*a[1],c[2]*a[0]-c[0]*a[2],c[0]*a[1]-c[1]*a[0]},
+        {a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]}};
+    const double determinant=a[0]*columns[0][0]+a[1]*columns[0][1]+a[2]*columns[0][2];
+    if(!std::isfinite(determinant) || determinant==0) return false;
+    std::array<float,4>* basis[3]{&p.ray_basis_x,&p.ray_basis_y,&p.ray_basis_z};
+    for(int column=0;column<3;++column) for(int row=0;row<3;++row) {
+        const double value=columns[column][row]/determinant;
+        if(!std::isfinite(value) || std::abs(value)>std::numeric_limits<float>::max()) return false;
+        (*basis[column])[row]=float(value);
+    }
+    return true;
+}
 struct alignas(16) RayMaterial {
     std::uint64_t vertices,indices;
     std::array<float,4> uv,color,diffuse;
@@ -55,20 +85,25 @@ struct VulkanEffects::Impl {
     std::uint32_t top_size_count=0;
     VkAccelerationStructureBuildSizesInfoKHR top_sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     std::unordered_map<std::uint64_t,Blas> cache;
-    VulkanImage effects,history[2],geometry[2],output;
+    VulkanImage effects,reflected,history[2],geometry[2],base[2],reflection[2],output;
     VkSampler sampler=VK_NULL_HANDLE,nearest_sampler=VK_NULL_HANDLE;
     VkDescriptorPool pool=VK_NULL_HANDLE,ray_pool=VK_NULL_HANDLE;
     std::uint32_t ray_capacity=0;
-    VkDescriptorSetLayout effect_layout=VK_NULL_HANDLE,ray_layout=VK_NULL_HANDLE,temporal_layout=VK_NULL_HANDLE;
-    VkPipelineLayout effect_pipeline_layout=VK_NULL_HANDLE,ray_pipeline_layout=VK_NULL_HANDLE,temporal_pipeline_layout=VK_NULL_HANDLE;
-    VkPipeline effect_pipeline=VK_NULL_HANDLE,ray_pipeline=VK_NULL_HANDLE,temporal_pipeline=VK_NULL_HANDLE;
-    VkDescriptorSet effect_set=VK_NULL_HANDLE,ray_set=VK_NULL_HANDLE,temporal_set=VK_NULL_HANDLE;
+    VkDescriptorSetLayout effect_layout=VK_NULL_HANDLE,ray_layout=VK_NULL_HANDLE,temporal_layout=VK_NULL_HANDLE,display_layout=VK_NULL_HANDLE;
+    VkPipelineLayout effect_pipeline_layout=VK_NULL_HANDLE,ray_pipeline_layout=VK_NULL_HANDLE,temporal_pipeline_layout=VK_NULL_HANDLE,display_pipeline_layout=VK_NULL_HANDLE;
+    VkPipeline effect_pipeline=VK_NULL_HANDLE,ray_pipeline=VK_NULL_HANDLE,temporal_pipeline=VK_NULL_HANDLE,display_pipeline=VK_NULL_HANDLE;
+    VkDescriptorSet effect_set=VK_NULL_HANDLE,ray_set=VK_NULL_HANDLE,temporal_set=VK_NULL_HANDLE,display_set=VK_NULL_HANDLE;
+    VkDescriptorSetLayout effect_ms_layout=VK_NULL_HANDLE,ray_ms_layout=VK_NULL_HANDLE;
+    VkPipelineLayout effect_ms_pipeline_layout=VK_NULL_HANDLE,ray_ms_pipeline_layout=VK_NULL_HANDLE;
+    VkPipeline effect_ms_pipeline=VK_NULL_HANDLE,ray_ms_pipeline=VK_NULL_HANDLE;
+    VkDescriptorSet effect_ms_set=VK_NULL_HANDLE,ray_ms_set=VK_NULL_HANDLE;
     bool valid=false,clear_cache=false;
     unsigned ping=0;
     std::uint64_t frame_index=0,build_count=0,query_count=0;
     GraphicsSettings previous_settings{};
     Mat4 previous_vp{};
-    std::array<float,3> previous_camera{};
+    std::array<float,4> previous_camera{};
+    std::array<float,4> previous_ray_basis_x{},previous_ray_basis_y{},previous_ray_basis_z{};
 
     explicit Impl(VulkanContext& context):c(context) {
         try { initialize(); } catch (...) { cleanup(); throw; }
@@ -158,15 +193,19 @@ struct VulkanEffects::Impl {
         c.vk.vkCmdClearColorImage(cmd,image.image,image.layout,&zero,1,&range);
         transition(cmd,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    VkDescriptorSetLayout layout(bool ray,bool temporal,std::uint32_t source_capacity=0) {
-        std::array<VkDescriptorSetLayoutBinding,7> bindings{};
-        const unsigned count=ray||temporal?7:4;
+    VkDescriptorSetLayout layout(bool ray,bool temporal,std::uint32_t source_capacity=0,bool display=false,bool ms=false) {
+        std::array<VkDescriptorSetLayoutBinding,12> bindings{};
+        const bool artist=!temporal&&!display;
+        const unsigned base_count=temporal?12:ray?8:5,count=base_count+(ms?3:0)+(artist?1:0);
         for(unsigned i=0;i<count;++i) {
             bindings[i].binding=i; bindings[i].descriptorCount=1; bindings[i].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
             bindings[i].descriptorType=i==3?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         }
+        if(!ray && !temporal && !display) bindings[4].binding=7;
+        if(ms) for(unsigned i=base_count;i<base_count+3;++i) bindings[i].binding=8+i-base_count;
+        if(artist) bindings[count-1].binding=11;
         if(ray) { bindings[4].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; bindings[5].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; bindings[6].descriptorCount=source_capacity; }
-        std::array<VkDescriptorBindingFlags,7> binding_flags{}; if(ray) binding_flags[6]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        std::array<VkDescriptorBindingFlags,12> binding_flags{}; if(ray) binding_flags[6]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
         VkDescriptorSetLayoutBindingFlagsCreateInfo flags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO}; flags.bindingCount=count; flags.pBindingFlags=binding_flags.data();
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; info.bindingCount=count; info.pBindings=bindings.data(); info.pNext=ray?&flags:nullptr;
         VkDescriptorSetLayout result{}; checked(c.vk.vkCreateDescriptorSetLayout(c.device,&info,nullptr,&result),"effects descriptor layout"); return result;
@@ -191,11 +230,13 @@ struct VulkanEffects::Impl {
             VkPipelineViewportStateCreateInfo viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO}; viewport.viewportCount=1; viewport.scissorCount=1;
             VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO}; raster.polygonMode=VK_POLYGON_MODE_FILL; raster.lineWidth=1;
             VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO}; samples.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
-            std::array<VkPipelineColorBlendAttachmentState,3> blend{}; for(auto& a:blend) a.colorWriteMask=15;
+            std::array<VkPipelineColorBlendAttachmentState,4> blend{}; for(auto& a:blend) a.colorWriteMask=15;
             VkPipelineColorBlendStateCreateInfo blending{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO}; blending.attachmentCount=attachments; blending.pAttachments=blend.data();
             VkDynamicState dynamics[]{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
             VkPipelineDynamicStateCreateInfo dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO}; dynamic.dynamicStateCount=2; dynamic.pDynamicStates=dynamics;
-            std::array<VkFormat,3> formats{VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R32G32B32A32_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT};
+            std::array<VkFormat,4> formats{VK_FORMAT_R16G16B16A16_SFLOAT,
+                attachments==4?VK_FORMAT_R32G32B32A32_SFLOAT:VK_FORMAT_R16G16B16A16_SFLOAT,
+                VK_FORMAT_R32G32B32A32_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT};
             VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO}; rendering.colorAttachmentCount=attachments; rendering.pColorAttachmentFormats=formats.data();
             VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO}; info.pNext=&rendering;
             info.stageCount=2; info.pStages=stages; info.pVertexInputState=&input; info.pInputAssemblyState=&assembly; info.pViewportState=&viewport;
@@ -215,30 +256,41 @@ struct VulkanEffects::Impl {
         info.magFilter=info.minFilter=VK_FILTER_NEAREST;
         checked(c.vk.vkCreateSampler(c.device,&info,nullptr,&nearest_sampler),"effects depth sampler");
         reserve(uniform,sizeof(Parameters),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,true);
-        std::array<VkDescriptorPoolSize,2> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,9},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,2}}};
-        VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; pool_info.maxSets=2; pool_info.poolSizeCount=std::uint32_t(sizes.size()); pool_info.pPoolSizes=sizes.data();
+        std::array<VkDescriptorPoolSize,2> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,28},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,4}}};
+        VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; pool_info.maxSets=4; pool_info.poolSizeCount=std::uint32_t(sizes.size()); pool_info.pPoolSizes=sizes.data();
         checked(c.vk.vkCreateDescriptorPool(c.device,&pool_info,nullptr,&pool),"effects descriptor pool");
-        effect_layout=layout(false,false); temporal_layout=layout(false,true);
-        effect_pipeline_layout=pipeline_layout(effect_layout); temporal_pipeline_layout=pipeline_layout(temporal_layout);
-        effect_pipeline=pipeline(effect_pipeline_layout,spirv::effects_frag,1); temporal_pipeline=pipeline(temporal_pipeline_layout,spirv::temporal_frag,3);
-        effect_set=descriptor(effect_layout,pool); temporal_set=descriptor(temporal_layout,pool);
+        effect_layout=layout(false,false); temporal_layout=layout(false,true); display_layout=layout(false,false,0,true);
+        effect_ms_layout=layout(false,false,0,false,true);
+        effect_pipeline_layout=pipeline_layout(effect_layout); temporal_pipeline_layout=pipeline_layout(temporal_layout); display_pipeline_layout=pipeline_layout(display_layout);
+        effect_ms_pipeline_layout=pipeline_layout(effect_ms_layout);
+        effect_pipeline=pipeline(effect_pipeline_layout,spirv::effects_frag,2);
+        effect_ms_pipeline=pipeline(effect_ms_pipeline_layout,spirv::effects_ms_frag,2);
+        temporal_pipeline=pipeline(temporal_pipeline_layout,spirv::temporal_frag,4);
+        display_pipeline=pipeline(display_pipeline_layout,spirv::display_frag,1);
+        effect_set=descriptor(effect_layout,pool); temporal_set=descriptor(temporal_layout,pool); display_set=descriptor(display_layout,pool);
+        effect_ms_set=descriptor(effect_ms_layout,pool);
     }
     void destroy_ray_pipeline() noexcept {
         if(ray_pipeline) c.vk.vkDestroyPipeline(c.device,ray_pipeline,nullptr);
+        if(ray_ms_pipeline) c.vk.vkDestroyPipeline(c.device,ray_ms_pipeline,nullptr);
         if(ray_pipeline_layout) c.vk.vkDestroyPipelineLayout(c.device,ray_pipeline_layout,nullptr);
+        if(ray_ms_pipeline_layout) c.vk.vkDestroyPipelineLayout(c.device,ray_ms_pipeline_layout,nullptr);
         if(ray_pool) c.vk.vkDestroyDescriptorPool(c.device,ray_pool,nullptr);
         if(ray_layout) c.vk.vkDestroyDescriptorSetLayout(c.device,ray_layout,nullptr);
+        if(ray_ms_layout) c.vk.vkDestroyDescriptorSetLayout(c.device,ray_ms_layout,nullptr);
         ray_pipeline=VK_NULL_HANDLE; ray_pipeline_layout=VK_NULL_HANDLE;
         ray_pool=VK_NULL_HANDLE; ray_layout=VK_NULL_HANDLE; ray_set=VK_NULL_HANDLE;
+        ray_ms_pipeline=VK_NULL_HANDLE; ray_ms_pipeline_layout=VK_NULL_HANDLE;
+        ray_ms_layout=VK_NULL_HANDLE; ray_ms_set=VK_NULL_HANDLE;
         ray_capacity=0;
     }
     void ensure_ray_capacity(std::size_t count) {
         if(count<=ray_capacity) return;
         const auto& limits=c.properties.limits;
         const auto available=[](std::uint32_t limit,std::uint32_t fixed) { return limit>fixed?limit-fixed:0u; };
-        const auto maximum=std::min({available(limits.maxPerStageDescriptorSamplers,3),
-            available(limits.maxDescriptorSetSamplers,3),available(limits.maxPerStageDescriptorSampledImages,3),
-            available(limits.maxDescriptorSetSampledImages,3),available(limits.maxPerStageResources,6)});
+        const auto maximum=std::min({available(limits.maxPerStageDescriptorSamplers,8),
+            available(limits.maxDescriptorSetSamplers,8),available(limits.maxPerStageDescriptorSampledImages,8),
+            available(limits.maxDescriptorSetSampledImages,8),available(limits.maxPerStageResources,11)});
         if(count>maximum) throw std::runtime_error("Vulkan ray-query artwork table requires "+std::to_string(count)+
             " textures, but this device's descriptor limits allow "+std::to_string(maximum));
         auto capacity=std::max(ray_capacity,1u);
@@ -247,14 +299,18 @@ struct VulkanEffects::Impl {
         // Grow only before recording any effects/AS commands; unrelated temporal
         // descriptor sets stay alive in their own pool.
         destroy_ray_pipeline();
-        std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity+3},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1},
-            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1}}};
+        std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity*2+13},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,2},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,2},
+            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,2}}};
         VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        info.maxSets=1; info.poolSizeCount=std::uint32_t(sizes.size()); info.pPoolSizes=sizes.data();
+        info.maxSets=2; info.poolSizeCount=std::uint32_t(sizes.size()); info.pPoolSizes=sizes.data();
         checked(c.vk.vkCreateDescriptorPool(c.device,&info,nullptr,&ray_pool),"effects grow ray descriptor pool");
         ray_layout=layout(true,false,capacity); ray_pipeline_layout=pipeline_layout(ray_layout);
-        ray_pipeline=pipeline(ray_pipeline_layout,spirv::effects_rt_frag,1);
+        ray_pipeline=pipeline(ray_pipeline_layout,spirv::effects_rt_frag,2);
+        ray_ms_layout=layout(true,false,capacity,false,true);
+        ray_ms_pipeline_layout=pipeline_layout(ray_ms_layout);
+        ray_ms_pipeline=pipeline(ray_ms_pipeline_layout,spirv::effects_rt_ms_frag,2);
+        ray_ms_set=descriptor(ray_ms_layout,ray_pool);
         ray_set=descriptor(ray_layout,ray_pool); ray_capacity=capacity;
     }
     void acceleration_barrier(VkCommandBuffer cmd,bool trace=false) {
@@ -351,19 +407,48 @@ struct VulkanEffects::Impl {
         VkAccelerationStructureBuildRangeInfoKHR range{}; range.primitiveCount=count; const auto* ranges=&range;
         c.vk.vkCmdBuildAccelerationStructuresKHR(f.command,1,&top_build,&ranges); ++build_count; tlas_count=count; acceleration_barrier(f.command,true);
     }
-    void descriptors(const VulkanEffectsFrame& f,VkDescriptorSet set,bool ray,bool temporal,unsigned old) {
-        std::array<VkDescriptorImageInfo,6> images{{{sampler,temporal?effects.view:f.color->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {nearest_sampler,f.depth->view,f.depth->layout},{nearest_sampler,f.normal->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {nearest_sampler,history[old].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},{nearest_sampler,geometry[old].view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-            {nearest_sampler,f.color->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}}};
+    void descriptors(const VulkanEffectsFrame& f,VkDescriptorSet set,bool ray,bool temporal,unsigned old,bool display=false,bool ms=false) {
+        // Each pass owns a descriptor set: recorded temporal descriptors must
+        // never be overwritten with display inputs before command submission.
+        std::array<VkDescriptorImageInfo,12> images{};
+        const auto source=[&](unsigned binding,const VulkanImage& image,VkSampler filter) {
+            images[binding]={filter,image.view,image.layout};
+        };
+        if(display) {
+            source(0,base[old],nearest_sampler); source(1,history[old],nearest_sampler);
+            source(2,reflection[old],nearest_sampler); source(4,*f.color,sampler);
+        } else {
+            source(0,temporal?effects:*f.color,nearest_sampler);
+            source(1,*f.depth,nearest_sampler); source(2,*f.normal,nearest_sampler);
+            if(temporal) {
+                source(4,history[old],nearest_sampler); source(5,geometry[old],nearest_sampler);
+                source(6,*f.color,nearest_sampler); source(7,reflected,nearest_sampler);
+                source(8,base[old],nearest_sampler); source(9,reflection[old],nearest_sampler);
+                // Optional metadata supports direct effects fixtures/static
+                // callers; temporal.w disables integer reads when absent.
+                source(10,f.motion?*f.motion:*f.normal,nearest_sampler);
+                source(11,f.previous_normal?*f.previous_normal:*f.normal,nearest_sampler);
+            } else {
+                source(7,f.previous_normal?*f.previous_normal:*f.normal,nearest_sampler);
+                if(ms) {
+                    source(8,*f.ms_motion,nearest_sampler); source(9,*f.ms_normal,nearest_sampler);
+                    source(10,*f.ms_previous_normal,nearest_sampler);
+                }
+                // Even a dynamically guarded descriptor must match the shader's
+                // floating sampled type and selected MS/non-MS image view.
+                source(11,f.artist_mask?*f.artist_mask:ms?*f.ms_color:*f.color,nearest_sampler);
+            }
+        }
         VkDescriptorBufferInfo ubo{uniform.gpu.buffer,0,sizeof(Parameters)},table{materials.gpu.buffer,0,materials.gpu.size};
-        std::array<VkWriteDescriptorSet,7> writes{};
-        unsigned count=ray||temporal?7:4;
+        std::array<VkWriteDescriptorSet,12> writes{};
+        const bool artist=!temporal&&!display;
+        const unsigned base_count=temporal?12:ray?8:5,count=base_count+(ms?3:0)+(artist?1:0);
         for(unsigned i=0;i<count;++i) {
-            writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=set; writes[i].dstBinding=i; writes[i].descriptorCount=1;
+            writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=set;
+            writes[i].dstBinding=artist&&i==count-1?11:ms && i>=base_count?8+i-base_count:(!ray && !temporal && !display && i==4)?7:i; writes[i].descriptorCount=1;
             writes[i].descriptorType=i==3?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             if(i==3) writes[i].pBufferInfo=&ubo;
-            else if(i<3 || temporal) writes[i].pImageInfo=&images[i<3?i:i-1];
+            else writes[i].pImageInfo=&images[writes[i].dstBinding];
         }
         VkWriteDescriptorSetAccelerationStructureKHR as{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR}; as.accelerationStructureCount=1; as.pAccelerationStructures=&tlas.handle;
         if(ray) {
@@ -374,7 +459,7 @@ struct VulkanEffects::Impl {
         c.vk.vkUpdateDescriptorSets(c.device,count,writes.data(),0,nullptr);
     }
     void pass(VkCommandBuffer cmd,std::span<VulkanImage*> targets,VkPipeline pipeline,VkPipelineLayout layout,VkDescriptorSet set) {
-        std::array<VkRenderingAttachmentInfo,3> attachments{};
+        std::array<VkRenderingAttachmentInfo,4> attachments{};
         for(std::size_t i=0;i<targets.size();++i) {
             transition(cmd,*targets[i],VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             attachments[i].sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO; attachments[i].imageView=targets[i]->view;
@@ -393,16 +478,23 @@ struct VulkanEffects::Impl {
     const VulkanImage& render(const VulkanEffectsFrame& f) {
         if(!f.color || !f.depth || !f.normal || !f.extent.width || !f.extent.height || !f.output_extent.width || !f.output_extent.height) throw std::runtime_error("Vulkan effects: invalid world targets");
         if(!f.settings.enhanced) { valid=false; return *f.color; }
+        const bool ms=f.ms_motion && f.ms_normal && f.ms_previous_normal;
+        if(ms&&!f.artist_mask&&!f.ms_color)throw std::runtime_error("Vulkan effects: MS authored-mask fallback requires retained float world color");
         bool rt=c.ray_query && f.settings.ray_tracing && !f.instances.empty() &&
             (f.settings.shadows>0 || f.settings.ambient_occlusion>0 || f.settings.reflections>0 || f.settings.indirect_lighting>0);
         if(rt) ensure_ray_capacity(f.textures.size());
         if(!same(effects.extent,f.extent) || !same(output.extent,f.output_extent)) valid=false;
-        image(effects,f.extent); image(output,f.output_extent);
-        for(unsigned i=0;i<2;++i) { image(history[i],f.output_extent); image(geometry[i],f.output_extent,VK_FORMAT_R32G32B32A32_SFLOAT); initialize_history(f.command,history[i]); initialize_history(f.command,geometry[i]); }
+        image(effects,f.extent); image(reflected,f.extent); image(output,f.output_extent);
+        for(unsigned i=0;i<2;++i) {
+            image(history[i],f.output_extent); image(geometry[i],f.output_extent,VK_FORMAT_R32G32B32A32_SFLOAT);
+            image(base[i],f.output_extent,VK_FORMAT_R32G32B32A32_SFLOAT); image(reflection[i],f.output_extent);
+            for(auto* target:{&history[i],&geometry[i],&base[i],&reflection[i]}) initialize_history(f.command,*target);
+        }
         if(clear_cache) { for(auto& entry:cache) destroy(entry.second.as); cache.clear(); destroy(tlas); tlas_count=0; clear_cache=false; }
         if(rt) build_scene(f);
-        Parameters p{}; p.current_vp=multiply(f.projection,f.view); p.inverse_vp=inverse(p.current_vp); p.previous_vp=f.previous_view_projection;
-        Mat4 inverse_view=inverse(f.view); p.camera={inverse_view.values[12],inverse_view.values[13],inverse_view.values[14],1};
+        Parameters p{}; p.current_vp=multiply(f.projection,f.view); p.inverse_vp=inverse(p.current_vp);
+        Mat4 inverse_view=inverse(f.view); p.camera={inverse_view.values[12],inverse_view.values[13],inverse_view.values[14],0};
+        p.camera[3]=camera_ray_basis(p,f.view,f.projection)?1.f:0.f;
         float camera_distance=0; for(int i=0;i<3;++i) camera_distance+=(p.camera[i]-previous_camera[i])*(p.camera[i]-previous_camera[i]);
         float camera_change=0; for(int i=0;i<12;++i) camera_change=std::max(camera_change,std::abs(p.current_vp.values[i]-previous_vp.values[i]));
         if(camera_distance>400 || camera_change>.75f) valid=false;
@@ -416,28 +508,44 @@ struct VulkanEffects::Impl {
         // its native-sized history are resolved onto the unjittered pixel grid.
         p.jitter={f.jitter[0]/f.extent.width,f.jitter[1]/f.extent.height,0,0};
         p.strengths={f.settings.ambient_occlusion,f.settings.reflections,rt?f.settings.shadows:0,rt?f.settings.indirect_lighting:0};
-        p.post={f.settings.exposure,f.settings.bloom,f.settings.sharpen,f.settings.roughness};
-        p.temporal={valid&&f.history_valid&&(f.settings.temporal_aa||rt)?1.f:0.f,f.settings.temporal_aa?1.f:0.f,float(frame_index%4096),rt?1.f:0.f};
+        // Sharpening is a persisted OpenGL/GLES setting, not a Vulkan effect.
+        p.post={f.settings.exposure,f.settings.bloom,f.artist_mask?1.f:0.f,f.settings.roughness};
+        const bool history_eligible=valid&&f.history_valid&&(f.settings.temporal_aa||rt);
+        p.temporal={history_eligible?1.f:0.f,f.settings.temporal_aa?1.f:0.f,float(frame_index%4096),f.motion&&f.previous_normal?1.f:0.f};
+        p.previous_vp=history_eligible?f.previous_view_projection:p.current_vp;
+        p.inverse_previous_vp=history_eligible?inverse(f.previous_view_projection):p.inverse_vp;
+        p.previous_ray_basis_x=history_eligible?previous_ray_basis_x:p.ray_basis_x;
+        p.previous_ray_basis_y=history_eligible?previous_ray_basis_y:p.ray_basis_y;
+        p.previous_ray_basis_z=history_eligible?previous_ray_basis_z:p.ray_basis_z;
+        p.previous_camera=history_eligible?previous_camera:p.camera;
         std::memcpy(uniform.mapped,&p,sizeof p);
-        descriptors(f,rt?ray_set:effect_set,rt,false,ping);
-        VulkanImage* effect_targets[]{&effects}; pass(f.command,effect_targets,rt?ray_pipeline:effect_pipeline,rt?ray_pipeline_layout:effect_pipeline_layout,rt?ray_set:effect_set);
+        const VkDescriptorSet effect_descriptor=rt?(ms?ray_ms_set:ray_set):(ms?effect_ms_set:effect_set);
+        const VkPipeline effect_shader=rt?(ms?ray_ms_pipeline:ray_pipeline):(ms?effect_ms_pipeline:effect_pipeline);
+        const VkPipelineLayout effect_pass_layout=rt?(ms?ray_ms_pipeline_layout:ray_pipeline_layout):(ms?effect_ms_pipeline_layout:effect_pipeline_layout);
+        descriptors(f,effect_descriptor,rt,false,ping,false,ms);
+        VulkanImage* effect_targets[]{&effects,&reflected}; pass(f.command,effect_targets,effect_shader,effect_pass_layout,effect_descriptor);
         if(rt) ++query_count;
         descriptors(f,temporal_set,false,true,ping);
-        unsigned next=1-ping; VulkanImage* temporal_targets[]{&history[next],&geometry[next],&output};
+        unsigned next=1-ping; VulkanImage* temporal_targets[]{&history[next],&geometry[next],&base[next],&reflection[next]};
         pass(f.command,temporal_targets,temporal_pipeline,temporal_pipeline_layout,temporal_set);
+        descriptors(f,display_set,false,false,next,true);
+        VulkanImage* display_targets[]{&output}; pass(f.command,display_targets,display_pipeline,display_pipeline_layout,display_set);
         ping=next; valid=true; previous_settings=f.settings; previous_vp=p.current_vp;
-        for(int i=0;i<3;++i) previous_camera[i]=p.camera[i]; ++frame_index;
+        previous_camera=p.camera; previous_ray_basis_x=p.ray_basis_x;
+        previous_ray_basis_y=p.ray_basis_y; previous_ray_basis_z=p.ray_basis_z; ++frame_index;
         return output;
     }
     void cleanup() noexcept {
         for(auto& entry:cache) destroy(entry.second.as);
         destroy(tlas); destroy(scratch); destroy(instances); destroy(materials); destroy(uniform);
-        destroy(effects); destroy(output); for(auto& i:history) destroy(i); for(auto& i:geometry) destroy(i);
+        destroy(effects); destroy(reflected); destroy(output);
+        for(auto& i:history) destroy(i); for(auto& i:geometry) destroy(i);
+        for(auto& i:base) destroy(i); for(auto& i:reflection) destroy(i);
         destroy_ray_pipeline();
-        for(auto p:{effect_pipeline,temporal_pipeline}) if(p) c.vk.vkDestroyPipeline(c.device,p,nullptr);
-        for(auto p:{effect_pipeline_layout,temporal_pipeline_layout}) if(p) c.vk.vkDestroyPipelineLayout(c.device,p,nullptr);
+        for(auto p:{effect_pipeline,effect_ms_pipeline,temporal_pipeline,display_pipeline}) if(p) c.vk.vkDestroyPipeline(c.device,p,nullptr);
+        for(auto p:{effect_pipeline_layout,effect_ms_pipeline_layout,temporal_pipeline_layout,display_pipeline_layout}) if(p) c.vk.vkDestroyPipelineLayout(c.device,p,nullptr);
         if(pool) c.vk.vkDestroyDescriptorPool(c.device,pool,nullptr);
-        for(auto l:{effect_layout,temporal_layout}) if(l) c.vk.vkDestroyDescriptorSetLayout(c.device,l,nullptr);
+        for(auto l:{effect_layout,effect_ms_layout,temporal_layout,display_layout}) if(l) c.vk.vkDestroyDescriptorSetLayout(c.device,l,nullptr);
         if(sampler) c.vk.vkDestroySampler(c.device,sampler,nullptr);
         if(nearest_sampler) c.vk.vkDestroySampler(c.device,nearest_sampler,nullptr);
     }

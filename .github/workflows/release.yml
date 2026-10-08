@@ -264,17 +264,19 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes '## v1.1.0 renderer enhancements
+            --notes '## v1.1.1 graphics and installer improvements
 
-          - Selectable Vulkan 1.3 backend with optional hardware ray-query shadows, reflections, ambient occlusion and global illumination, plus HDR/exposure, TAA, native-resolution HUD and render-scale upscaling. Hardware ray tracing is optional, not full path tracing. OpenGL remains the default and launcher-preview backend; explicit Vulkan failures report recovery instructions rather than silently switching backends.
-          - Vulkan denoising preserves deterministic raster artwork by filtering illumination separately and anchoring temporal history to the current artwork. Moving hard shadows reject stale history; signed-integer normal/eligibility MSAA resolves now match the depth sample while color averaging retains authored coverage.
-          - Enhanced OpenGL/OpenGL ES add alpha-correct skinned character shadows. Shared shadow strength is adjustable with --shadows 0..1 (default 0.75); classic rendering remains unchanged.
+          - Existing enhanced OpenGL/OpenGL ES character shadows are retained from public v1.1.0: animated, alpha-cutout actors cast into a near-gameplay directional depth map, preserving original artwork/fog compositing. Classic graphics or zero shadow strength bypasses them.
+          - Vulkan denoising preserves deterministic authored artwork separately from stochastic illumination/reflections. Dynamic pose, geometry/material changes and ordered untracked-overlay replay reject stale history; complete MSAA coverage ownership and sample-coherent geometry retain authored color averaging.
+          - Camera-relative reconstruction stabilizes large-coordinate ray positions. Four-positive-bilinear antialiasing-error transport avoids whole-texture accumulation; TAA rotates the same eight sample locations over a 64-frame epoch cycle without changing amplitude, not a guarantee of independence from arbitrary motion.
+          - Existing optional hardware ray-query shadows, reflections, ambient occlusion and global illumination are retained, alongside HDR/exposure, TAA, native-resolution HUD and render-scale upscaling. Ray tracing is optional, not full path tracing; OpenGL remains the default and launcher-preview backend.
+          - Removed Vulkan sharpening to avoid amplifying residual noise, without adding an unsharp replacement. The shared saved sharpening strength remains available only in OpenGL/OpenGL ES and is inactive under Vulkan.
 
           ## Linux downloads and installation
 
-          Six assets cover x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. Installers accept your original ISO, display its original game artwork and create app-menu/Desktop shortcuts; ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves.
+          Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. Installers accept your original ISO and display its original game artwork. Apps / the application-menu entries are primary; Desktop play/uninstall shortcuts are optional when a usable location is available, without extensions, trust changes or global desktop changes. A .desktop file is launcher metadata, not a shell script. ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves.
 
-          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
+          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Packages target native Linux x86_64/ARM64 CI; physical ARM64 GPU execution, blanket Linux compatibility and a performance guarantee are not claimed. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
           gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \

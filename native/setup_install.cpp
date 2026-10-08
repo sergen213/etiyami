@@ -488,19 +488,24 @@ InstallPaths default_install_paths() {
     require(valid(configured) || valid(home), "Set HOME or an absolute XDG_DATA_HOME to choose a per-user installation");
     const fs::path data = valid(configured) ? fs::path(configured) : fs::path(home)/".local/share";
     const auto* desktop = SDL_GetUserFolder(SDL_FOLDER_DESKTOP);
-    require(valid(desktop) || valid(home), "Desktop folder is unavailable; set HOME or choose a Desktop folder");
-    return {absolute_path(data/"etiyami"), absolute_path(data/"applications"),
-            absolute_path(valid(desktop) ? fs::path(desktop) : fs::path(home)/"Desktop")};
+    fs::path desktopPath;
+    try {
+        if (valid(desktop)) {
+            desktopPath = absolute_path(desktop);
+            // XDG user-dirs disables Desktop by mapping it to HOME.
+            if (valid(home) && desktopPath == absolute_path(home)) desktopPath.clear();
+        }
+    } catch (const std::runtime_error&) { desktopPath.clear(); }
+    return {absolute_path(data/"etiyami"), absolute_path(data/"applications"), desktopPath};
 }
 
 InstallResult install(const InstallRequest& request, const Progress& progress) {
     require(geteuid() != 0, "Run the installer as your ordinary user, never with root or sudo");
     require(!request.remover.empty(), "Trusted removal helper is required; provide --remover FILE pointing to yami-remove beside uninstall.sh");
-    InstallResult result{{absolute_path(request.paths.root), absolute_path(request.paths.applications),
-                          absolute_path(request.paths.desktop)}, false};
+    InstallResult result{{absolute_path(request.paths.root), absolute_path(request.paths.applications), {}}, false};
     const auto& paths = result.paths;
-    require(paths.root != paths.root.root_path() && !within(paths.root, paths.applications) && !within(paths.root, paths.desktop),
-            "Shortcut folders must be outside the installation root");
+    require(paths.root != paths.root.root_path() && !within(paths.root, paths.applications),
+            "Application-menu folder must be outside the installation root");
     directory_chain(paths.root.parent_path());
     result.reused = fs::exists(checked_status(paths.root));
     std::unique_ptr<TemporaryDirectory> repairStage;
@@ -541,12 +546,10 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
         }
     }
     writable_parent(paths.root.parent_path());
-    for (const auto& folder : {paths.applications, paths.desktop}) {
-        const auto ancestor = writable_parent(folder);
-        require(fs::space(ancestor).available >= 65536, "Not enough space to publish shortcuts in " + folder.string());
-        shortcut_exists(folder/shortcutName, paths.root);
-        shortcut_exists(folder/uninstallShortcut, paths.root);
-    }
+    const auto menuAncestor = writable_parent(paths.applications);
+    require(fs::space(menuAncestor).available >= 65536, "Not enough space to publish shortcuts in " + paths.applications.string());
+    shortcut_exists(paths.applications/shortcutName, paths.root);
+    shortcut_exists(paths.applications/uninstallShortcut, paths.root);
     report(progress, result.reused ? (legacy ? "Verifying legacy ownership from original ISO" : "Repairing uninstaller and shortcuts") : "Preparing installation");
     std::vector<fs::path> files;
     std::uint64_t engineBytes = 0;
@@ -567,7 +570,6 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
     CreatedDirectories created;
     directory_chain(paths.root.parent_path(), &created.paths);
     directory_chain(paths.applications, &created.paths);
-    directory_chain(paths.desktop, &created.paths);
     if (legacy)
         require(fs::space(paths.root.parent_path()).available >= 1536ULL * 1024 * 1024,
                 "Legacy ownership migration needs 1.5 GiB to verify the original ISO without overwriting installed assets");
@@ -623,49 +625,89 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
             inventory.files.emplace_back("eti-yami.png");
         inventory.files.emplace_back(std::string(helperDirectory) + "/" + std::string(helperName));
     }
-    for (const auto& folder : {paths.applications, paths.desktop})
-        for (const auto name : {playShortcut, uninstallShortcut})
-            inventory.shortcuts.push_back((folder/name).string());
-    const auto newInstalledRecord = serialize_installed(inventory);
-    const auto newEngineRecord = serialize_engine(engineInventory);
-    write_file(stage.path/"install"/installedName, newInstalledRecord);
-    write_file(stage.path/"install"/engineName, newEngineRecord);
     std::vector<std::unique_ptr<FilePublication>> support;
-    if (result.reused) {
-        checkRoot();
-        const auto helperFolder = paths.root/helperDirectory;
-        directory_chain(helperFolder);
-        if (fs::exists(checked_status(helperFolder))) {
-            struct stat info{};
-            require(::lstat(helperFolder.c_str(), &info) == 0 && S_ISDIR(info.st_mode) &&
-                    info.st_uid == geteuid() && !(info.st_mode & (S_IWGRP | S_IWOTH)), "Removal support directory is not private");
-        }
-        const std::array<fs::path, 4> names{fs::path(scriptName), fs::path(helperDirectory)/helperName,
-                                          fs::path(installedName), fs::path(engineName)};
-        for (std::size_t index = 0; index < names.size(); ++index) {
-            const auto& name = names[index];
-            if (name == engineName && !legacy) continue; // Preserve the authoritative updater ledger byte-for-byte.
-            if (name == installedName && newInstalledRecord == installedRecord) continue;
-            if (legacy && (name == scriptName || name == fs::path(helperDirectory)/helperName) &&
-                fs::exists(checked_status(paths.root/name)))
-                require(same_bytes(paths.root/name, stage.path/"install"/name),
-                        "Legacy removal support has unknown provenance; move it aside yourself before migration");
-            support.push_back(std::make_unique<FilePublication>(paths.root/name, stage.path/"install"/name,
-                              stage.path/("backup-" + std::to_string(index))));
-        }
-    }
-    std::vector<std::unique_ptr<ShortcutPublication>> shortcuts;
-    for (const auto& folder : {paths.applications, paths.desktop}) {
-        if (folder == paths.desktop && paths.desktop == paths.applications && !shortcuts.empty()) continue;
-        shortcuts.push_back(std::make_unique<ShortcutPublication>(folder, playShortcut, paths.root, desktop_entry(paths.root)));
-        shortcuts.push_back(std::make_unique<ShortcutPublication>(folder, uninstallShortcut, paths.root, uninstall_entry(paths.root)));
-    }
+    std::vector<std::unique_ptr<ShortcutPublication>> shortcuts, desktop;
+    shortcuts.push_back(std::make_unique<ShortcutPublication>(paths.applications, playShortcut, paths.root, desktop_entry(paths.root)));
+    shortcuts.push_back(std::make_unique<ShortcutPublication>(paths.applications, uninstallShortcut, paths.root, uninstall_entry(paths.root)));
     bool rootPublished = false;
     if (!result.reused)
         require(::lstat((stage.path/"install").c_str(), &rootIdentity) == 0, "Cannot inspect staged installation");
+    const auto skipDesktop = [&](const std::exception& failure) {
+        std::exception_ptr rollbackFailure;
+        for (auto it = desktop.rbegin(); it != desktop.rend(); ++it) {
+            try { (*it)->rollback(); }
+            catch (...) {
+                if (!rollbackFailure) rollbackFailure = std::current_exception();
+            }
+        }
+        // Incomplete restoration is not an optional skip: preserve the objects so the
+        // core transaction can retry rollback and retain/report any recovery backups.
+        if (rollbackFailure) std::rethrow_exception(rollbackFailure);
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "Desktop shortcuts skipped; use the application menu: %s", failure.what());
+        desktop.clear();
+        result.paths.desktop.clear();
+    };
     if (legacy) report(progress, "Legacy ISO provenance verified; unproven libraries, modified assets and user files will be preserved");
     try {
+        // Only this secondary pair is best-effort; core/app-menu failures still roll back everything.
+        try {
+            if (!request.paths.desktop.empty()) {
+                result.paths.desktop = absolute_path(request.paths.desktop);
+                require(!within(paths.root, paths.desktop), "Desktop folder must be outside the installation root");
+                if (paths.desktop != paths.applications) {
+                    const auto ancestor = writable_parent(paths.desktop);
+                    require(fs::space(ancestor).available >= 65536, "Not enough space to publish Desktop shortcuts");
+                    std::exception_ptr conflict;
+                    for (const auto name : {playShortcut, uninstallShortcut}) {
+                        try {
+                            if (shortcut_exists(paths.desktop/name, paths.root))
+                                inventory.shortcuts.push_back((paths.desktop/name).string());
+                        } catch (const std::runtime_error&) {
+                            if (!conflict) conflict = std::current_exception();
+                        }
+                    }
+                    if (conflict) std::rethrow_exception(conflict);
+                    directory_chain(paths.desktop, &created.paths);
+                    desktop.push_back(std::make_unique<ShortcutPublication>(paths.desktop, playShortcut, paths.root, desktop_entry(paths.root)));
+                    desktop.push_back(std::make_unique<ShortcutPublication>(paths.desktop, uninstallShortcut, paths.root, uninstall_entry(paths.root)));
+                }
+            }
+        } catch (const std::runtime_error& error) { skipDesktop(error); }
         report(progress, "Publishing installation");
+        if (result.reused) checkRoot();
+        try {
+            for (auto& shortcut : desktop) shortcut->publish();
+        } catch (const std::runtime_error& error) { skipDesktop(error); }
+        for (const auto* group : {&shortcuts, &desktop})
+            for (const auto& shortcut : *group)
+                inventory.shortcuts.push_back(shortcut->destination.string());
+        const auto newInstalledRecord = serialize_installed(inventory);
+        const auto newEngineRecord = serialize_engine(engineInventory);
+        write_file(stage.path/"install"/installedName, newInstalledRecord);
+        write_file(stage.path/"install"/engineName, newEngineRecord);
+        if (result.reused) {
+            checkRoot();
+            const auto helperFolder = paths.root/helperDirectory;
+            directory_chain(helperFolder);
+            if (fs::exists(checked_status(helperFolder))) {
+                struct stat info{};
+                require(::lstat(helperFolder.c_str(), &info) == 0 && S_ISDIR(info.st_mode) &&
+                        info.st_uid == geteuid() && !(info.st_mode & (S_IWGRP | S_IWOTH)), "Removal support directory is not private");
+            }
+            const std::array<fs::path, 4> names{fs::path(scriptName), fs::path(helperDirectory)/helperName,
+                                              fs::path(installedName), fs::path(engineName)};
+            for (std::size_t index = 0; index < names.size(); ++index) {
+                const auto& name = names[index];
+                if (name == engineName && !legacy) continue; // Preserve the authoritative updater ledger byte-for-byte.
+                if (name == installedName && newInstalledRecord == installedRecord) continue;
+                if (legacy && (name == scriptName || name == fs::path(helperDirectory)/helperName) &&
+                    fs::exists(checked_status(paths.root/name)))
+                    require(same_bytes(paths.root/name, stage.path/"install"/name),
+                            "Legacy removal support has unknown provenance; move it aside yourself before migration");
+                support.push_back(std::make_unique<FilePublication>(paths.root/name, stage.path/"install"/name,
+                                  stage.path/("backup-" + std::to_string(index))));
+            }
+        }
         if (!result.reused) { rename_new(stage.path/"install", paths.root); rootPublished = true; }
         checkRoot();
         if (!result.reused) repairLock = std::make_unique<RepairLock>(paths.root, stage.path);
@@ -674,16 +716,21 @@ InstallResult install(const InstallRequest& request, const Progress& progress) {
             for (auto& file : support) { checkRoot(); file->publish(); }
         }
         report(progress, "Creating shortcuts");
-        for (auto& shortcut : shortcuts) { checkRoot(); shortcut->publish(); }
+        for (auto& shortcut : shortcuts) {
+            checkRoot();
+            if (!shortcut->published) shortcut->publish();
+        }
         checkRoot();
     } catch (...) {
         const auto original = std::current_exception();
         std::string recovery;
-        for (auto it = shortcuts.rbegin(); it != shortcuts.rend(); ++it) {
-            try { (*it)->rollback(); }
-            catch (const std::exception& error) {
-                (*it)->staging.retain = true;
-                recovery += "\nShortcut backup retained at " + (*it)->staging.path.string() + ": " + error.what();
+        for (auto* group : {&desktop, &shortcuts}) {
+            for (auto it = group->rbegin(); it != group->rend(); ++it) {
+                try { (*it)->rollback(); }
+                catch (const std::exception& error) {
+                    (*it)->staging.retain = true;
+                    recovery += "\nShortcut backup retained at " + (*it)->staging.path.string() + ": " + error.what();
+                }
             }
         }
         for (auto it = support.rbegin(); it != support.rend(); ++it) {

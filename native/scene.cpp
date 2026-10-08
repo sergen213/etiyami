@@ -1,6 +1,7 @@
 #include "scene.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <fstream>
@@ -11,6 +12,7 @@
 namespace yami {
 namespace {
 constexpr std::array<std::uint16_t, 6> quad_indices{{0, 1, 2, 0, 2, 3}};
+std::atomic<std::uint64_t> next_temporal_id{1};
 constexpr std::array<Vertex, 4> quad_vertices{{
     {{0,1,0},{0,1},{0,0,1}}, {{1,1,0},{1,1},{0,0,1}},
     {{1,0,0},{1,0},{0,0,1}}, {{0,0,0},{0,0},{0,0,1}}
@@ -29,6 +31,7 @@ ModelInstance::ModelInstance(Renderer& renderer, const ModelResource& model, boo
         for (const auto& source : model.parts) {
             parts.emplace_back();
             auto& part = parts.back();
+            part.temporal_id = next_temporal_id.fetch_add(1, std::memory_order_relaxed);
             const auto& passes = source.material->material.passes;
             for (std::size_t p = 0; p < passes.size(); ++p)
                 if (!passes[p].blend && passes[p].depth_write && !passes[p].video) {
@@ -230,6 +233,7 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             submission.ray_primary = p == part.primary_pass;
             submission.ray_geometry = state.ray_geometry && submission.ray_primary;
             submission.temporal_static = state.temporal_static && !part.owned && !pass.video;
+            submission.temporal_id = submission.ray_geometry && !pass.video ? part.temporal_id : 0;
             renderer_.draw(part.gpu, texture, material.material, pass, submission);
         }
     }

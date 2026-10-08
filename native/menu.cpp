@@ -667,6 +667,7 @@ void Menu::dispatch(const Context& context, bool released) {
                 }
                 continue;
             }
+            if (row==4 && graphics_.backend==GraphicsBackend::Vulkan) continue;
             if (row==0) graphics_.enhanced=increase;
             else if (row==7) graphics_.fullscreen=increase;
             else if (row==5)
@@ -920,6 +921,7 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
                 }
             } else if (row==0) value=graphics_.enhanced?"Geliştirilmiş":"Klasik";
             else if (row==7) value=graphics_.fullscreen?"Açık":"Kapalı";
+            else if (row==4 && graphics_.backend==GraphicsBackend::Vulkan) value="OpenGL/GLES için";
             else {
                 auto& buffer=graphicsText_[row];
                 char* end=buffer.data()+buffer.size();

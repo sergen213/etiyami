@@ -30,6 +30,7 @@ public:
     ShadowBounds bounds(const Mat4&) const;
     struct Part {
         unsigned gpu = 0;
+        std::uint64_t temporal_id = 0;
         bool owned = false;
         std::size_t animation = static_cast<std::size_t>(-1), frame = static_cast<std::size_t>(-1);
         SkinningState skin;

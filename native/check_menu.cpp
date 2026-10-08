@@ -79,6 +79,47 @@ void check_graphics(Menu& menu) {
     menu.set_settings(settings); menu.clear_commands();
     assert(menu.settings().graphics==settings.graphics);
     assert(menu.settings_effect().values.graphics==settings.graphics);
+    const auto sharpenPlus=graphics_button(menu,"Keskinlik",true);
+    const auto sharpenMinus=graphics_button(menu,"Keskinlik",false);
+    menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
+    menu.set_launcher_backend(yami::GraphicsBackend::Vulkan);
+    for (const bool gameplay:{false,true}) {
+        menu.set_graphics_device(gameplay,gameplay); // Launcher preview remains GL even with Vulkan selected.
+        const auto draws=menu.draw({});
+        assert(std::any_of(draws.begin(),draws.end(),[](const Draw& draw) {
+            return draw.glyph && draw.text=="OpenGL/GLES için";
+        }));
+        const auto before=menu.settings().graphics;
+        std::ostringstream savedBefore; write_settings(savedBefore,menu.settings());
+        for (const auto button:{sharpenMinus,sharpenPlus}) {
+            menu.clear_commands(); click_button(menu,button);
+            assert(menu.settings().graphics==before);
+            assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
+        }
+        std::ostringstream savedAfter; write_settings(savedAfter,menu.settings());
+        assert(savedAfter.str()==savedBefore.str());
+        menu.clear_commands(); click_button(menu,32);
+        menu.clear_commands(); click_button(menu,25); // Advanced row 4 is exposure, not sharpening.
+        auto exposed=before; exposed.exposure+=.05f;
+        assert(menu.settings().graphics==exposed); changed_graphics(menu);
+        menu.clear_commands(); click_button(menu,24);
+        assert(near(menu.settings().graphics.exposure,before.exposure));
+        assert(menu.settings().graphics.sharpen==before.sharpen); changed_graphics(menu);
+        menu.clear_commands(); click_button(menu,32);
+    }
+    menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
+    menu.set_graphics_device(false,false);
+    assert(menu.settings().graphics.sharpen==settings.graphics.sharpen);
+    const auto glDraws=menu.draw({});
+    assert(std::none_of(glDraws.begin(),glDraws.end(),[](const Draw& draw) {
+        return draw.glyph && draw.text=="OpenGL/GLES için";
+    }));
+    menu.clear_commands(); click_button(menu,sharpenPlus);
+    assert(near(menu.settings().graphics.sharpen,.237f)); changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,sharpenMinus);
+    assert(near(menu.settings().graphics.sharpen,.187f)); changed_graphics(menu);
+    settings.graphics.backend=yami::GraphicsBackend::OpenGL;
+    menu.set_settings(settings); menu.clear_commands();
     const auto original=menu.settings();
     const auto plus=graphics_button(menu,"Ortam gölgesi",true);
     const auto rect=menu.pages()[3].buttons[plus].rect;

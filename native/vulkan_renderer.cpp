@@ -82,7 +82,7 @@ struct VulkanRenderer::Impl {
     VkDescriptorSetLayout draw_set_layout=VK_NULL_HANDLE,copy_set_layout=VK_NULL_HANDLE;
     VkDescriptorPool descriptor_pool=VK_NULL_HANDLE;
     VkPipelineLayout draw_layout=VK_NULL_HANDLE,copy_layout=VK_NULL_HANDLE;
-    VkShaderModule raster_vert=VK_NULL_HANDLE,raster_frag=VK_NULL_HANDLE,raster_ui_frag=VK_NULL_HANDLE,final_vert=VK_NULL_HANDLE,final_frag=VK_NULL_HANDLE;
+    VkShaderModule raster_vert=VK_NULL_HANDLE,raster_frag=VK_NULL_HANDLE,raster_ui_frag=VK_NULL_HANDLE,raster_mask_frag=VK_NULL_HANDLE,final_vert=VK_NULL_HANDLE,final_frag=VK_NULL_HANDLE;
     VkPipeline final_pipeline=VK_NULL_HANDLE;
     std::array<VkDescriptorSet,2> copy_sets{};
     VkSampler frame_sampler=VK_NULL_HANDLE;
@@ -91,18 +91,19 @@ struct VulkanRenderer::Impl {
     float max_aniso=1;
     GraphicsSettings settings{};
     unsigned brightness=257,frame_number=0;
-    bool finished=false,world_closed=false,ui=false,world_seen=false,history=false,recreate=true;
+    bool finished=false,world_closed=false,ui=false,world_seen=false,history=false,recreate=true,artist_mask_active=false;
     std::size_t world_end=0;
     Mat4 view=identity_matrix(),projection=identity_matrix(),world_view=identity_matrix(),world_projection=identity_matrix(),previous_vp=identity_matrix();
     Viewport viewport{0,0,0,0};
     std::array<float,2> jitter{};
     std::uint64_t next_key=1;
     struct Buffer { VulkanBuffer gpu;void* mapped=nullptr; };
-    struct Geometry { std::shared_ptr<Buffer> vertices,indices;std::size_t vertex_count=0,index_count=0;std::uint64_t key=0,revision=0; };
+    struct Geometry { std::shared_ptr<Buffer> vertices,spare_vertices,indices;std::size_t vertex_count=0,index_count=0;std::uint64_t key=0,revision=0,temporal_key=0,uv_revision=0; };
     struct Texture {
         std::shared_ptr<VulkanImage> storage;
         VulkanImage& image;
         unsigned levels=1;
+        std::uint64_t content_revision=0;
         VkSampler sampler=VK_NULL_HANDLE;
         VkDescriptorSet descriptor=VK_NULL_HANDLE;
         bool flip=false,mipmaps=false;
@@ -121,20 +122,40 @@ struct VulkanRenderer::Impl {
         RasterState raster;DrawState state;Mat4 view,projection;Viewport viewport;
         unsigned alpha_function=0;float alpha_reference=0;
         bool enhanced=false,world=false;
+        std::shared_ptr<Buffer> previous_vertices;
+        Mat4 previous_model=identity_matrix();
+        std::uint32_t temporal_token=0;
+        bool correspondence=false;
     };
     std::vector<Draw> draws;
+    struct TemporalDraw {
+        std::uint64_t id=0,key=0;
+        std::uint32_t token=0;
+        std::shared_ptr<Buffer> vertices;
+        std::shared_ptr<Texture> texture;
+        DrawState state;
+        std::uint64_t uv_revision=0,texture_revision=0;
+        unsigned alpha_function=0,color_mask=15;
+        float alpha_reference=0;
+    };
+    std::vector<TemporalDraw> previous_draws,next_draws;
+    std::uint32_t next_temporal_token=1;
     std::vector<VulkanRayInstance> ray_instances;
     std::vector<VkDescriptorImageInfo> ray_images;
     std::vector<const Texture*> ray_textures;
-    using PipelineKey=std::array<unsigned,12>;
+    using PipelineKey=std::array<unsigned,13>;
     std::map<PipelineKey,VkPipeline> pipelines;
     struct alignas(16) Uniform {
         Mat4 model_view,projection,normal_eye,normal_world;
         std::array<float,4> light,diffuse,color,uv,world_up,flags,alpha_jitter;
+        Mat4 previous_mvp,previous_normal_world;
+        std::array<std::int32_t,4> temporal;
     };
     std::shared_ptr<Buffer> uniforms,upload_staging,readback;
     VkDeviceSize uniform_stride=0;
     VulkanImage world_color{},world_depth{},world_normal{},world_ms_color{},world_ms_depth{},world_ms_normal{};
+    VulkanImage world_motion{},world_previous_normal{},world_ms_motion{},world_ms_previous_normal{};
+    VulkanImage world_artist_mask{};
     VulkanImage composition{},ui_depth{},output{};
     VkExtent2D world_extent{};
 
@@ -178,7 +199,7 @@ struct VulkanRenderer::Impl {
         VkFenceCreateInfo fc{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fc.flags=VK_FENCE_CREATE_SIGNALED_BIT;checked(vk.vkCreateFence(device,&fc,nullptr,&fence),"Create fence");
         VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};checked(vk.vkCreateSemaphore(device,&sc,nullptr,&acquired),"Create acquire semaphore");
         create_layouts();
-        raster_vert=shader(spirv::vulkan_raster_vert);raster_frag=shader(spirv::vulkan_raster_frag);raster_ui_frag=shader(spirv::vulkan_raster_ui_frag);final_vert=shader(spirv::vulkan_final_vert);final_frag=shader(spirv::vulkan_final_frag);
+        raster_vert=shader(spirv::vulkan_raster_vert);raster_frag=shader(spirv::vulkan_raster_frag);raster_ui_frag=shader(spirv::vulkan_raster_ui_frag);raster_mask_frag=shader(spirv::vulkan_raster_mask_frag);final_vert=shader(spirv::vulkan_final_vert);final_frag=shader(spirv::vulkan_final_frag);
         final_pipeline=fullscreen_pipeline(VK_FORMAT_R8G8B8A8_UNORM);
         frame_sampler=sampler(false,true);
         uniform_stride=(sizeof(Uniform)+properties.limits.minUniformBufferOffsetAlignment-1)&~(properties.limits.minUniformBufferOffsetAlignment-1);
@@ -207,8 +228,8 @@ struct VulkanRenderer::Impl {
         if(!has(VK_KHR_SWAPCHAIN_EXTENSION_NAME))throw std::runtime_error("GPU lacks Vulkan swapchain support");
         VkPhysicalDeviceAccelerationStructureFeaturesKHR fas{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};VkPhysicalDeviceRayQueryFeaturesKHR fray{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR};VkPhysicalDeviceVulkan12Features f12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};VkPhysicalDeviceVulkan13Features f13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
         VkPhysicalDeviceFeatures2 f{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};f.pNext=&f13;f13.pNext=&f12;f12.pNext=&fas;fas.pNext=&fray;vk.vkGetPhysicalDeviceFeatures2(physical,&f);
-        // The ray layout adds three frame samplers and six fixed resources to its source table.
-        ray=has(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)&&has(VK_KHR_RAY_QUERY_EXTENSION_NAME)&&has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)&&fas.accelerationStructure&&fray.rayQuery&&f.features.shaderInt64&&f12.bufferDeviceAddress&&f12.runtimeDescriptorArray&&f12.shaderSampledImageArrayNonUniformIndexing&&f12.descriptorBindingPartiallyBound&&properties.limits.maxPerStageDescriptorSamplers>=4&&properties.limits.maxDescriptorSetSamplers>=4&&properties.limits.maxPerStageDescriptorSampledImages>=4&&properties.limits.maxDescriptorSetSampledImages>=4&&properties.limits.maxPerStageResources>=7;
+        // MSAA ray effects add eight frame samplers and eleven fixed resources.
+        ray=has(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)&&has(VK_KHR_RAY_QUERY_EXTENSION_NAME)&&has(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)&&fas.accelerationStructure&&fray.rayQuery&&f.features.shaderInt64&&f12.bufferDeviceAddress&&f12.runtimeDescriptorArray&&f12.shaderSampledImageArrayNonUniformIndexing&&f12.descriptorBindingPartiallyBound&&properties.limits.maxPerStageDescriptorSamplers>=8&&properties.limits.maxDescriptorSetSamplers>=8&&properties.limits.maxPerStageDescriptorSampledImages>=8&&properties.limits.maxDescriptorSetSampledImages>=8&&properties.limits.maxPerStageResources>=11;
         VkPhysicalDeviceAccelerationStructurePropertiesKHR ap{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR};VkPhysicalDeviceDepthStencilResolveProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES};VkPhysicalDeviceProperties2 p{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};p.pNext=&dp;if(ray)dp.pNext=&ap;vk.vkGetPhysicalDeviceProperties2(physical,&p);if(ray)scratch_alignment=ap.minAccelerationStructureScratchOffsetAlignment;
         if(!(dp.supportedDepthResolveModes&VK_RESOLVE_MODE_SAMPLE_ZERO_BIT))throw std::runtime_error("Vulkan device lacks sample-zero depth resolve");
         anisotropic=f.features.samplerAnisotropy;max_aniso=anisotropic?properties.limits.maxSamplerAnisotropy:1;
@@ -220,10 +241,17 @@ struct VulkanRenderer::Impl {
         float priority=1;VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qi.queueFamilyIndex=family;qi.queueCount=1;qi.pQueuePriorities=&priority;
         VkPhysicalDeviceFeatures base{};base.samplerAnisotropy=anisotropic;base.independentBlend=true;base.shaderInt64=ray;
         VkDeviceCreateInfo dc{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};dc.pNext=&enable13;dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qi;dc.enabledExtensionCount=extensions.size();dc.ppEnabledExtensionNames=extensions.data();dc.pEnabledFeatures=&base;checked(vk.vkCreateDevice(physical,&dc,nullptr,&device),"Create Vulkan device");
-        sample_flags=properties.limits.framebufferColorSampleCounts&properties.limits.framebufferDepthSampleCounts;
-        for(const auto format:{VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SINT,VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_D32_SFLOAT}) {
+        sample_flags=properties.limits.framebufferColorSampleCounts&properties.limits.framebufferDepthSampleCounts&properties.limits.sampledImageIntegerSampleCounts&properties.limits.sampledImageColorSampleCounts;
+        for(const auto format:{VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SINT,VK_FORMAT_R32G32B32A32_SINT,VK_FORMAT_R32G32_SINT,VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_D32_SFLOAT}) {
             VkImageFormatProperties support{};
-            const VkImageUsageFlags usage=format==VK_FORMAT_D32_SFLOAT?VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT:VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            const bool color=format!=VK_FORMAT_D32_SFLOAT;
+            const VkImageUsageFlags usage=(color?VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT:VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) |
+                (color?VK_IMAGE_USAGE_SAMPLED_BIT:0);
+            if(color) {
+                VkFormatProperties flags{}; vk.vkGetPhysicalDeviceFormatProperties(physical,format,&flags);
+                const auto required=VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+                if((flags.optimalTilingFeatures&required)!=required) throw std::runtime_error("Vulkan world format lacks sampled color-attachment support");
+            }
             checked(vk.vkGetPhysicalDeviceImageFormatProperties(physical,format,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&support),"Query framebuffer sample support");
             sample_flags&=support.sampleCounts;
         }
@@ -267,28 +295,37 @@ struct VulkanRenderer::Impl {
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,8192},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,8192}};VkDescriptorPoolCreateInfo pc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pc.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;pc.maxSets=8192;pc.poolSizeCount=2;pc.pPoolSizes=sizes;checked(vk.vkCreateDescriptorPool(device,&pc,nullptr,&descriptor_pool),"Create descriptor pool");
         VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pi.setLayoutCount=1;pi.pSetLayouts=&draw_set_layout;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&draw_layout),"Create raster pipeline layout");VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,8};pi.pSetLayouts=&copy_set_layout;pi.pushConstantRangeCount=1;pi.pPushConstantRanges=&push;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&copy_layout),"Create final pipeline layout");for(auto& set:copy_sets)set=descriptor(copy_set_layout);
     }
-    VkPipeline create_pipeline(VkFormat color,const RasterState* r,unsigned samples,bool world){
-        VkPipelineShaderStageCreateInfo stages[2]{};for(auto& s:stages){s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;s.pName="main";}stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=r?raster_vert:final_vert;stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=r?(world?raster_frag:raster_ui_frag):final_frag;
-        VkVertexInputBindingDescription binding{0,sizeof(Vertex),VK_VERTEX_INPUT_RATE_VERTEX};VkVertexInputAttributeDescription attributes[]={{0,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,position)},{1,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,uv)},{2,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,normal)}};VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};if(r){vi.vertexBindingDescriptionCount=1;vi.pVertexBindingDescriptions=&binding;vi.vertexAttributeDescriptionCount=3;vi.pVertexAttributeDescriptions=attributes;}
+    VkPipeline create_pipeline(VkFormat color,const RasterState* r,unsigned samples,bool world,bool artist=false){
+        VkPipelineShaderStageCreateInfo stages[2]{};for(auto& s:stages){s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;s.pName="main";}stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=r?raster_vert:final_vert;stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=r?(artist?raster_mask_frag:world?raster_frag:raster_ui_frag):final_frag;
+        VkVertexInputBindingDescription bindings[]={{0,sizeof(Vertex),VK_VERTEX_INPUT_RATE_VERTEX},{1,sizeof(Vertex),VK_VERTEX_INPUT_RATE_VERTEX}};
+        VkVertexInputAttributeDescription attributes[]={{0,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,position)},{1,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,uv)},{2,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,normal)},{3,1,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,position)},{4,1,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,normal)}};
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};if(r){vi.vertexBindingDescriptionCount=2;vi.pVertexBindingDescriptions=bindings;vi.vertexAttributeDescriptionCount=5;vi.pVertexAttributeDescriptions=attributes;}
         VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;VkPipelineViewportStateCreateInfo vs{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};vs.viewportCount=vs.scissorCount=1;
         VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};rs.polygonMode=VK_POLYGON_MODE_FILL;rs.lineWidth=1;rs.frontFace=VK_FRONT_FACE_CLOCKWISE;
         if(r){rs.depthBiasEnable=r->offset;if(r->cull){if(r->cull_face==0x404)rs.cullMode=VK_CULL_MODE_FRONT_BIT;else if(r->cull_face==0x405)rs.cullMode=VK_CULL_MODE_BACK_BIT;else if(r->cull_face==0x408)rs.cullMode=VK_CULL_MODE_FRONT_AND_BACK;else throw std::runtime_error("Unsupported exported cull face");}}
         VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};ms.rasterizationSamples=static_cast<VkSampleCountFlagBits>(samples);
         VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};if(r){ds.depthTestEnable=r->depth_test;ds.depthWriteEnable=r->depth_test&&r->depth_write;ds.depthCompareOp=compare(r->depth_function);}
-        VkPipelineColorBlendAttachmentState attachments[2]{};attachments[0].colorWriteMask=r?r->mask:15;
+        VkPipelineColorBlendAttachmentState attachments[4]{};attachments[0].colorWriteMask=r?r->mask:15;
         if(r&&r->blend){attachments[0].blendEnable=true;attachments[0].srcColorBlendFactor=blend(r->source);attachments[0].dstColorBlendFactor=blend(r->destination);attachments[0].srcAlphaBlendFactor=attachments[0].srcColorBlendFactor==VK_BLEND_FACTOR_SRC_ALPHA_SATURATE?VK_BLEND_FACTOR_ONE:attachments[0].srcColorBlendFactor;attachments[0].dstAlphaBlendFactor=attachments[0].dstColorBlendFactor;}
-        attachments[1].colorWriteMask=r&&r->depth_test&&r->depth_write?15:0;
-        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};bs.attachmentCount=world?2:1;bs.pAttachments=attachments;
+        if(artist){
+            attachments[0].colorWriteMask=artist_influence(*r)?15:0;
+            attachments[0].blendEnable=true;
+            attachments[0].srcColorBlendFactor=attachments[0].srcAlphaBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;
+            attachments[0].dstColorBlendFactor=attachments[0].dstAlphaBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        }
+        for(unsigned i=1;i<4;++i)attachments[i].colorWriteMask=r&&r->depth_test&&r->depth_write?15:0;
+        VkPipelineColorBlendStateCreateInfo bs{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};bs.attachmentCount=world&&!artist?4:1;bs.pAttachments=attachments;
         VkDynamicState dynamics[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_DEPTH_BIAS};VkPipelineDynamicStateCreateInfo dy{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dy.dynamicStateCount=r?3:2;dy.pDynamicStates=dynamics;
-        VkFormat formats[]={color,VK_FORMAT_R16G16B16A16_SINT};VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=world?2:1;rendering.pColorAttachmentFormats=formats;rendering.depthAttachmentFormat=r?VK_FORMAT_D32_SFLOAT:VK_FORMAT_UNDEFINED;
+        VkFormat formats[]={color,VK_FORMAT_R16G16B16A16_SINT,VK_FORMAT_R32G32B32A32_SINT,VK_FORMAT_R32G32_SINT};VkPipelineRenderingCreateInfo rendering{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};rendering.colorAttachmentCount=world&&!artist?4:1;rendering.pColorAttachmentFormats=formats;rendering.depthAttachmentFormat=r?VK_FORMAT_D32_SFLOAT:VK_FORMAT_UNDEFINED;
         VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};pi.pNext=&rendering;pi.stageCount=2;pi.pStages=stages;pi.pVertexInputState=&vi;pi.pInputAssemblyState=&ia;pi.pViewportState=&vs;pi.pRasterizationState=&rs;pi.pMultisampleState=&ms;pi.pDepthStencilState=&ds;pi.pColorBlendState=&bs;pi.pDynamicState=&dy;pi.layout=r?draw_layout:copy_layout;VkPipeline result;checked(vk.vkCreateGraphicsPipelines(device,VK_NULL_HANDLE,1,&pi,nullptr,&result),"Create graphics pipeline");return result;
     }
     VkPipeline fullscreen_pipeline(VkFormat format){return create_pipeline(format,nullptr,1,false);}
-    VkPipeline raster_pipeline(const Draw& d,bool world){
+    VkPipeline raster_pipeline(const Draw& d,bool world,bool artist=false){
         const auto& r=d.raster;
-        PipelineKey k{{unsigned(r.cull),r.cull_face,unsigned(r.offset),unsigned(r.blend),r.source,r.destination,unsigned(r.depth_test),r.depth_function,unsigned(r.depth_write),r.mask,world?unsigned(sample):1,world?1u+unsigned(settings.enhanced)*2:0}};
+        const VkFormat format=artist?world_artist_mask.format:world&&settings.enhanced?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM;
+        PipelineKey k{{unsigned(r.cull),r.cull_face,unsigned(r.offset),unsigned(r.blend),r.source,r.destination,unsigned(r.depth_test),r.depth_function,unsigned(r.depth_write),r.mask,world?unsigned(sample):1,artist?4u:world?1u+unsigned(settings.enhanced)*2:0,unsigned(format)}};
         auto it=pipelines.find(k);if(it!=pipelines.end())return it->second;
-        auto p=create_pipeline(world&&settings.enhanced?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM,&r,world?sample:1,world);
+        auto p=create_pipeline(format,&r,world?sample:1,world,artist);
         pipelines.emplace(k,p);return p;
     }
     void make_swapchain(){
@@ -300,25 +337,32 @@ struct VulkanRenderer::Impl {
         VkSwapchainCreateInfoKHR ci{VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR};ci.surface=surface;ci.minImageCount=std::max(caps.minImageCount,2u);if(caps.maxImageCount)ci.minImageCount=std::min(ci.minImageCount,caps.maxImageCount);ci.imageFormat=swap_format;ci.imageColorSpace=chosen->colorSpace;ci.imageExtent=extent;ci.imageArrayLayers=1;ci.imageUsage=VK_IMAGE_USAGE_TRANSFER_DST_BIT;ci.imageSharingMode=VK_SHARING_MODE_EXCLUSIVE;ci.preTransform=caps.currentTransform;ci.compositeAlpha=VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;if(!(caps.supportedCompositeAlpha&ci.compositeAlpha))ci.compositeAlpha=static_cast<VkCompositeAlphaFlagBitsKHR>(1u<<std::countr_zero(caps.supportedCompositeAlpha));ci.presentMode=VK_PRESENT_MODE_FIFO_KHR;ci.clipped=true;ci.oldSwapchain=swapchain;VkSwapchainKHR fresh;checked(vk.vkCreateSwapchainKHR(device,&ci,nullptr,&fresh),"Create swapchain");if(swapchain)vk.vkDestroySwapchainKHR(device,swapchain,nullptr);swapchain=fresh;
         for(auto s:complete)vk.vkDestroySemaphore(device,s,nullptr);complete.clear();std::uint32_t count=0;checked(vk.vkGetSwapchainImagesKHR(device,swapchain,&count,nullptr),"Swapchain images");swap_images.resize(count);checked(vk.vkGetSwapchainImagesKHR(device,swapchain,&count,swap_images.data()),"Swapchain images");for(unsigned i=0;i<count;++i){VkSemaphoreCreateInfo sc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};VkSemaphore s;checked(vk.vkCreateSemaphore(device,&sc,nullptr,&s),"Create present semaphore");complete.push_back(s);}recreate=false;
     }
-    void destroy_targets(){for(auto* i:{&world_color,&world_depth,&world_normal,&world_ms_color,&world_ms_depth,&world_ms_normal,&composition,&ui_depth,&output})destroy_image(*i);world_extent={};}
+    void destroy_targets(){for(auto* i:{&world_color,&world_depth,&world_normal,&world_motion,&world_previous_normal,&world_ms_color,&world_ms_depth,&world_ms_normal,&world_ms_motion,&world_ms_previous_normal,&world_artist_mask,&composition,&ui_depth,&output})destroy_image(*i);world_extent={};}
     void native_targets(){const VkExtent2D e{unsigned(width),unsigned(height)};if(composition.image&&composition.extent.width==e.width&&composition.extent.height==e.height)return;wait();destroy_targets();composition=image(e,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);ui_depth=image(e,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);output=image(e,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT);history=false;if(effects)effects->reset_history();}
     void world_targets(){
         VkExtent2D e{unsigned(std::max(1,int(width*(settings.enhanced?settings.render_scale:1)))),unsigned(std::max(1,int(height*(settings.enhanced?settings.render_scale:1))))};
         const VkFormat color_format=settings.enhanced?VK_FORMAT_R16G16B16A16_SFLOAT:VK_FORMAT_R8G8B8A8_UNORM;
         if(world_color.image&&world_extent.width==e.width&&world_extent.height==e.height&&world_color.format==color_format&&(!world_ms_color.image?sample==1:true))return;
-        wait();for(auto* i:{&world_color,&world_depth,&world_normal,&world_ms_color,&world_ms_depth,&world_ms_normal})destroy_image(*i);
+        wait();for(auto* i:{&world_color,&world_depth,&world_normal,&world_motion,&world_previous_normal,&world_ms_color,&world_ms_depth,&world_ms_normal,&world_ms_motion,&world_ms_previous_normal,&world_artist_mask})destroy_image(*i);
         world_extent=e;const auto color_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
         world_color=image(e,color_format,color_usage);world_normal=image(e,VK_FORMAT_R16G16B16A16_SINT,color_usage);
+        world_motion=image(e,VK_FORMAT_R32G32B32A32_SINT,color_usage);
+        world_previous_normal=image(e,VK_FORMAT_R32G32_SINT,color_usage);
         world_depth=image(e,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
         if(sample>1){
-            world_ms_color=image(e,color_format,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,sample);
-            world_ms_normal=image(e,VK_FORMAT_R16G16B16A16_SINT,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,sample);
+            world_ms_color=image(e,color_format,color_usage,sample);
+            world_ms_normal=image(e,VK_FORMAT_R16G16B16A16_SINT,color_usage,sample);
+            world_ms_motion=image(e,VK_FORMAT_R32G32B32A32_SINT,color_usage,sample);
+            world_ms_previous_normal=image(e,VK_FORMAT_R32G32_SINT,color_usage,sample);
             world_ms_depth=image(e,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,sample);
         }
         history=false;effects->reset_history();
     }
     void resize(){int w,h;sdl(SDL_GetWindowSizeInPixels(window,&w,&h));if(w<=0||h<=0||(SDL_GetWindowFlags(window)&SDL_WINDOW_MINIMIZED)){width=std::max(w,0);height=std::max(h,0);recreate=true;history=false;return;}if(unsigned(w)>properties.limits.maxImageDimension2D||unsigned(h)>properties.limits.maxImageDimension2D)throw std::runtime_error("Drawable exceeds Vulkan image limits");if(width!=w||height!=h){width=w;height=h;recreate=true;finished=false;history=false;}if(recreate){make_swapchain();native_targets();}}
-    void clear(){wait();draws.clear();finished=false;world_closed=false;ui=false;world_seen=false;world_end=0;resize();viewport={0,0,width,height};jitter=settings.enhanced&&settings.temporal_aa?std::array<float,2>{halton(frame_number%8+1,2)-.5f,halton(frame_number%8+1,3)-.5f}:std::array<float,2>{0,0};}
+    void clear(){wait();draws.clear();finished=false;world_closed=false;ui=false;world_seen=false;world_end=0;resize();viewport={0,0,width,height};
+        // Rotate the same eight locations each epoch: a 64-frame cycle balances four repeating poses.
+        const auto phase=(frame_number+frame_number/8)%8+1;
+        jitter=settings.enhanced&&settings.temporal_aa?std::array<float,2>{halton(phase,2)-.5f,halton(phase,3)-.5f}:std::array<float,2>{0,0};}
     void camera(const Mat4& v,const Mat4& p,bool interface){if(interface&&world_seen)close_world();view=v;projection=vulkan_projection(p);ui=interface||world_closed;viewport=interface&&width>0&&height>0?fit_original_interface(width,height):Viewport{0,0,width,height};if(!ui){world_view=view;world_projection=projection;}}
     void close_world(){if(world_closed)return;world_end=draws.size();world_closed=true;}
     void hud_camera(){close_world();auto p=interface_projection();if(std::int64_t(width)*3<std::int64_t(height)*4)camera(identity_matrix(),p,true);else{if(height>0)p.values[0]=2.f/(768.f*width/height);camera(identity_matrix(),p,false);}ui=true;}
@@ -347,18 +391,96 @@ struct VulkanRenderer::Impl {
             for(unsigned n=0;n<t.levels;++n){VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};b.srcStageMask=VK_PIPELINE_STAGE_2_TRANSFER_BIT;b.dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;b.srcAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;b.oldLayout=n+1==t.levels?VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=t.image.image;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,n,1,0,1};VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dep.imageMemoryBarrierCount=1;dep.pImageMemoryBarriers=&b;vk.vkCmdPipelineBarrier2(cmd,&dep);}t.image.layout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }else transition(cmd,t.image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);}
     void validate_texture(int w,int h,std::span<const std::uint8_t> data){if(w<=0||h<=0||unsigned(w)>properties.limits.maxImageDimension2D||unsigned(h)>properties.limits.maxImageDimension2D||data.size()!=std::size_t(w)*h*4)throw std::runtime_error("Invalid texture dimensions or RGBA byte count");}
-    unsigned upload_mesh(std::span<const Vertex> vertices,std::span<const std::uint16_t> indices){if(vertices.empty()||indices.empty()||indices.size()%3||indices.size()>UINT32_MAX||vertices.size()>UINT32_MAX)throw std::runtime_error("Invalid triangle mesh");for(auto i:indices)if(i>=vertices.size())throw std::runtime_error("Mesh index out of range");wait();auto g=std::make_shared<Geometry>();const auto usage=ray?VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT:0;g->vertices=buffer(vertices.size_bytes(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|usage,ray);g->indices=buffer(indices.size()*4,VK_BUFFER_USAGE_INDEX_BUFFER_BIT|usage,ray);std::memcpy(g->vertices->mapped,vertices.data(),vertices.size_bytes());auto* out=static_cast<std::uint32_t*>(g->indices->mapped);for(std::size_t i=0;i<indices.size();++i)out[i]=indices[i];g->vertex_count=vertices.size();g->index_count=indices.size();g->key=next_key++;g->revision=1;meshes.push_back(std::move(g));return meshes.size();}
+    unsigned upload_mesh(std::span<const Vertex> vertices,std::span<const std::uint16_t> indices){if(vertices.empty()||indices.empty()||indices.size()%3||indices.size()>UINT32_MAX||vertices.size()>UINT32_MAX)throw std::runtime_error("Invalid triangle mesh");for(auto i:indices)if(i>=vertices.size())throw std::runtime_error("Mesh index out of range");wait();auto g=std::make_shared<Geometry>();const auto usage=ray?VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT:0;g->vertices=buffer(vertices.size_bytes(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|usage,ray);g->indices=buffer(indices.size()*4,VK_BUFFER_USAGE_INDEX_BUFFER_BIT|usage,ray);std::memcpy(g->vertices->mapped,vertices.data(),vertices.size_bytes());auto* out=static_cast<std::uint32_t*>(g->indices->mapped);for(std::size_t i=0;i<indices.size();++i)out[i]=indices[i];g->vertex_count=vertices.size();g->index_count=indices.size();g->key=next_key++;g->temporal_key=g->key;g->revision=1;meshes.push_back(std::move(g));return meshes.size();}
     void update_mesh(unsigned id,std::span<const Vertex> vertices){
         if(!id||id>meshes.size()||!meshes[id-1]||vertices.size()!=meshes[id-1]->vertex_count)throw std::runtime_error("Invalid animated mesh update");
         wait();auto& g=meshes[id-1];
+        // Compare artwork before rotating uploads; pose/normal changes keep history.
+        const auto* uploaded=g->vertices?static_cast<const Vertex*>(g->vertices->mapped):nullptr;
+        bool uv_changed=!uploaded;
+        if(uploaded)for(std::size_t i=0;i<vertices.size();++i)
+            if(vertices[i].uv.x!=uploaded[i].uv.x || vertices[i].uv.y!=uploaded[i].uv.y) { uv_changed=true;break; }
         if(g.use_count()>1){
             auto n=std::make_shared<Geometry>(*g);
-            n->vertices=buffer(vertices.size_bytes(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|(ray?VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT:0),ray);
             n->key=next_key++;g=std::move(n);
+        }
+        if(uv_changed)++g->uv_revision;
+        // Retain the exact last submitted pose. Reuse two uploads; no CPU pose copy.
+        if(g->vertices.use_count()>1) {
+            if(!g->spare_vertices || g->spare_vertices.use_count()>1)
+                g->spare_vertices=buffer(vertices.size_bytes(),VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|(ray?VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT:0),ray);
+            g->vertices.swap(g->spare_vertices);
         }
         std::memcpy(g->vertices->mapped,vertices.data(),vertices.size_bytes());++g->revision;
     }
     void record(unsigned id,unsigned texture,const Material& m,const MaterialPass& p,const DrawState& state){if(finished)throw std::runtime_error("Cannot draw after frame capture/finalization; clear first");if(!id||id>meshes.size()||!meshes[id-1]||texture>textures.size())throw std::runtime_error("Unknown mesh or texture");if(p.alpha_test&&(p.alpha_function<0x200||p.alpha_function>0x207))throw std::runtime_error("Unsupported exported alpha function");Draw d;d.mesh=meshes[id-1];d.texture=texture?textures[texture-1]:white;d.state=state;d.view=view;d.projection=projection;d.viewport=viewport;d.world=!ui&&!world_closed;d.enhanced=settings.enhanced&&d.world;d.alpha_function=p.alpha_test?p.alpha_function:0;d.alpha_reference=std::clamp(p.alpha_reference,0.f,1.f);d.raster={m.cull,m.polygon_offset,p.blend,p.depth_test,p.depth_write,m.cull_face,p.blend_source,p.blend_destination,p.depth_function,0,m.polygon_offset_factor,m.polygon_offset_units};for(unsigned i=0;i<4;++i)if(p.color_write[i])d.raster.mask|=1u<<i;compare(p.depth_function);if(p.blend){blend(p.blend_source);blend(p.blend_destination);}if(state.lighting){normal_matrix4(multiply(view,state.model));normal_matrix4(state.model);}world_seen|=d.world;draws.push_back(std::move(d));}
+    void prepare_correspondence() {
+        next_draws.clear();
+        if(next_temporal_token+draws.size()>16777216) {
+            previous_draws.clear();next_temporal_token=1;history=false;effects->reset_history();
+        }
+        for(auto& d:draws) {
+            d.previous_vertices=d.mesh->vertices;d.previous_model=d.state.model;
+            if(!d.enhanced || !d.state.ray_geometry || !d.state.ray_primary || d.raster.blend || !d.raster.depth_write) continue;
+            if(!d.state.temporal_id) { d.correspondence=d.state.temporal_static;continue; }
+            const auto identity=std::pair{d.state.temporal_id,d.mesh->temporal_key};
+            const auto old=std::lower_bound(previous_draws.begin(),previous_draws.end(),identity,
+                [](const TemporalDraw& a,const auto& b){return std::pair{a.id,a.key}<b;});
+            if(old!=previous_draws.end() && std::pair{old->id,old->key}==identity) {
+                const bool material_match=old->texture==d.texture &&
+                    old->texture_revision==d.texture->content_revision && old->uv_revision==d.mesh->uv_revision &&
+                    old->state.uv_transform==d.state.uv_transform && old->state.color==d.state.color &&
+                    old->state.diffuse_light[0]==d.state.diffuse_light[0] &&
+                    old->state.diffuse_light[1]==d.state.diffuse_light[1] &&
+                    old->state.diffuse_light[2]==d.state.diffuse_light[2] &&
+                    old->state.lighting==d.state.lighting && old->state.fog==d.state.fog &&
+                    old->alpha_function==d.alpha_function && old->alpha_reference==d.alpha_reference &&
+                    old->color_mask==d.raster.mask;
+                d.temporal_token=material_match?old->token:next_temporal_token++;
+                d.correspondence=history && material_match;
+                d.previous_vertices=old->vertices;d.previous_model=old->state.model;
+            } else d.temporal_token=next_temporal_token++;
+            next_draws.push_back({identity.first,identity.second,d.temporal_token,d.mesh->vertices,d.texture,d.state,
+                                  d.mesh->uv_revision,d.texture->content_revision,d.alpha_function,d.raster.mask,d.alpha_reference});
+        }
+        std::sort(next_draws.begin(),next_draws.end(),[](const TemporalDraw& a,const TemporalDraw& b){
+            return std::pair{a.id,a.key}<std::pair{b.id,b.key};
+        });
+    }
+    static int artist_influence(const RasterState& r){
+        if(!(r.mask&7) || (r.blend&&r.source==0&&r.destination==1))return 0;
+        // Only these alpha-dependent factors prove zero RGB influence without
+        // reading destination color/alpha. Other supported blends stay reactive.
+        return r.blend&&r.source==0x302&&(r.destination==0x303||r.destination==1)?2:1;
+    }
+    static bool artist_clean(const Draw& d){
+        return d.world&&d.enhanced&&(d.temporal_token>0||d.correspondence)&&
+            !d.raster.blend&&d.raster.depth_test&&d.raster.depth_write&&(d.raster.mask&7)==7;
+    }
+    void prepare_artist_mask(){
+        artist_mask_active=false;
+        if(!world_seen||!settings.enhanced||!settings.temporal_aa)return;
+        for(std::size_t i=0;i<world_end;++i){
+            const auto& d=draws[i];const int influence=artist_influence(d.raster);
+            if(!influence||artist_clean(d))continue;
+            if(influence==2&&!d.state.lighting&&d.state.color[3]==0)continue;
+            artist_mask_active=true;break;
+        }
+        if(!artist_mask_active||world_artist_mask.image)return;
+        const auto usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;
+        for(const auto format:{VK_FORMAT_R8_UNORM,VK_FORMAT_R16G16B16A16_SFLOAT}){
+            VkFormatProperties flags{};vk.vkGetPhysicalDeviceFormatProperties(physical,format,&flags);
+            const auto required=VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT|VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            if((flags.optimalTilingFeatures&required)!=required)continue;
+            VkImageFormatProperties support{};
+            const auto result=vk.vkGetPhysicalDeviceImageFormatProperties(physical,format,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,0,&support);
+            if(result==VK_ERROR_FORMAT_NOT_SUPPORTED)continue;
+            checked(result,"Query authored-history mask support");
+            if(!(support.sampleCounts&unsigned(sample))||support.maxExtent.width<world_extent.width||support.maxExtent.height<world_extent.height)continue;
+            world_artist_mask=image(world_extent,format,usage,sample);return;
+        }
+        throw std::runtime_error("Vulkan authored-history mask lacks sampled blending support at the selected world sample count");
+    }
     void update_uniforms(){if(draws.size()*uniform_stride>UINT32_MAX)throw std::runtime_error("Frame uniform storage exceeds dynamic offset range");const auto bytes=std::max<VkDeviceSize>(uniform_stride,draws.size()*uniform_stride);if(uniforms->gpu.size<bytes){uniforms=buffer(bytes,VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,false);write_texture_descriptor(*white);for(auto& t:textures)write_texture_descriptor(*t);for(auto& d:draws)write_texture_descriptor(*d.texture);}
         for(std::size_t i=0;i<draws.size();++i){
             const auto& d=draws[i];Uniform u{};
@@ -366,25 +488,67 @@ struct VulkanRenderer::Impl {
             u.normal_eye=d.state.lighting?normal_matrix4(u.model_view):identity_matrix();
             u.normal_world=d.world&&d.state.ray_geometry?normal_matrix4(d.state.model,d.state.lighting):identity_matrix();
             const auto light=transform_direction(d.view,{.5f,1,.3f});u.light={light.x,light.y,light.z,0};
+            u.previous_mvp=multiply(previous_vp,d.previous_model);
+            u.previous_normal_world=d.world&&d.state.ray_geometry?normal_matrix4(d.previous_model,d.state.lighting):identity_matrix();
+            u.temporal={std::int32_t(d.temporal_token),d.correspondence?1:0,artist_clean(d)?1:0,artist_influence(d.raster)};
             u.diffuse=d.state.diffuse_light;u.diffuse[3]=d.state.fog?-1:1;
             u.color=d.state.color;u.uv=d.state.uv_transform;
             auto up=transform_direction(d.view,{0,1,0});const float length=std::sqrt(up.x*up.x+up.y*up.y+up.z*up.z);
             u.world_up=length>0?std::array<float,4>{up.x/length,up.y/length,up.z/length,d.texture->flip?1.f:0.f}:std::array<float,4>{0,1,0,d.texture->flip?1.f:0.f};
-            const float validity=d.world&&d.state.ray_geometry?(d.state.temporal_static&&!d.raster.blend&&d.raster.depth_write?1.f:0.f):-1.f;
+            const float validity=d.world&&d.state.ray_geometry?((d.state.temporal_static||d.correspondence)&&!d.raster.blend&&d.raster.depth_write?1.f:0.f):-1.f;
             u.flags={d.state.lighting?1.f:0.f,d.enhanced?1.f:0.f,d.texture!=white?1.f:0.f,validity};
             u.alpha_jitter={float(d.alpha_function),d.alpha_reference,d.world&&d.enhanced?2*jitter[0]/world_extent.width:0,d.world&&d.enhanced?2*jitter[1]/world_extent.height:0};
             std::memcpy(static_cast<std::byte*>(uniforms->mapped)+i*uniform_stride,&u,sizeof(u));
         }
     }
     void viewport_for(VkExtent2D extent,Viewport v){const float sx=float(extent.width)/width,sy=float(extent.height)/height;VkViewport vp{v.x*sx,(height-v.y-v.height)*sy,v.width*sx,v.height*sy,0,1};VkRect2D sc{{int(vp.x),int(vp.y)},{unsigned(vp.width),unsigned(vp.height)}};vk.vkCmdSetViewport(command,0,1,&vp);vk.vkCmdSetScissor(command,0,1,&sc);}
-    void raster_draws(std::size_t first,std::size_t last,bool world){for(std::size_t i=first;i<last;++i){const auto& d=draws[i];viewport_for(world?world_extent:VkExtent2D{unsigned(width),unsigned(height)},d.viewport);vk.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,raster_pipeline(d,world));vk.vkCmdSetDepthBias(command,d.raster.offset_units,0,d.raster.offset_factor);const std::uint32_t offset=i*uniform_stride;vk.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw_layout,0,1,&d.texture->descriptor,1,&offset);VkDeviceSize zero=0;vk.vkCmdBindVertexBuffers(command,0,1,&d.mesh->vertices->gpu.buffer,&zero);vk.vkCmdBindIndexBuffer(command,d.mesh->indices->gpu.buffer,0,VK_INDEX_TYPE_UINT32);vk.vkCmdDrawIndexed(command,d.mesh->index_count,1,0,0,0);}}
+    void raster_draws(std::size_t first,std::size_t last,bool world,bool artist=false){for(std::size_t i=first;i<last;++i){const auto& d=draws[i];viewport_for(world?world_extent:VkExtent2D{unsigned(width),unsigned(height)},d.viewport);vk.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,raster_pipeline(d,world,artist));vk.vkCmdSetDepthBias(command,d.raster.offset_units,0,d.raster.offset_factor);const std::uint32_t offset=i*uniform_stride;vk.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw_layout,0,1,&d.texture->descriptor,1,&offset);VkDeviceSize offsets[2]{};VkBuffer buffers[]={d.mesh->vertices->gpu.buffer,d.previous_vertices->gpu.buffer};vk.vkCmdBindVertexBuffers(command,0,2,buffers,offsets);vk.vkCmdBindIndexBuffer(command,d.mesh->indices->gpu.buffer,0,VK_INDEX_TYPE_UINT32);vk.vkCmdDrawIndexed(command,d.mesh->index_count,1,0,0,0);}}
     void render_world(){
-        VulkanImage& color=sample>1?world_ms_color:world_color;VulkanImage& depth=sample>1?world_ms_depth:world_depth;VulkanImage& normal=sample>1?world_ms_normal:world_normal;for(auto* i:{&color,&normal,&world_color,&world_normal})transition(command,*i,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);for(auto* i:{&depth,&world_depth})transition(command,*i,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-        VkRenderingAttachmentInfo colors[2]{};for(auto& c:colors){c.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;c.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;c.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;c.storeOp=VK_ATTACHMENT_STORE_OP_STORE;}colors[0].imageView=color.view;colors[0].clearValue.color={{0,0,0,1}};colors[1].imageView=normal.view;colors[1].clearValue.color.int32[3]=-1;
+        VulkanImage& color=sample>1?world_ms_color:world_color;VulkanImage& depth=sample>1?world_ms_depth:world_depth;VulkanImage& normal=sample>1?world_ms_normal:world_normal;
+        VulkanImage& motion=sample>1?world_ms_motion:world_motion;VulkanImage& previous_normal=sample>1?world_ms_previous_normal:world_previous_normal;
+        for(auto* i:{&color,&normal,&motion,&previous_normal,&world_color,&world_normal,&world_motion,&world_previous_normal})transition(command,*i,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);for(auto* i:{&depth,&world_depth})transition(command,*i,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo colors[4]{};for(auto& c:colors){c.sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;c.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;c.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;c.storeOp=VK_ATTACHMENT_STORE_OP_STORE;}colors[0].imageView=color.view;colors[0].clearValue.color={{0,0,0,1}};colors[1].imageView=normal.view;colors[1].clearValue.color.int32[3]=-1;
+        colors[2].imageView=motion.view;colors[2].clearValue.color.int32[3]=-1;colors[3].imageView=previous_normal.view;
+        colors[3].clearValue.color.int32[0]=std::bit_cast<std::int32_t>(std::uint32_t{0x80008000u});
         // Integer geometry can legally resolve sample zero, matching depth.
         // Authored color still averages every MSAA sample in display space.
-        VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};da.imageView=depth.view;da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;da.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;da.clearValue.depthStencil={1,0};if(sample>1){colors[0].resolveMode=VK_RESOLVE_MODE_AVERAGE_BIT;colors[1].resolveMode=VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;colors[0].resolveImageView=world_color.view;colors[1].resolveImageView=world_normal.view;colors[0].resolveImageLayout=colors[1].resolveImageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;da.resolveMode=VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;da.resolveImageView=world_depth.view;da.resolveImageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;}
-        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea.extent=world_extent;ri.layerCount=1;ri.colorAttachmentCount=2;ri.pColorAttachments=colors;ri.pDepthAttachment=&da;vk.vkCmdBeginRendering(command,&ri);raster_draws(0,world_end,true);vk.vkCmdEndRendering(command);transition(command,world_color,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);transition(command,world_normal,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);transition(command,world_depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+        VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};da.imageView=depth.view;da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;da.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;da.clearValue.depthStencil={1,0};
+        if(sample>1){
+            VulkanImage* resolved[]={&world_color,&world_normal,&world_motion,&world_previous_normal};
+            for(unsigned i=0;i<4;++i){colors[i].resolveMode=i==0?VK_RESOLVE_MODE_AVERAGE_BIT:VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;colors[i].resolveImageView=resolved[i]->view;colors[i].resolveImageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;}
+            da.resolveMode=VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;da.resolveImageView=world_depth.view;da.resolveImageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea.extent=world_extent;ri.layerCount=1;ri.colorAttachmentCount=4;ri.pColorAttachments=colors;ri.pDepthAttachment=&da;vk.vkCmdBeginRendering(command,&ri);raster_draws(0,world_end,true);vk.vkCmdEndRendering(command);
+        for(auto* i:{&world_color,&world_normal,&world_motion,&world_previous_normal})transition(command,*i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if(sample>1) for(auto* i:{&world_ms_color,&world_ms_normal,&world_ms_motion,&world_ms_previous_normal})transition(command,*i,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if(artist_mask_active)render_artist_mask(depth);
+        transition(command,world_depth,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+    }
+    void render_artist_mask(VulkanImage& depth){
+        // Primary MS depth stays in attachment layout, whose transition helper
+        // deliberately early-returns. Order its writes before the replay clear.
+        VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        barrier.srcStageMask=barrier.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        barrier.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout=barrier.newLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        barrier.image=depth.image;barrier.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dependency.imageMemoryBarrierCount=1;dependency.pImageMemoryBarriers=&barrier;
+        vk.vkCmdPipelineBarrier2(command,&dependency);
+        transition(command,world_artist_mask,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        color.imageView=world_artist_mask.view;color.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;color.storeOp=VK_ATTACHMENT_STORE_OP_STORE;color.clearValue.color={{1,1,1,1}};
+        VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        da.imageView=depth.view;da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        da.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;da.clearValue.depthStencil={1,0};
+        // Replay ALL original packets, including depth-only and RGB-no-op draws.
+        // No resolves: the primary MS sample-zero depth/metadata stay untouched.
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea.extent=world_extent;ri.layerCount=1;
+        ri.colorAttachmentCount=1;ri.pColorAttachments=&color;ri.pDepthAttachment=&da;
+        vk.vkCmdBeginRendering(command,&ri);raster_draws(0,world_end,true,true);vk.vkCmdEndRendering(command);
+        transition(command,world_artist_mask,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
     void fullscreen(const VulkanImage& source,VulkanImage& target,VkPipeline pipeline,bool copy){const auto copy_set=copy_sets[copy?0:1];transition(command,target,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);VkDescriptorImageInfo ii{frame_sampler,source.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=copy_set;w.dstBinding=0;w.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;w.descriptorCount=1;w.pImageInfo=&ii;vk.vkUpdateDescriptorSets(device,1,&w,0,nullptr);
         VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};color.imageView=target.view;color.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;color.loadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE;color.storeOp=VK_ATTACHMENT_STORE_OP_STORE;VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};ri.renderArea.extent=target.extent;ri.layerCount=1;ri.colorAttachmentCount=1;ri.pColorAttachments=&color;vk.vkCmdBeginRendering(command,&ri);viewport_for(target.extent,{0,0,width,height});vk.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline);vk.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,copy_layout,0,1,&copy_set,0,nullptr);struct {float ramp;unsigned copy;}push{float(brightness),unsigned(copy)};vk.vkCmdPushConstants(command,copy_layout,VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(push),&push);vk.vkCmdDraw(command,3,1,0,0);vk.vkCmdEndRendering(command);}
@@ -403,7 +567,7 @@ struct VulkanRenderer::Impl {
         vk.vkCmdBeginRendering(command,&ri);raster_draws(world_seen?world_end:0,draws.size(),false);vk.vkCmdEndRendering(command);
         transition(command,composition,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
-    void finish(){if(finished)return;if(width<=0||height<=0||(SDL_GetWindowFlags(window)&SDL_WINDOW_MINIMIZED)){history=false;effects->reset_history();finished=true;return;}if(!world_closed)close_world();if(world_seen)world_targets();else{world_end=0;history=false;effects->reset_history();}update_uniforms();begin(command);
+    void finish(){if(finished)return;if(width<=0||height<=0||(SDL_GetWindowFlags(window)&SDL_WINDOW_MINIMIZED)){history=false;previous_draws.clear();next_draws.clear();effects->reset_history();finished=true;return;}if(!world_closed)close_world();if(world_seen)world_targets();else{world_end=0;history=false;previous_draws.clear();effects->reset_history();}prepare_correspondence();prepare_artist_mask();update_uniforms();begin(command);
         VkMemoryBarrier2 host{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};host.srcStageMask=VK_PIPELINE_STAGE_2_HOST_BIT;host.srcAccessMask=VK_ACCESS_2_HOST_WRITE_BIT;host.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;host.dstAccessMask=VK_ACCESS_2_MEMORY_READ_BIT;VkDependencyInfo visibility{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};visibility.memoryBarrierCount=1;visibility.pMemoryBarriers=&host;vk.vkCmdPipelineBarrier2(command,&visibility);
         if(world_seen){render_world();if(settings.enhanced){
             ray_instances.clear();ray_images.clear();ray_textures.clear();
@@ -430,9 +594,10 @@ struct VulkanRenderer::Impl {
                 instance.lighting=d.state.lighting;
                 ray_instances.push_back(instance);
             }
-            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,history};const auto& result=effects->render(frame);fullscreen(result,composition,final_pipeline,true);
+            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,history,&world_motion,&world_previous_normal,sample>1?&world_ms_motion:nullptr,sample>1?&world_ms_normal:nullptr,sample>1?&world_ms_previous_normal:nullptr,artist_mask_active?&world_artist_mask:nullptr,sample>1?&world_ms_color:nullptr};const auto& result=effects->render(frame);fullscreen(result,composition,final_pipeline,true);
         }else fullscreen(world_color,composition,final_pipeline,true);previous_vp=multiply(world_projection,world_view);history=settings.enhanced;++frame_number;}
         render_ui();fullscreen(composition,output,final_pipeline,false);transition(command,output,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);checked(vk.vkEndCommandBuffer(command),"End frame commands");checked(vk.vkResetFences(device,1,&fence),"Reset frame fence");VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=command;VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};si.commandBufferInfoCount=1;si.pCommandBufferInfos=&cb;checked(vk.vkQueueSubmit2(queue,1,&si,fence),"Submit rendered frame");wait();finished=true;
+        previous_draws.swap(next_draws);next_draws.clear();
     }
     void present(){finish();if(width<=0||height<=0||(SDL_GetWindowFlags(window)&SDL_WINDOW_MINIMIZED))return;
         std::uint32_t index=0;auto result=vk.vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,acquired,VK_NULL_HANDLE,&index);if(result==VK_ERROR_OUT_OF_DATE_KHR){recreate=true;resize();finished=false;finish();result=vk.vkAcquireNextImageKHR(device,swapchain,UINT64_MAX,acquired,VK_NULL_HANDLE,&index);}if(result!=VK_SUCCESS&&result!=VK_SUBOPTIMAL_KHR)checked(result,"Acquire swapchain image");if(result==VK_SUBOPTIMAL_KHR)recreate=true;
@@ -467,14 +632,14 @@ struct VulkanRenderer::Impl {
                 write_texture_descriptor(*replacement);t=std::move(replacement);
             }else{vk.vkDestroySampler(device,t->sampler,nullptr);t->sampler=sampler(true);write_texture_descriptor(*t);}
         }
-        if(reset){for(auto* i:{&world_color,&world_depth,&world_normal,&world_ms_color,&world_ms_depth,&world_ms_normal})destroy_image(*i);history=false;effects->reset_history();}
+        if(reset){for(auto* i:{&world_color,&world_depth,&world_normal,&world_motion,&world_previous_normal,&world_ms_color,&world_ms_depth,&world_ms_normal,&world_ms_motion,&world_ms_previous_normal,&world_artist_mask})destroy_image(*i);history=false;previous_draws.clear();effects->reset_history();}
         resize();
     }
     void cleanup()noexcept{
         if(device&&vk.vkDeviceWaitIdle)vk.vkDeviceWaitIdle(device);
         if(effects){std::cerr<<"Vulkan execution: acceleration builds="<<effects->acceleration_builds()<<", ray-query frames="<<effects->ray_query_frames()<<'\n';effects.reset();}
-        draws.clear();meshes.clear();textures.clear();white.reset();uniforms.reset();upload_staging.reset();readback.reset();context.reset();
-        if(device){destroy_targets();for(auto [key,p]:pipelines)vk.vkDestroyPipeline(device,p,nullptr);if(final_pipeline)vk.vkDestroyPipeline(device,final_pipeline,nullptr);for(auto m:{raster_vert,raster_frag,raster_ui_frag,final_vert,final_frag})if(m)vk.vkDestroyShaderModule(device,m,nullptr);if(frame_sampler)vk.vkDestroySampler(device,frame_sampler,nullptr);if(draw_layout)vk.vkDestroyPipelineLayout(device,draw_layout,nullptr);if(copy_layout)vk.vkDestroyPipelineLayout(device,copy_layout,nullptr);if(descriptor_pool)vk.vkDestroyDescriptorPool(device,descriptor_pool,nullptr);if(draw_set_layout)vk.vkDestroyDescriptorSetLayout(device,draw_set_layout,nullptr);if(copy_set_layout)vk.vkDestroyDescriptorSetLayout(device,copy_set_layout,nullptr);for(auto s:complete)vk.vkDestroySemaphore(device,s,nullptr);if(acquired)vk.vkDestroySemaphore(device,acquired,nullptr);if(fence)vk.vkDestroyFence(device,fence,nullptr);if(pool)vk.vkDestroyCommandPool(device,pool,nullptr);if(swapchain)vk.vkDestroySwapchainKHR(device,swapchain,nullptr);vk.vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}
+        draws.clear();previous_draws.clear();next_draws.clear();meshes.clear();textures.clear();white.reset();uniforms.reset();upload_staging.reset();readback.reset();context.reset();
+        if(device){destroy_targets();for(auto [key,p]:pipelines)vk.vkDestroyPipeline(device,p,nullptr);if(final_pipeline)vk.vkDestroyPipeline(device,final_pipeline,nullptr);for(auto m:{raster_vert,raster_frag,raster_ui_frag,raster_mask_frag,final_vert,final_frag})if(m)vk.vkDestroyShaderModule(device,m,nullptr);if(frame_sampler)vk.vkDestroySampler(device,frame_sampler,nullptr);if(draw_layout)vk.vkDestroyPipelineLayout(device,draw_layout,nullptr);if(copy_layout)vk.vkDestroyPipelineLayout(device,copy_layout,nullptr);if(descriptor_pool)vk.vkDestroyDescriptorPool(device,descriptor_pool,nullptr);if(draw_set_layout)vk.vkDestroyDescriptorSetLayout(device,draw_set_layout,nullptr);if(copy_set_layout)vk.vkDestroyDescriptorSetLayout(device,copy_set_layout,nullptr);for(auto s:complete)vk.vkDestroySemaphore(device,s,nullptr);if(acquired)vk.vkDestroySemaphore(device,acquired,nullptr);if(fence)vk.vkDestroyFence(device,fence,nullptr);if(pool)vk.vkDestroyCommandPool(device,pool,nullptr);if(swapchain)vk.vkDestroySwapchainKHR(device,swapchain,nullptr);vk.vkDestroyDevice(device,nullptr);device=VK_NULL_HANDLE;}
         if(surface&&vk.vkDestroySurfaceKHR)vk.vkDestroySurfaceKHR(instance,surface,nullptr);if(instance&&vk.vkDestroyInstance)vk.vkDestroyInstance(instance,nullptr);if(window)SDL_DestroyWindow(window);if(loaded)SDL_Vulkan_UnloadLibrary();
     }
 };
@@ -505,6 +670,7 @@ void VulkanRenderer::update_texture(unsigned id,int w,int h,std::span<const std:
     if(t.use_count()>1||t->storage.use_count()>1){
         auto old=t;
         t=impl_->make_texture(old->image.extent.width,old->image.extent.height,{},old->mipmaps,old->flip);
+        t->content_revision=old->content_revision;
         impl_->begin(impl_->upload_command);
         impl_->transition(impl_->upload_command,old->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,old->levels);
         impl_->transition(impl_->upload_command,t->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,t->levels);
@@ -516,11 +682,12 @@ void VulkanRenderer::update_texture(unsigned id,int w,int h,std::span<const std:
         impl_->submit_upload();
     }
     impl_->upload_pixels(*t,w,h,p,x,y);
+    ++t->content_revision;
 }
 void VulkanRenderer::draw(unsigned m,unsigned t,const Material& a,const MaterialPass& p,const DrawState& s){impl_->record(m,t,a,p,s);}
 void VulkanRenderer::present(){impl_->present();}
 std::vector<std::uint8_t> VulkanRenderer::capture_rgba(){return impl_->capture();}
-void VulkanRenderer::reset_history(){impl_->history=false;impl_->effects->reset_history();}
+void VulkanRenderer::reset_history(){impl_->history=false;impl_->previous_draws.clear();impl_->effects->reset_history();}
 const char* VulkanRenderer::backend_name()const noexcept{return "Vulkan";}
 bool VulkanRenderer::ray_tracing_available()const noexcept{return impl_->ray;}
 } // namespace yami

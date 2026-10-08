@@ -633,7 +633,8 @@ void smoke(Platform& host, const Options& opts) {
               << " ao=" << activeGraphics.ambient_occlusion
               << " reflections=" << activeGraphics.reflections
               << " bloom=" << activeGraphics.bloom
-              << " sharpen=" << activeGraphics.sharpen
+              << (activeGraphics.backend==GraphicsBackend::Vulkan ? " sharpen_gl_preference=" : " sharpen=")
+              << activeGraphics.sharpen
               << " api=" << host.renderer.backend_name()
               << " rtAvailable=" << host.renderer.ray_tracing_available()
               << " rtEnabled=" << (host.renderer.ray_tracing_available() &&
@@ -654,7 +655,8 @@ int main(int argc, char** argv) {
                          "  --no-updates (offline launcher) --version\n"
                          "  --fullscreen --samples N --anisotropy N --gles --skip-intro\n"
                          "  --level 1..4 --smoke (bypasses launcher) --capture FILE.ppm --classic-graphics\n"
-                         "  --ao 0..1 --reflections 0..1 --bloom 0..1 --sharpen 0..1\n"
+                         "  --ao 0..1 --reflections 0..1 --bloom 0..1\n"
+                         "  --sharpen 0..1 (OpenGL/GLES only; preference retained in Vulkan)\n"
                          "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off\n"
                          "  --shadows 0..1 --gi 0..1 --exposure .1..4\n"
                          "  --render-scale .5..1 --roughness .05..1 (Vulkan only)\n"
