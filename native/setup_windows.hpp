@@ -53,9 +53,26 @@ inline fs::path absolute_path(const fs::path& path) {
     return result;
 }
 inline bool path_equal(const fs::path& a, const fs::path& b) {
-    return a.native().size() == b.native().size() &&
-           CompareStringOrdinal(a.c_str(), static_cast<int>(a.native().size()),
-                                b.c_str(), static_cast<int>(b.native().size()), TRUE) == CSTR_EQUAL;
+    const auto equal = [](const fs::path& left, const fs::path& right) {
+        return left.native().size() == right.native().size() &&
+               CompareStringOrdinal(left.c_str(), static_cast<int>(left.native().size()),
+                                    right.c_str(), static_cast<int>(right.native().size()), TRUE) == CSTR_EQUAL;
+    };
+    if (a.empty() || b.empty()) return a.empty() && b.empty();
+    if (equal(a, b)) return true;
+    const auto normalized = [](const fs::path& path) {
+        const auto& native = path.native();
+        const int count = NormalizeString(NormalizationC, native.data(), static_cast<int>(native.size()), nullptr, 0);
+        require(count > 0, "Cannot normalize an installation path");
+        std::wstring result(static_cast<std::size_t>(count), L'\0');
+        require(NormalizeString(NormalizationC, native.data(), static_cast<int>(native.size()),
+                                result.data(), count) == count, "Cannot normalize an installation path");
+        return result;
+    };
+    const auto left = normalized(a), right = normalized(b);
+    return left.size() == right.size() &&
+           CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                                right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
 }
 inline bool within(const fs::path& parent, const fs::path& child) {
     auto p = parent.begin(), c = child.begin();
