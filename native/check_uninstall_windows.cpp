@@ -60,14 +60,16 @@ void rejected(const fs::path& root) {
     throw std::runtime_error("Unsafe uninstall was accepted");
 }
 void queue_console(std::string_view value) {
-    auto input = GetStdHandle(STD_INPUT_HANDLE);
+    auto standardInput = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
-    if (!GetConsoleMode(input, &mode)) {
+    if (!GetConsoleMode(standardInput, &mode)) {
         (void)FreeConsole();
         removal::require(AllocConsole() != 0, "Cannot allocate uninstall test console");
-        input = GetStdHandle(STD_INPUT_HANDLE);
     }
-    removal::require(input != INVALID_HANDLE_VALUE, "Console input unavailable");
+    const removal::Handle input(CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                            OPEN_EXISTING, 0, nullptr));
+    removal::require(bool(input), "Console input unavailable");
     for (const char c : value) {
         for (const bool down : {true, false}) {
             INPUT_RECORD record{}; record.EventType = KEY_EVENT;
@@ -76,7 +78,7 @@ void queue_console(std::string_view value) {
             record.Event.KeyEvent.wVirtualKeyCode = c == '\n' ? VK_RETURN : static_cast<WORD>(c);
             record.Event.KeyEvent.uChar.AsciiChar = c == '\n' ? '\r' : c;
             DWORD written = 0;
-            removal::require(WriteConsoleInputW(input, &record, 1, &written) != 0 && written == 1,
+            removal::require(WriteConsoleInputW(input.value, &record, 1, &written) != 0 && written == 1,
                                "Cannot queue console response");
         }
     }
