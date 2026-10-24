@@ -3,6 +3,7 @@
 
 #include <objbase.h>
 #include <shobjidl.h>
+#include <cstdio>
 
 namespace fs = std::filesystem;
 namespace {
@@ -66,10 +67,13 @@ void queue_console(std::string_view value) {
         (void)FreeConsole();
         removal::require(AllocConsole() != 0, "Cannot allocate uninstall test console");
     }
-    const removal::Handle input(CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
-                                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                            OPEN_EXISTING, 0, nullptr));
-    removal::require(bool(input), "Console input unavailable");
+    static removal::Handle input;
+    input = removal::Handle(CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                        OPEN_EXISTING, 0, nullptr));
+    removal::require(bool(input) && SetStdHandle(STD_INPUT_HANDLE, input.value) != 0 &&
+                     std::freopen("CONIN$", "r", stdin) != nullptr, "Console input unavailable");
+    std::cin.clear();
     for (const char c : value) {
         for (const bool down : {true, false}) {
             INPUT_RECORD record{}; record.EventType = KEY_EVENT;
