@@ -163,11 +163,11 @@ def build(args: argparse.Namespace) -> None:
         setup = args.setup_binary.resolve(strict=True)
         remover = args.remover_binary.resolve(strict=True)
         check_remover(remover, args.arch)
-        payload.copy(setup, "runtime/yami-setup.exe")
-        payload.copy(remover, "runtime/yami-remove.exe")
         payload.copy(official / "7z.exe", "runtime/7zz.exe")
         payload.copy(official / "7z.dll", "runtime/7z.dll")
         package_windows(payload, [official / "7z.exe"], [official])
+        payload.copy(setup, "runtime/yami-setup.exe")
+        payload.copy(remover, "runtime/yami-remove.exe")
         package_windows(payload, [setup, remover],
                         [path.resolve(strict=True) for path in args.search_dir])
         for path in list(payload.root.iterdir()):
