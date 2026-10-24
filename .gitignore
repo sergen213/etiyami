@@ -3,6 +3,7 @@
 /.wine*/
 /drivers/
 /*.cab
+/dist/
 /*.msi
 /*.exe
 /*.ico

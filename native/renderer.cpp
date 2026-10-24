@@ -4,6 +4,17 @@
 #include "vulkan_renderer.hpp"
 #endif
 #include <epoxy/gl.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <epoxy/wgl.h>
+#undef interface
+#undef DrawState
+#endif
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -286,6 +297,9 @@ Renderer::Renderer(const DisplayOptions& options) : desired_(options), gles_(opt
         context_ = SDL_GL_CreateContext(window_);
         if (!context_) throw std::runtime_error(SDL_GetError());
         sdl_check(SDL_GL_MakeCurrent(window_, context_));
+#ifdef _WIN32
+        epoxy_handle_external_wglMakeCurrent();
+#endif
         sdl_check(SDL_GL_SetSwapInterval(1));
         const std::string prefix = options.gles ? "#version 300 es\nprecision highp float;\n" : "#version 330 core\n";
         program_ = create_program(prefix+vertex_source, prefix+fragment_source);
@@ -381,6 +395,9 @@ Renderer::Renderer(const DisplayOptions& options) : desired_(options), gles_(opt
 void Renderer::cleanup() noexcept {
     if (context_) {
         SDL_GL_MakeCurrent(window_, context_);
+#ifdef _WIN32
+        epoxy_handle_external_wglMakeCurrent();
+#endif
         for (const auto& mesh : meshes_) {
             glDeleteVertexArrays(1, &mesh.vao);
             glDeleteBuffers(1, &mesh.vertices);

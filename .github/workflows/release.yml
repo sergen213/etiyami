@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Existing release tag/version (v1.2.3 or 1.2.3); builds that tag, not the selected branch'
-        required: true
+        description: 'Existing release tag/version to publish; leave empty to verify the selected branch without publishing'
+        required: false
         type: string
 
 permissions:
@@ -33,7 +33,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -z "$INPUT_VERSION" ]]; then
+            commit="$GITHUB_SHA"
+            printf 'tag=\nversion=0.0.0\ncommit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             tag="v${INPUT_VERSION#v}"
           else
             tag="$GITHUB_REF_NAME"
@@ -42,7 +46,7 @@ jobs:
             echo 'A stable vMAJOR.MINOR.PATCH tag is required.' >&2
             exit 1
           fi
-          # Require a real tag even for manual dispatch. Resolve once; every job checks out this SHA.
+          # Require a real tag for every publishing run. Resolve once; every job checks out this SHA.
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .ref
           commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)"
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
@@ -205,8 +209,83 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  windows:
+    needs: metadata
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+      UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.metadata.outputs.commit }}
+          persist-credentials: false
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          update: true
+          path-type: inherit
+      - name: Install UCRT64 toolchain and dependencies
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          pacman -S --needed --noconfirm \
+            mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
+            mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+            mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-sdl3 \
+            mingw-w64-ucrt-x86_64-libepoxy mingw-w64-ucrt-x86_64-libxml2 \
+            mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-curl-winssl \
+            mingw-w64-ucrt-x86_64-libarchive mingw-w64-ucrt-x86_64-json-c \
+            mingw-w64-ucrt-x86_64-vulkan-headers mingw-w64-ucrt-x86_64-glslang 7zip
+      - name: Build engine, installer, and regression checks
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DYAMI_RELEASE_VERSION="$RELEASE_VERSION" -DYAMI_UPDATE_REPO="$UPDATE_REPO" \
+            -DBUILD_TESTING=ON -DYAMI_ENABLE_VULKAN=ON -DYAMI_INSTALL_ORIGINAL_ASSETS=OFF
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure -R '^(update|update_install|windows_update_install|windows_setup|windows_uninstall)$'
+          build/yami-native.exe --version
+      - name: Package and validate engine ZIP and offline GUI installer
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cmake --install build --component runtime --prefix "$RUNNER_TEMP/yami-install"
+          python tools/package_release.py --install-root "$(cygpath -w "$RUNNER_TEMP/yami-install")" \
+            --platform windows --arch x86_64 --version "$RELEASE_VERSION" \
+            --search-dir "$(cygpath -w /ucrt64/bin)" --output 'dist/yami-windows-x86_64.zip'
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://github.com/ip7z/7zip/releases/download/26.04/7z2604-x64.exe \
+            --output "$RUNNER_TEMP/7z2604-x64.exe"
+          echo 'd54bf805f9f3704d1e8db2fa3498ae7ef2df0312b40b558e7c71c734430a665d  '"$RUNNER_TEMP/7z2604-x64.exe" | sha256sum --check
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            https://github.com/ip7z/7zip/releases/download/26.04/lzma2604.7z \
+            --output "$RUNNER_TEMP/lzma2604.7z"
+          echo 'bd98058d0e12c5da970dd4e5e1d8fa24f2d704914d96e69c28f92ed45421a439  '"$RUNNER_TEMP/lzma2604.7z" | sha256sum --check
+          python tools/package_windows_setup.py --setup-binary build/yami-setup.exe \
+            --remover-binary build/yami-remove.exe --engine-archive 'dist/yami-windows-x86_64.zip' \
+            --sevenzip-installer "$(cygpath -w "$RUNNER_TEMP/7z2604-x64.exe")" \
+            --lzma-sdk "$(cygpath -w "$RUNNER_TEMP/lzma2604.7z")" \
+            --search-dir "$(cygpath -w /ucrt64/bin)" --arch x86_64 \
+            --version "$RELEASE_VERSION" --output 'dist/yami-setup-windows-x86_64.exe'
+          python tools/package_windows_setup.py --self-test --arch x86_64 \
+            --engine-archive 'dist/yami-windows-x86_64.zip' \
+            --output 'dist/yami-setup-windows-x86_64.exe'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-x86_64
+          path: |
+            dist/yami-windows-x86_64.zip
+            dist/yami-setup-windows-x86_64.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   publish:
-    needs: [metadata, linux]
+    if: github.event_name == 'push' || inputs.version != ''
+    needs: [metadata, linux, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -219,17 +298,18 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Recheck all six Linux assets before creating a draft
+      - name: Recheck all eight release assets before creating a draft
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y patchelf binutils squashfs-tools
+          sudo apt-get install --no-install-recommends -y patchelf binutils squashfs-tools p7zip-full
           python3 - <<'PY'
           from pathlib import Path
           expected = {f'yami-linux-{arch}.zip' for arch in ('x86_64', 'arm64')}
           expected |= {f'yami-setup-linux-{arch}.run' for arch in ('x86_64', 'arm64')}
           expected |= {f'yami-setup-linux-{arch}.AppImage' for arch in ('x86_64', 'arm64')}
+          expected |= {'yami-windows-x86_64.zip', 'yami-setup-windows-x86_64.exe'}
           actual = {path.name for path in Path('dist').iterdir()}
           if actual != expected:
               raise SystemExit(f'Incomplete release asset set: {actual ^ expected}')
@@ -251,6 +331,11 @@ jobs:
               --setup-archive "dist/yami-setup-linux-$arch.run" \
               --engine-archive "dist/yami-linux-$arch.zip" --output "dist/yami-setup-linux-$arch.AppImage"
           done
+          python3 tools/package_release.py --verify-only --platform windows --arch x86_64 \
+            --output dist/yami-windows-x86_64.zip
+          python3 tools/package_windows_setup.py --verify-only --arch x86_64 \
+            --engine-archive dist/yami-windows-x86_64.zip \
+            --output dist/yami-setup-windows-x86_64.exe
       - name: Upload complete draft, verify GitHub SHA256 digests, then publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -265,21 +350,24 @@ jobs:
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
             --notes-file - <<'RELEASE_NOTES'
-          ## v1.2.2 automatic-update compatibility hotfix
+          ## v1.3.0 native Windows release
 
-          - Installed v1.2.0 launchers can update again: update ZIPs retain the flat runtime-only layout accepted by the old trusted helper and its ownership inventory. The pinned FidelityFX MIT notice is embedded in yami-native, and installers also include the readable licenses/fidelityfx/LICENSE.txt copy. This corrects v1.2.1's incompatible nested update-ZIP license entry without replacing either earlier release's artifacts.
-          - AMD FidelityFX SDK 1.1.4 / FSR 3.1.4 replaces the custom Vulkan artwork TAA, with Native AA, Quality, Balanced and Performance modes, HDR input, RCAS sharpening and a native-resolution HUD. FSR requires compatible Vulkan storage-image and compute-subgroup features; unsupported devices retain the non-FSR path.
-          - Optional FSR frame generation adds optical-flow interpolation with shading-change and moving-Sun-shadow handling. It is off by default and requires FSR plus a supporting GPU. Alpha-blended sprites can smear in generated frames; motion image quality and frame pacing remain subject to gameplay judgement, and no performance guarantee is claimed.
-          - Enhanced graphics interpolate character poses between the original 30 fps keyframes. Vulkan lighting, fog, ray reconstruction, moving shadows and history handling receive additional corrections; OpenGL/OpenGL ES and classic-graphics behavior are retained.
-          - Existing optional hardware ray-query shadows, reflections, ambient occlusion and indirect lighting remain available. Ray tracing is optional, not full path tracing; OpenGL remains the default and launcher-preview backend.
+          - Native 64-bit Windows joins Linux with the same C++20/SDL3 game, settings launcher, original assets, checkpoints, OpenGL/GLES rendering, Vulkan 1.3, optional ray-query effects, AMD FSR 3.1.4 upscaling and optional frame generation. OpenGL remains the default; enhanced character shadows, widescreen and classic graphics are retained.
+          - The single-file Windows installer reads your legally owned original ISO offline, shows its artwork, installs per user without administrator rights, creates Start Menu and optional Desktop play/uninstall shortcuts, and preserves saves, settings and unrecorded files on repair/uninstall. The engine ZIP supports manual installations and automatic updates.
+          - Windows update ZIPs stay flat and contain only engine executables/runtime DLLs. The pinned FidelityFX MIT notice is embedded in yami-native.exe and included readably in the installer. Windows packages are unsigned, so SmartScreen can report an unknown publisher.
+          - Vulkan/FSR feature availability remains GPU/driver dependent. Frame generation is off by default; alpha-blended sprites can smear in generated frames, and no motion-quality or performance guarantee is claimed.
+
+          ## Windows download and installation
+
+          Download yami-setup-windows-x86_64.exe for 64-bit Windows 10/11, run it as your normal user, choose the original Turkish Yami ISO, then Install game and Launch game. Installation defaults to %LOCALAPPDATA%\\Programs\\etiyami. No Wine, DirectX/codec installer, separately installed 7-Zip, admin rights, or manual asset extraction is needed. The original assets are not distributed. Native Windows CI builds and regression/package checks do not establish compatibility with every GPU or a complete campaign playthrough.
 
           ## Linux downloads and installation
 
-          Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. Installers accept your original ISO and display its original game artwork. Apps / the application-menu entries are primary; Desktop play/uninstall shortcuts are optional when a usable location is available, without extensions, trust changes or global desktop changes. A .desktop file is launcher metadata, not a shell script. ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves.
+          Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. They provide the same v1.2.x graphics and updater functionality as before, including the flat update layout compatible with installed v1.2.0 launchers. Installers accept the original ISO offline and create application-menu plus optional Desktop entries; no original assets or saves are bundled.
 
-          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Packages target native Linux x86_64/ARM64 CI; physical ARM64 GPU execution, blanket Linux compatibility and a performance guarantee are not claimed. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.
+          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Physical ARM64 GPU execution, blanket distribution compatibility and a performance guarantee are not claimed. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware/driver support. AppImages use a static runtime with extraction fallback when FUSE is unavailable. macOS releases remain deferred.
           RELEASE_NOTES
-          gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage
+          gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage dist/*.exe
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
             --jq ".[] | select(.tag_name == \"$RELEASE_TAG\") | .id")"
@@ -293,7 +381,7 @@ jobs:
           local = {path.name: 'sha256:' + hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
                    for path in Path('dist').iterdir() if path.is_file()}
           assets = {asset['name']: asset for asset in release['assets']}
-          if (not release['draft'] or len(release['assets']) != 6 or len(local) != 6
+          if (not release['draft'] or len(release['assets']) != 8 or len(local) != 8
                   or set(assets) != set(local)):
               raise SystemExit('Release is not a complete draft.')
           for name, expected in local.items():

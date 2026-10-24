@@ -9,6 +9,18 @@
 #include <vector>
 
 namespace yami::ownership {
+#ifdef _WIN32
+inline constexpr std::string_view markerName = ".eti-yami-install";
+inline constexpr std::string_view marker = "ETI Yami native Windows installation\nformat=1\n";
+inline constexpr std::string_view installedName = ".eti-yami-installed-files";
+inline constexpr std::string_view installedMagic = "ETI Yami installed ownership\nformat=1\n";
+inline constexpr std::string_view engineName = ".eti-yami-engine-files";
+inline constexpr std::string_view engineMagic = "ETI Yami engine ownership\nformat=1\n";
+inline constexpr std::string_view helperDirectory = ".eti-yami-uninstall";
+inline constexpr std::string_view helperName = "yami-remove.exe";
+inline constexpr std::string_view playShortcut = "ETI Yami.lnk";
+inline constexpr std::string_view uninstallShortcut = "Uninstall ETI Yami.lnk";
+#else
 inline constexpr std::string_view markerName = ".eti-yami-install";
 inline constexpr std::string_view marker = "ETI Yami native Linux installation\nformat=1\n";
 inline constexpr std::string_view installedName = ".eti-yami-installed-files";
@@ -20,6 +32,7 @@ inline constexpr std::string_view helperName = "yami-remove";
 inline constexpr std::string_view scriptName = "uninstall.sh";
 inline constexpr std::string_view playShortcut = "eti-yami.desktop";
 inline constexpr std::string_view uninstallShortcut = "eti-yami-uninstall.desktop";
+#endif
 inline constexpr std::size_t maxInstalledBytes = 8 * 1024 * 1024;
 inline constexpr std::size_t maxInstalledRecords = 32768;
 inline constexpr std::size_t maxPathBytes = 4096;
@@ -35,6 +48,17 @@ inline bool valid_relative_file(std::string_view value) {
         const auto end = value.find('/', begin);
         const auto part = value.substr(begin, end == std::string_view::npos ? end : end - begin);
         if (part.empty() || part == "." || part == "..") return false;
+#ifdef _WIN32
+        if (part.back() == '.' || part.back() == ' ' ||
+            part.find_first_of(":*?\"<>|") != std::string_view::npos) return false;
+        for (const unsigned char c : part) if (c < 32 || (c >= 127 && c < 160)) return false;
+        const auto dot = part.find('.');
+        std::string stem(part.substr(0, dot));
+        for (auto& c : stem) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" ||
+            (stem.size() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) &&
+             stem[3] >= '1' && stem[3] <= '9')) return false;
+#endif
         if (end == std::string_view::npos) break;
         begin = end + 1;
     }
@@ -42,6 +66,12 @@ inline bool valid_relative_file(std::string_view value) {
 }
 inline bool valid_engine_file(std::string_view value) {
     if (!valid_relative_file(value)) return false;
+#ifdef _WIN32
+    if (value == "yami-native.exe" || value == "yami-updater.exe" || value == "yami-launcher.exe") return true;
+    if (value.find('/') != std::string_view::npos) return false;
+    static const std::regex library(R"([A-Za-z0-9_+.-]+\.dll)", std::regex::icase);
+    return std::regex_match(std::string(value), library);
+#else
     if (value == "yami-native" || value == "yami-updater" || value == "yami-launcher") return true;
     if (value.starts_with("lib/")) value.remove_prefix(4);
     if (value.find('/') != std::string_view::npos) return false;
@@ -49,10 +79,11 @@ inline bool valid_engine_file(std::string_view value) {
     static const std::regex host(R"((?:lib(?:c|m|dl|pthread|rt|resolv|util|anl|nss_[^.]+|stdc\+\+|gcc_s)|lib(?:GL|GLX|GLdispatch|OpenGL|EGL|GLESv[12]|vulkan|drm(?:_[^.]+)?|gbm|cuda|nvidia[^.]*|vdpau|va(?:-x11|-drm|-wayland)?))\.so(?:\.[0-9]+)*)");
     const std::string name(value);
     return std::regex_match(name, library) && !std::regex_match(name, host);
+#endif
 }
 inline bool valid_shortcut(std::string_view value) {
     if (!valid_text(value)) return false;
-    const std::filesystem::path path(value);
+    const std::filesystem::path path(std::u8string(value.begin(), value.end()));
     return path.is_absolute() && path.lexically_normal() == path &&
            (path.filename() == playShortcut || path.filename() == uninstallShortcut);
 }
@@ -81,9 +112,13 @@ inline InstalledFiles parse_installed(std::string_view text) {
     for (const auto* values : {&result.files, &result.shortcuts})
         if (!std::is_sorted(values->begin(), values->end()) || std::adjacent_find(values->begin(), values->end()) != values->end())
             throw std::runtime_error("ETI Yami ownership paths must be sorted and unique");
-    for (const auto required : {markerName, installedName, engineName, scriptName})
+    for (const auto required : {markerName, installedName, engineName})
         if (!std::binary_search(result.files.begin(), result.files.end(), std::string(required)))
             throw std::runtime_error("Incomplete ETI Yami ownership inventory");
+#ifndef _WIN32
+    if (!std::binary_search(result.files.begin(), result.files.end(), std::string(scriptName)))
+        throw std::runtime_error("Incomplete ETI Yami ownership inventory");
+#endif
     if (!std::binary_search(result.files.begin(), result.files.end(), std::string(helperDirectory) + "/" + std::string(helperName)))
         throw std::runtime_error("Incomplete ETI Yami remover ownership inventory");
     return result;
@@ -96,7 +131,11 @@ inline std::vector<std::string> parse_engine(std::string_view text) {
     }
     if (!std::is_sorted(result.begin(), result.end()) || std::adjacent_find(result.begin(), result.end()) != result.end())
         throw std::runtime_error("ETI Yami engine ownership paths must be sorted and unique");
+#ifdef _WIN32
+    for (const auto name : {"yami-native.exe", "yami-updater.exe", "yami-launcher.exe"})
+#else
     for (const auto name : {"yami-native", "yami-updater", "yami-launcher"})
+#endif
         if (!std::binary_search(result.begin(), result.end(), std::string(name)))
             throw std::runtime_error("Incomplete ETI Yami engine ownership inventory");
     return result;

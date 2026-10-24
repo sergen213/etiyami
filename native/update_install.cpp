@@ -1,6 +1,10 @@
 #include "update_install.hpp"
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
+#define YAMI_INSTALLER_OWNERSHIP 1
 #include "install_ownership.hpp"
+#endif
+#ifdef _WIN32
+#include "setup_windows.hpp"
 #endif
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -18,8 +22,12 @@
 #include <thread>
 #include <vector>
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <sddl.h>
 #else
@@ -247,8 +255,11 @@ struct InstallLock {
         }
     }
 };
-#if defined(__linux__)
+#ifdef YAMI_INSTALLER_OWNERSHIP
 std::string ownership_text(const fs::path& path, std::size_t limit) {
+#ifdef _WIN32
+    return windows_install::read_small(path, limit, true);
+#else
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     require(fd >= 0, "Cannot open installer ownership metadata: " + text(path));
     struct Close { int fd; ~Close() { ::close(fd); } } close{fd};
@@ -270,6 +281,7 @@ std::string ownership_text(const fs::path& path, std::size_t limit) {
     do { count = ::read(fd, &extra, 1); } while (count < 0 && errno == EINTR);
     require(count == 0, "Installer ownership metadata changed while reading: " + text(path));
     return contents;
+#endif
 }
 bool installer_engine_files(const fs::path& root, std::vector<std::string>& files) {
     // A marker alone is a legacy/manual installation, not permission to claim its live files.
@@ -277,9 +289,14 @@ bool installer_engine_files(const fs::path& root, std::vector<std::string>& file
     const bool engine = fs::exists(checked_status(root/ownership::engineName));
     if (!installed && !engine) return false;
     require(installed && engine, "Incomplete installer ownership inventories; repair with the installer");
+#ifdef _WIN32
+    require(fs::is_directory(checked_status(root)) && windows_install::current_owner(windows_install::open_directory(root).value),
+            "Installer-owned root is not controlled by the current user");
+#else
     struct stat info{};
     require(::stat(root.c_str(), &info) == 0 && info.st_uid == geteuid() &&
             !(info.st_mode & (S_IWGRP | S_IWOTH)), "Installer-owned root is not privately controlled");
+#endif
     require(ownership_text(root/ownership::markerName, ownership::marker.size()) == ownership::marker,
             "Invalid installer ownership marker");
     ownership::parse_installed(ownership_text(root/ownership::installedName, ownership::maxInstalledBytes));
@@ -371,7 +388,9 @@ bool valid_payload_path(std::string_view relative, bool directory) {
         offset = end + 1;
     }
     if (directory) {
+#ifndef _WIN32
         if (relative == "lib") return true;
+#endif
 #ifdef __APPLE__
         return relative == "yami-launcher.app" || relative == "yami-launcher.app/Contents" ||
                relative == "yami-launcher.app/Contents/MacOS" || relative == "yami-launcher.app/Contents/Resources" ||
@@ -382,8 +401,10 @@ bool valid_payload_path(std::string_view relative, bool directory) {
     }
     if (binary(relative)) return true;
     if (relative.find('/') == std::string_view::npos) return runtime_name(relative);
+#ifndef _WIN32
     if (relative.starts_with("lib/") && relative.find('/', 4) == std::string_view::npos)
         return runtime_name(relative.substr(4));
+#endif
 #ifdef __APPLE__
     if (relative == "yami-launcher.app/Contents/Info.plist" || relative == "yami-launcher.app/Contents/PkgInfo" ||
         relative == "yami-launcher.app/Contents/_CodeSignature/CodeResources") return true;
@@ -520,10 +541,17 @@ void install_prepared(const fs::path& stagePath, const fs::path& rootPath) {
     });
     InstallLock lock(root, stage);
     std::string engineInventory;
-#if defined(__linux__)
+#ifdef YAMI_INSTALLER_OWNERSHIP
     std::vector<std::string> ownedEngine;
     if (installer_engine_files(root, ownedEngine)) {
-        for (const auto& member : members) ownedEngine.push_back(member.name);
+        for (const auto& member : members) {
+#ifdef _WIN32
+            require(!fs::exists(checked_status(root/member.relative)) ||
+                    std::find(ownedEngine.begin(), ownedEngine.end(), member.name) != ownedEngine.end(),
+                    "Update would replace an unrecorded user DLL: " + member.name);
+#endif
+            ownedEngine.push_back(member.name);
+        }
         engineInventory = ownership::serialize_engine(std::move(ownedEngine));
         members.push_back({utf8_path(ownership::engineName), std::string(ownership::engineName), stage/"engine-ownership"});
     }

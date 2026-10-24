@@ -37,12 +37,12 @@ LINUX_SYSTEM = re.compile(
 WINDOWS_SYSTEM = {name + ".dll" for name in (
     "advapi32", "avrt", "bcrypt", "bcryptprimitives", "cfgmgr32", "combase", "comctl32",
     "comdlg32", "crypt32", "cryptbase", "d3d11", "d3d12", "d3d9", "dcomp", "dbghelp",
-    "dnsapi", "dsound", "dwmapi", "dxgi", "dxva2", "gdi32", "hid", "imm32", "iphlpapi",
-    "kernel32", "kernelbase", "mf", "mfplat", "mfreadwrite", "mfuuid", "msvcrt", "ncrypt",
+    "dnsapi", "dsound", "dwmapi", "dwrite", "dxgi", "dxva2", "gdi32", "gdiplus", "hid", "imm32", "iphlpapi",
+    "kernel32", "kernelbase", "mf", "mfplat", "mfreadwrite", "mfuuid", "msimg32", "msvcrt", "ncrypt",
     "netapi32", "normaliz", "ntdll", "ole32", "oleaut32", "opengl32", "powrprof", "propsys",
     "psapi", "rpcrt4", "secur32", "setupapi", "shell32", "shlwapi", "ucrtbase", "user32",
     "userenv", "usp10", "uxtheme", "version", "winhttp", "wininet", "winmm", "winspool",
-    "wintrust", "wldap32", "ws2_32", "wtsapi32"
+    "wintrust", "wldap32", "ws2_32", "wsock32", "wtsapi32", "xmllite"
 )}
 MAX_MEMBER = 512 * 1024 * 1024
 MAX_TOTAL = 2 * 1024 * 1024 * 1024
@@ -111,7 +111,7 @@ def allowed_path(name: str, platform: str) -> bool:
         "windows": library.lower().endswith(".dll"),
         "macos": bool(re.fullmatch(r"lib[^/]+\.dylib", library)),
     }[platform]
-    if library_ok and (len(parts) == 1 or (len(parts) == 2 and parts[0] == "lib")):
+    if library_ok and (len(parts) == 1 or (len(parts) == 2 and parts[0] == "lib" and platform != "windows")):
         return True
     if platform != "macos" or parts[:2] != ("yami-launcher.app", "Contents"):
         return False
@@ -420,10 +420,10 @@ def verify_archive(archive: Path, platform: str, arch: str) -> None:
                 fail(f"Archive payload bounds exceeded: {member.filename}")
         if not set(required_paths(platform)).issubset({member.filename for member in files}):
             fail("Archive omits a required engine binary")
-        if platform == "linux":
+        if platform in ("linux", "windows"):
             notice = FIDELITYFX_LICENSE.read_bytes()
             if (hashlib.sha256(notice).hexdigest() != FIDELITYFX_LICENSE_SHA256
-                    or notice not in zip_file.read("yami-native")):
+                    or notice not in zip_file.read(required_paths(platform)[0])):
                 fail("Archive native engine lacks the pinned embedded FidelityFX license")
         if platform != "windows":
             by_name = {member.filename: member for member in files}

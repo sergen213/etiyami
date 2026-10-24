@@ -8,7 +8,9 @@
 #include <string>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <unistd.h>
@@ -21,7 +23,7 @@ namespace {
 constexpr auto native = "yami-native.exe";
 constexpr auto updater = "yami-updater.exe";
 constexpr auto launcher = "yami-launcher.exe";
-constexpr auto library = "lib/zz-check.dll";
+constexpr auto library = "zz-check.dll";
 constexpr auto addedLibrary = "first-check.dll";
 #elif defined(__APPLE__)
 constexpr auto native = "yami-native";

@@ -69,7 +69,8 @@ void require(bool condition, const char* message) {
 }
 using Document = std::unique_ptr<xmlDoc, decltype(&xmlFreeDoc)>;
 Document xml(const std::filesystem::path& path, const char* rootName) {
-    Document doc(xmlReadFile(path.string().c_str(), "WINDOWS-1254", XML_PARSE_NONET), xmlFreeDoc);
+    const auto filename=path.u8string();
+    Document doc(xmlReadFile(reinterpret_cast<const char*>(filename.c_str()), "WINDOWS-1254", XML_PARSE_NONET), xmlFreeDoc);
     require(bool(doc), "Cannot parse original menu/font XML");
     require(!doc->intSubset && !doc->extSubset, "DTDs are not allowed in menu/font XML");
     const auto root = xmlDocGetRootElement(doc.get());

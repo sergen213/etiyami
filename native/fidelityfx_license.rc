@@ -1,0 +1,2 @@
+// Keep the pinned FidelityFX MIT notice inside the update-owned native executable.
+100 RCDATA "../third_party/fidelityfx-sdk/LICENSE.txt"

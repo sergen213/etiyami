@@ -1,5 +1,8 @@
 #include "setup.hpp"
 #include "setup_artwork.hpp"
+#ifdef _WIN32
+#include "setup_windows.hpp"
+#endif
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <algorithm>
@@ -26,6 +29,15 @@ constexpr SDL_Color Ink{41,31,20,255}, Muted{86,65,42,255}, Olive{83,88,39,255},
 std::atomic<bool> interrupted{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 void interrupt(int) { interrupted.store(true,std::memory_order_relaxed); }
+#ifdef _WIN32
+constexpr const char* Platform = "Windows";
+fs::path input_path(const char* value) { return yami::windows_install::utf8_path(value); }
+std::string path_text(const fs::path& path) { return yami::windows_install::text(path); }
+#else
+constexpr const char* Platform = "Linux";
+fs::path input_path(const char* value) { return fs::path(value); }
+std::string path_text(const fs::path& path) { return path.string(); }
+#endif
 struct Options {
     fs::path iso, destination, engine, archiver, remover;
     bool unattended=false;
@@ -35,11 +47,19 @@ Options arguments(int argc,char** argv) {
     for (int i=1;i<argc;++i) {
         const std::string argument=argv[i];
         if (argument=="--help" || argument=="-h") {
-            std::cout << "ETI Yami Linux setup " YAMI_VERSION "\n"
+            std::cout << "ETI Yami " << Platform << " setup " YAMI_VERSION "\n"
+#ifdef _WIN32
+                "Usage: yami-setup.exe [--iso GAME.iso] [--install-dir DIRECTORY]\n"
+#else
                 "Usage: yami-setup [--iso GAME.iso] [--install-dir DIRECTORY]\n"
+#endif
                 "                 [--engine DIRECTORY] [--archiver FILE] [--remover FILE]\n"
                 "                 [--unattended]\n"
+#ifdef _WIN32
+                "Default: game artwork from your ISO, per-user installation, application shortcuts.\n"
+#else
                 "Default: game artwork from your ISO, per-user installation, application-menu entries.\n"
+#endif
                 "Desktop shortcuts are added when the desktop directory is available.\n"
                 "--unattended installs the supplied ISO without opening a window.\n";
             std::exit(0);
@@ -50,11 +70,11 @@ Options arguments(int argc,char** argv) {
             argument!="--archiver" && argument!="--remover")
             throw std::runtime_error("Unknown option: "+argument);
         if (++i==argc) throw std::runtime_error("Missing value for "+argument);
-        if (argument=="--iso") options.iso=fs::absolute(argv[i]);
-        else if (argument=="--install-dir") options.destination=fs::absolute(argv[i]);
-        else if (argument=="--engine") options.engine=fs::absolute(argv[i]);
-        else if (argument=="--archiver") options.archiver=fs::absolute(argv[i]);
-        else options.remover=fs::absolute(argv[i]);
+        if (argument=="--iso") options.iso=fs::absolute(input_path(argv[i]));
+        else if (argument=="--install-dir") options.destination=fs::absolute(input_path(argv[i]));
+        else if (argument=="--engine") options.engine=fs::absolute(input_path(argv[i]));
+        else if (argument=="--archiver") options.archiver=fs::absolute(input_path(argv[i]));
+        else options.remover=fs::absolute(input_path(argv[i]));
     }
     if (options.unattended && options.iso.empty()) throw std::runtime_error("--unattended requires --iso GAME.iso");
     return options;
@@ -64,12 +84,30 @@ struct Preview {
     Preview() {
         const auto temporary=fs::temp_directory_path();
         if (fs::space(temporary).available < (640ULL<<20))
+#ifdef _WIN32
+            throw std::runtime_error("Reading original artwork needs 640 MiB free temporary space. Choose a larger temporary directory.");
+#else
             throw std::runtime_error("Reading original artwork needs 640 MiB free temporary space. Choose a larger TMPDIR.");
+#endif
+#ifdef _WIN32
+        using namespace yami::windows_install;
+        bool made = false;
+        for (unsigned attempt=0; attempt<128 && !made; ++attempt) {
+            path=temporary/("yami-setup-art-"+std::to_string(GetCurrentProcessId())+"-"+
+                            std::to_string(GetTickCount64())+"-"+std::to_string(attempt));
+            made=CreateDirectoryW(path.c_str(),nullptr)!=0;
+            if (!made) require(GetLastError()==ERROR_ALREADY_EXISTS,"Cannot create a private artwork preview directory");
+        }
+        require(made,"Cannot allocate a private artwork preview directory");
+        try { secure(path,true); fs::create_directory(path/"game"); fs::create_directory(path/"scratch"); }
+        catch (...) { std::error_code error; fs::remove_all(path,error); throw; }
+#else
         auto pattern=(temporary/"yami-setup-art-XXXXXX").string();
         if (!::mkdtemp(pattern.data())) throw std::runtime_error("Cannot create a private artwork preview directory");
         path=pattern;
         try { fs::create_directory(path/"game"); fs::create_directory(path/"scratch"); }
         catch (...) { std::error_code error; fs::remove_all(path,error); throw; }
+#endif
     }
     ~Preview() { std::error_code error; fs::remove_all(path,error); }
 };
@@ -91,8 +129,8 @@ void SDLCALL selected(void* opaque,const char* const* files,int) {
     if (!files) { state.error=SDL_GetError(); return; }
     if (!files[0]) return;
     state.error.clear();
-    if (dialog->directory) state.request.paths.root=fs::path(files[0])/"etiyami";
-    else { state.request.iso=files[0]; state.needsPreview=true; }
+    if (dialog->directory) state.request.paths.root=input_path(files[0])/"etiyami";
+    else { state.request.iso=input_path(files[0]); state.needsPreview=true; }
 }
 void color(SDL_Renderer* renderer,SDL_Color value) {
     SDL_SetRenderDrawColor(renderer,value.r,value.g,value.b,value.a);
@@ -120,7 +158,7 @@ void compact_label(std::string& value) {
 int graphical(const InstallRequest& request) {
     auto state=std::make_shared<State>(); state->request=request; state->needsPreview=!request.iso.empty();
     std::unique_ptr<SDL_Window,decltype(&SDL_DestroyWindow)> window(
-        SDL_CreateWindow("ETI Yami - Linux Setup",Width,Height,SDL_WINDOW_RESIZABLE|SDL_WINDOW_HIGH_PIXEL_DENSITY),SDL_DestroyWindow);
+        SDL_CreateWindow((std::string("ETI Yami - ")+Platform+" Setup").c_str(),Width,Height,SDL_WINDOW_RESIZABLE|SDL_WINDOW_HIGH_PIXEL_DENSITY),SDL_DestroyWindow);
     if (!window) throw std::runtime_error(SDL_GetError());
     std::unique_ptr<SDL_Renderer,decltype(&SDL_DestroyRenderer)> renderer(
         SDL_CreateRenderer(window.get(),"software"),SDL_DestroyRenderer);
@@ -171,8 +209,13 @@ int graphical(const InstallRequest& request) {
                 } else {
                     const auto result=install(input,progress);
                     std::lock_guard lock(state->mutex); state->result=result; state->installed=true;
+#ifdef _WIN32
+                    state->phase=std::string(result.reused?"Existing game kept. ":"Installation complete. ") +
+                        "Use ETI Yami in the Start Menu." + (result.paths.desktop.empty()?" Desktop shortcuts unavailable.":" Desktop shortcuts also created.");
+#else
                     state->phase=std::string(result.reused?"Existing game kept. ":"Installation complete. ") +
                         "Use ETI Yami in Apps." + (result.paths.desktop.empty()?" Desktop shortcuts unavailable.":" Desktop files also created; visibility depends on your desktop.");
+#endif
                 }
             } catch (const std::exception& error) {
                 std::lock_guard lock(state->mutex);
@@ -305,19 +348,21 @@ int graphical(const InstallRequest& request) {
         if (state->needsPreview && !state->busy && !state->dialog) { state->needsPreview=false; begin(true); }
         if (!state->dirty && !(state->busy && !state->total)) { lock.unlock(); SDL_Delay(32); continue; }
         if (displayedIso!=state->request.iso) {
-            displayedIso=state->request.iso; isoLabel=displayedIso.filename().string(); compact_label(isoLabel);
+            displayedIso=state->request.iso; isoLabel=path_text(displayedIso.filename()); compact_label(isoLabel);
         }
         if (displayedRoot!=state->request.paths.root) {
-            displayedRoot=state->request.paths.root; rootLabel=displayedRoot.string();
+            displayedRoot=state->request.paths.root; rootLabel=path_text(displayedRoot);
+#ifndef _WIN32
             const char* home=SDL_getenv("HOME");
             if (home && rootLabel.starts_with(std::string(home)+"/")) rootLabel.replace(0,std::strlen(home),"~");
+#endif
             compact_label(rootLabel);
         }
         const int mode=state->installed?2:(artwork && !state->busy?1:0);
         if (mode!=titleMode || titledIso!=displayedIso) {
             std::string title=mode==2?"ETI Yami - Installation complete":
-                              mode==1?"ETI Yami - Ready to install":"ETI Yami - Linux Setup";
-            if (!displayedIso.empty() && mode!=2) title+=" - "+displayedIso.string();
+                              mode==1?"ETI Yami - Ready to install":std::string("ETI Yami - ")+Platform+" Setup";
+            if (!displayedIso.empty() && mode!=2) title+=" - "+path_text(displayedIso);
             SDL_SetWindowTitle(window.get(),title.c_str());
             titleMode=mode; titledIso=displayedIso;
         }
@@ -332,14 +377,18 @@ int graphical(const InstallRequest& request) {
             paintText(32,244,"loads from your ISO.",Paper,18,285);
         }
         paintText(382,61,state->installed?"READY TO PLAY":"INSTALL ETI YAMI",Ink,31);
-        paintText(382,112,"Your original game, ready for Linux.",Muted,20);
+        paintText(382,112,(std::string("Your original game, ready for ")+Platform+".").c_str(),Muted,20);
         paintText(382,174,"GAME ISO",Olive,22,380);
         paintText(382,223,isoLabel.empty()?"Select your original disc image.":isoLabel,Ink,21);
         paintButton(0,"Choose ISO");
         paintText(382,301,"INSTALL FOLDER",Olive,22,380);
         paintText(382,351,rootLabel,Ink,20);
         paintButton(1,"Change...");
+#ifdef _WIN32
+        paintText(382,401,"Start Menu + Desktop: play and uninstall.",Muted,20);
+#else
         paintText(382,401,"Apps: play + uninstall. Desktop files when available.",Muted,20);
+#endif
         paintText(382,450,state->installed?"INSTALLED":state->busy?(state->previewing?"READING ORIGINAL ART":"INSTALLING GAME"):
                   artwork?"READY TO INSTALL":"SELECT YOUR ISO",Olive,20);
         wrapped(382,484,state->error.empty()?state->phase:state->error,state->error.empty()?Ink:Error);
@@ -351,7 +400,11 @@ int graphical(const InstallRequest& request) {
         }
         paintButton(2,state->busy?(state->cancelled?"Stopping...":"Cancel"):"Close");
         paintButton(3,state->installed?"Launch game":state->busy?(state->previewing?"Reading ISO...":"Installing..."):"Install game",true);
+#ifdef _WIN32
+        paintText(382,697,"Per-user install. Original installers are never run.",Muted,18);
+#else
         paintText(382,697,"No sudo. No Windows installers are run.",Muted,18);
+#endif
         lock.unlock(); // Progress updates never wait for rendering/frame pacing.
         SDL_RenderPresent(renderer.get()); SDL_Delay(16);
     }
@@ -362,26 +415,37 @@ int graphical(const InstallRequest& request) {
 int main(int argc,char** argv) {
     try {
         const auto options=arguments(argc,argv);
+#ifndef _WIN32
         if (std::getenv("WAYLAND_DISPLAY")) SDL_SetHintWithPriority(SDL_HINT_VIDEO_DRIVER,"wayland,x11",SDL_HINT_DEFAULT);
+#endif
         if (!SDL_Init(options.unattended?0:SDL_INIT_VIDEO)) throw std::runtime_error(SDL_GetError());
         std::signal(SIGINT,interrupt); std::signal(SIGTERM,interrupt);
         struct Lifetime { ~Lifetime() { SDL_Quit(); } } lifetime;
         const char* base=SDL_GetBasePath();
         if (!base) throw std::runtime_error(SDL_GetError());
-        const fs::path directory(base);
+        const fs::path directory=input_path(base);
         InstallRequest request; request.paths=default_install_paths();
         if (!options.destination.empty()) request.paths.root=options.destination;
         request.iso=options.iso;
         request.engine=options.engine.empty()?(fs::is_directory(directory/"../engine")?directory/"../engine":directory):options.engine;
+#ifdef _WIN32
+        request.archiver=options.archiver.empty()?directory/"7zz.exe":options.archiver;
+        request.remover=options.remover.empty()?directory/"yami-remove.exe":options.remover;
+#else
         request.archiver=options.archiver.empty()?directory/"7zz":options.archiver;
         request.remover=options.remover.empty()?directory/"yami-remove":options.remover;
+#endif
         if (options.unattended) {
             std::string previous;
             const auto result=install(request,[&](std::string_view phase,std::uint64_t,std::uint64_t) {
                 if (previous!=phase) { previous=phase; std::cout << phase << std::endl; }
                 return !interrupted;
             });
+#ifdef _WIN32
+            std::cout << "Installed: " << path_text(result.paths.root) << '\n'; return 0;
+#else
             std::cout << "Installed: " << result.paths.root << '\n'; return 0;
+#endif
         }
         return graphical(request);
     } catch (const std::exception& error) { std::cerr << "ETI Yami setup: " << error.what() << '\n'; return 1; }

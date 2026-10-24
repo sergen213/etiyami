@@ -91,6 +91,13 @@ bool has_animation_directory(const std::filesystem::path& path) {
     for (const auto& component : path) if (component == "animations") return true;
     return false;
 }
+std::string animation_key(const std::filesystem::path& path) {
+#ifdef _WIN32
+    return lower_path(path.generic_string());
+#else
+    return path.generic_string();
+#endif
+}
 struct AnimationUse {
     std::filesystem::path mesh, animation;
     std::vector<std::string> bones;
@@ -135,7 +142,7 @@ int main(int argc, char** argv) {
         std::size_t valid_models = 0, valid_meshes = 0, valid_animations = 0, valid_materials = 0;
         std::set<std::string> model_materials;
         std::vector<AnimationUse> uses;
-        std::map<std::filesystem::path, yami::Animation> animation_data;
+        std::map<std::string, yami::Animation> animation_data;
         auto report_error = [&](const std::exception& e) { ++failures; std::cerr << "ERROR " << e.what() << '\n'; };
         for (const auto& path : models) {
             try {
@@ -159,7 +166,7 @@ int main(int argc, char** argv) {
             try {
                 auto animation = yami::read_animation(path);
                 ++valid_animations; pose_count += animation.frames.size();
-                animation_data.emplace(path, std::move(animation));
+                animation_data.emplace(animation_key(path), std::move(animation));
             } catch (const std::exception& e) { report_error(e); }
         }
         for (const auto& path : meshes) {
@@ -195,7 +202,7 @@ int main(int argc, char** argv) {
                     uses.push_back(std::move(use));
                 }
                 if (!mesh.bones.empty() && !mesh.animation_names.empty()) {
-                    const auto it = animation_data.find(yami::animation_path(path, mesh.animation_names.front()));
+                    const auto it = animation_data.find(animation_key(yami::animation_path(path, mesh.animation_names.front())));
                     check(it != animation_data.end(), path.string() + ": animation failed validation");
                     const auto& animation = it->second;
                     yami::SkinningState state;
@@ -210,7 +217,7 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) { report_error(e); }
         }
         for (const auto& use : uses) {
-            const auto it = animation_data.find(use.animation);
+            const auto it = animation_data.find(animation_key(use.animation));
             if (it == animation_data.end()) {
                 ++failures; std::cerr << "ERROR animation reference not validated: " << use.animation << '\n';
                 continue;

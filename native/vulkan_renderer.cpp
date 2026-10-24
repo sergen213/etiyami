@@ -519,7 +519,12 @@ struct VulkanRenderer::Impl {
                 if(period>0&&period<250)interval_ms=interval_ms>0?interval_ms*.9+period*.1:period;
                 if(job.generated){
                     present_image(0,generated_outputs[job.slot],job);
-                    std::this_thread::sleep_until(ready+std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(interval_ms*.5)));
+                    const auto target=ready+std::chrono::duration_cast<clock::duration>(std::chrono::duration<double,std::milli>(interval_ms*.5));
+                    for(;;){
+                        const auto remaining=target-clock::now();
+                        if(remaining<=clock::duration::zero())break;
+                        SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count()));
+                    }
                 }
                 present_image(1,outputs[job.slot],job);
             }catch(...){

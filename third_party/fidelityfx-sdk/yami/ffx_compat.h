@@ -1,8 +1,18 @@
 // Force-included into every yami_fsr3 source. Keeps upstream FidelityFX files byte-identical.
 #pragma once
 
-#if !defined(_MSC_VER)
-// MSVC CRT functions used by the upstream SDK, with MSVC's success/failure contract.
+#include <bit>
+#include <cmath>
+#include <cstdarg>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cwchar>
+#include <new>
+
+#if !defined(_WIN32)
+// MSVC CRT functions used by the upstream SDK, supplied only for non-Windows builds.
 #include <cerrno>
 #include <cmath>
 #include <cstdarg>

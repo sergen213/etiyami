@@ -1,8 +1,8 @@
-# ETI Yami Native — Linux
+# ETI Yami Native — Linux and Windows
 
-A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. The **v1.2.2 release** restores automatic updates from installed v1.2.0 and includes AMD FSR 3.1.4 upscaling, optional frame generation, enhanced character-pose interpolation and Vulkan rendering corrections while retaining the original-style settings launcher, OpenGL/GLES character shadows, optional hardware ray tracing, widescreen support, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
+A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. **v1.3.0 adds native 64-bit Windows**, including the same settings launcher, OpenGL/GLES rendering, Vulkan/optional ray tracing, AMD FSR 3.1.4 upscaling and optional frame generation, enhanced character-pose interpolation and shadows, widescreen support, checkpoints, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
 
-**The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows/macOS releases are deferred.
+**The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows is available for x86_64. macOS releases are deferred.
 
 Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**, available in [the public v1.0.3 release](https://github.com/sergen213/etiyami/releases/tag/v1.0.3); the 1.0.2 installer does not provide them.
 
@@ -14,7 +14,35 @@ Installer **1.0.4** fixes the Linux portal-picker freeze affecting **Choose ISO*
 
 **v1.2.2 changes** keep update ZIPs flat for the v1.2.0 updater and its ownership inventory, embed the pinned FidelityFX MIT notice in `yami-native`, and retain a readable copy in installers. The release includes v1.2.1's AMD FSR 3.1.4 upscaling, optional frame generation, interpolated enhanced character poses, and Vulkan lighting, fog, moving-shadow and history corrections. FSR sharpening is available through the shared sharpening control; OpenGL/GLES and classic-graphics paths are retained. Source and public-package verification are recorded separately below, with motion image-quality, frame-pacing, alpha-sprite and physical-ARM64 limitations preserved.
 
-[Install](#install-on-linux-recommended-appimage) · [Uninstall](#uninstall-an-installer-created-game) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
+[Windows install](#install-on-windows) · [Linux install](#install-on-linux-recommended-appimage) · [Uninstall](#uninstall-an-installer-created-game) · [Manual ZIP](#advanced-manual-zip-installation) · [Controls](#game-controls) · [Saves](#saves-and-settings) · [Updates](#automatic-updates) · [Source build](#build-from-source) · [Troubleshooting](#troubleshooting) · [Checks](#checks-and-technical-details)
+
+## Install on Windows
+
+Download **[yami-setup-windows-x86_64.exe](https://github.com/sergen213/etiyami/releases/latest/download/yami-setup-windows-x86_64.exe)** from the latest release. This single-file offline installer supports 64-bit Windows 10/11. Packages are not Authenticode-signed, so SmartScreen may report **Unknown publisher**; verify the download's GitHub SHA256 digest before running it.
+
+1. Run the installer as your normal user, without elevation. Click **Choose ISO** and select your legally owned original Turkish Yami ISO. The installer reads MSI/CAB data directly and never runs the disc's setup, DirectX, or codec installers.
+2. Wait for the original artwork preview. The default installation is `%LOCALAPPDATA%\Programs\etiyami`; **Change...** selects another per-user parent folder. Keep the installation writable so automatic updates work.
+3. Click **Install game**, then **Launch game**. The installer creates **ETI Yami** and **Uninstall ETI Yami** in Start Menu → **ETI Yami**, plus optional Desktop shortcuts. It bundles application DLLs and the offline ISO tool, not original game assets or saves.
+
+Installation needs about 640 MiB free temporary space for artwork preview and 1.5 GiB plus the engine on the destination volume. The ISO is not needed afterward. Re-running repair against an installer-owned installation preserves its engine, assets, settings, saves, and unknown files while repairing shortcuts and removal support. Unrelated folders and shortcuts are not overwritten.
+
+To uninstall, close the game/launcher/updater and open **Uninstall ETI Yami**. The console shows the exact installation path and asks for confirmation. Only inventory-owned game/engine files and shortcuts are removed. Saves, settings, custom/unrecorded files, and the installation root remain. The original ISO and downloaded installer are not required.
+
+For a manual installation, download **[yami-windows-x86_64.zip](https://github.com/sergen213/etiyami/releases/latest/download/yami-windows-x86_64.zip)**, extract the entire ZIP into a writable folder, and supply the complete original `game/` directory beside the executables:
+
+```text
+etiyami/
+├── yami-launcher.exe
+├── yami-native.exe
+├── yami-updater.exe
+├── *.dll                       # Keep every supplied runtime DLL
+└── game/
+    └── data/
+        ├── menu/menulist.xml
+        └── ...                   # All original data
+```
+
+Start `yami-launcher.exe`, or pass `--asset-root "C:\\path\\to\\original\\game"` when assets live elsewhere. The ZIP does not create shortcuts or uninstall ownership records.
 
 ## Install on Linux (recommended: AppImage)
 
@@ -171,7 +199,7 @@ Mouse capture is released when the game loses focus.
 
 ## Saves and settings
 
-Original assets are read-only. Native checkpoints and `game.ini` are stored separately, using SDL's per-user preference directory. On Linux this is normally `${XDG_DATA_HOME:-$HOME/.local/share}/ETI/YamiNative/`.
+Original assets are read-only. Native checkpoints and `game.ini` are stored separately, using SDL's per-user preference directory. On Linux this is normally `${XDG_DATA_HOME:-$HOME/.local/share}/ETI/YamiNative/`; on Windows it is `%APPDATA%\\ETI\\YamiNative\\`.
 
 To choose a different location:
 
@@ -183,7 +211,7 @@ Keep this directory **outside the original asset tree**. The launcher and game s
 
 ## Automatic updates
 
-Start **`yami-launcher`** to check for new releases in the background. A newer matching Linux package is downloaded over HTTPS, checked against GitHub's SHA256 digest, installed by the trusted local update helper, and the launcher restarts automatically. Updates contain engine/launcher files and application libraries, **not original assets or saves**.
+Start **`yami-launcher`** (`yami-launcher.exe` on Windows) to check for new releases in the background. A newer package matching your OS/architecture is downloaded over HTTPS, checked against GitHub's SHA256 digest, installed by the trusted local update helper, and the launcher restarts automatically. Updates contain engine/launcher files and application libraries, **not original assets or saves**.
 
 - **No GitHub account, authorization code, or token is required** for public releases.
 - Keep all three executables and their supplied libraries together in a writable installation directory.
@@ -221,6 +249,26 @@ cmake --build build-gl --parallel
 ```
 
 Vulkan is loaded dynamically through SDL only when that renderer is created; OpenGL startup does not require a Vulkan loader. The loader and graphics drivers remain distribution-owned runtime dependencies, not bundled application libraries.
+
+### Build on Windows (MSYS2 UCRT64)
+
+Use one MSYS2 **UCRT64** environment for the compiler and every dependency; do not mix MSYS, MinGW, and UCRT libraries:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-toolchain \
+  mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-python \
+  mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-libepoxy \
+  mingw-w64-ucrt-x86_64-libxml2 mingw-w64-ucrt-x86_64-ffmpeg \
+  mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-libarchive \
+  mingw-w64-ucrt-x86_64-json-c mingw-w64-ucrt-x86_64-vulkan-headers \
+  mingw-w64-ucrt-x86_64-glslang 7zip
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYAMI_ENABLE_VULKAN=ON
+cmake --build build --parallel
+./build/yami-launcher.exe --asset-root game
+```
+
+The build includes `yami-setup.exe`, `yami-remove.exe`, Vulkan/FSR support, and regression checks. `ctest --test-dir build --output-on-failure -R '^(update|update_install|windows_update_install|windows_uninstall)$'` runs the asset-free Windows update/uninstall checks. `windows_setup` is registered when `YAMI_TEST_ISO` and `YAMI_TEST_ARCHIVER` identify your original ISO and trusted `7zz.exe`; it performs a real isolated installation/repair/uninstall. GUI/gameplay checks need original assets and an actual desktop. Release packaging collects the matching UCRT64 DLL closure; use `tools/package_release.py` and `tools/package_windows_setup.py` as shown in `.github/workflows/release.yml`.
 
 ### Build the Linux ISO installer
 
@@ -302,10 +350,10 @@ Numeric options reject nonfinite and out-of-range inputs. Ray tracing, FSR, indi
 ## Troubleshooting
 
 - **Original assets not found:** check that `game/data/menu/menulist.xml` exists and that the complete original data was copied. Use `--asset-root "/path/to/game"` if it is stored elsewhere.
-- **Permission denied when launching:** if your extractor lost executable permissions, run `chmod +x yami-launcher yami-native yami-updater` in the extracted directory. Do not run the game as root.
-- **Update cannot install:** move the whole installation to a per-user writable directory, such as `~/Games/etiyami`; keep its libraries and update helper together.
-- **EGL/OpenGL startup error:** ensure your host graphics drivers and C++ runtime are current. The withdrawn 1.0.0 package could conflict with newer Mesa; repair that installation by extracting the latest fixed package into the same directory. Do not add its old bundled C++ libraries to `LD_LIBRARY_PATH`.
-- **Vulkan startup error:** update your distribution's Vulkan driver/loader, or select **OpenGL** in the returned launcher / pass `--renderer opengl`. Public v1.1.0 supports Vulkan; Vulkan 1.3 support and required device features are necessary, while RT support is optional. A GL-only source build intentionally cannot start Vulkan.
+- **Permission denied when launching on Linux:** if your extractor lost executable permissions, run `chmod +x yami-launcher yami-native yami-updater` in the extracted directory. Do not run the game as root.
+- **Windows blocks the installer:** packages are unsigned, so SmartScreen may require an explicit **More info → Run anyway** decision after you verify the source and SHA256 digest. No administrator installation is required.
+- **Update cannot install:** move the whole installation to a per-user writable directory, such as `~/Games/etiyami` on Linux or `%LOCALAPPDATA%\\Programs\\etiyami` on Windows; keep its libraries and update helper together. Do not install under `C:\\Program Files` for normal play.
+- **Graphics startup error:** update your graphics drivers. On Linux, ensure the host C++ runtime is current; the withdrawn 1.0.0 package could conflict with newer Mesa, so repair that installation with the latest fixed package and do not restore its old C++ libraries to `LD_LIBRARY_PATH`. For Vulkan errors, select **OpenGL** in the returned launcher or pass `--renderer opengl`; Vulkan 1.3 and required device features are necessary, while RT is optional.
 - **Wayland-specific issue:** Linux prefers Wayland when available. To explicitly try X11 on a desktop that provides it, run `SDL_VIDEO_DRIVER=x11 ./yami-launcher`.
 - **Poor performance:** reduce MSAA, filtering, or effects in Ayarlar, or use the lower-cost CLI example above.
 
