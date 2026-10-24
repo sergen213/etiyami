@@ -1,5 +1,6 @@
 #include "setup.hpp"
 #include "install_ownership.hpp"
+#include "setup_windows.hpp"
 
 #include <SDL3/SDL.h>
 #include <shobjidl.h>
@@ -29,8 +30,13 @@ std::string get(const fs::path& path) {
     return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 void rejected(const InstallRequest& request, const Progress& progress = {}) {
-    try { install(request, progress); }
-    catch (const std::exception&) { return; }
+    std::string previous;
+    const auto traced = [&](std::string_view phase, std::uint64_t done, std::uint64_t total) {
+        if (previous != phase) { std::cerr << "install phase: " << phase << '\n'; previous = phase; }
+        return progress ? progress(phase, done, total) : true;
+    };
+    try { install(request, traced); }
+    catch (const std::exception& error) { std::cerr << "install rejected: " << error.what() << '\n'; return; }
     throw std::runtime_error("Unsafe or cancelled installation was accepted");
 }
 std::wstring link_target(const fs::path& path, std::wstring* arguments = nullptr) {
@@ -111,7 +117,8 @@ int main() {
                 "Play shortcut target is wrong");
         require(fs::path(link_target(result.paths.applications/yami::ownership::uninstallShortcut, &linkArguments)) ==
                     root/yami::ownership::helperDirectory/yami::ownership::helperName &&
-                linkArguments == L"--root \"" + root.native() + L"\"", "Uninstall shortcut target/arguments are wrong");
+                linkArguments == L"--root \"" + yami::windows_install::utf8_path(yami::windows_install::text(root)).native() + L"\"",
+                "Uninstall shortcut target/arguments are wrong");
         put(root/"game.ini", "preserved settings");
         put(root/"checkpoints/slot1", "preserved save");
         put(root/"game/user-created.txt", "preserved unknown file");
