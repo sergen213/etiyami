@@ -262,7 +262,7 @@ pacman -S --needed mingw-w64-ucrt-x86_64-toolchain \
   mingw-w64-ucrt-x86_64-libxml2 mingw-w64-ucrt-x86_64-ffmpeg \
   mingw-w64-ucrt-x86_64-curl-winssl mingw-w64-ucrt-x86_64-libarchive \
   mingw-w64-ucrt-x86_64-json-c mingw-w64-ucrt-x86_64-vulkan-headers \
-  mingw-w64-ucrt-x86_64-glslang 7zip
+  mingw-w64-ucrt-x86_64-glslang mingw-w64-ucrt-x86_64-7zip
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DYAMI_ENABLE_VULKAN=ON
 cmake --build build --parallel
 ./build/yami-launcher.exe --asset-root game
