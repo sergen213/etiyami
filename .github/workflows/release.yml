@@ -264,9 +264,9 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes '## v1.2.1 FSR and rendering improvements
+            --notes '## v1.2.2 automatic-update compatibility hotfix
 
-          - This patch includes the pinned FidelityFX MIT notice and digest validation in both update ZIPs as well as the installers, correcting the v1.2.0 update-ZIP packaging omission without replacing that release's artifacts.
+          - Installed v1.2.0 launchers can update again: update ZIPs retain the flat runtime-only layout accepted by the old trusted helper and its ownership inventory. The pinned FidelityFX MIT notice is embedded in yami-native, and installers also include the readable licenses/fidelityfx/LICENSE.txt copy. This corrects v1.2.1's incompatible nested update-ZIP license entry without replacing either earlier release's artifacts.
           - AMD FidelityFX SDK 1.1.4 / FSR 3.1.4 replaces the custom Vulkan artwork TAA, with Native AA, Quality, Balanced and Performance modes, HDR input, RCAS sharpening and a native-resolution HUD. FSR requires compatible Vulkan storage-image and compute-subgroup features; unsupported devices retain the non-FSR path.
           - Optional FSR frame generation adds optical-flow interpolation with shading-change and moving-Sun-shadow handling. It is off by default and requires FSR plus a supporting GPU. Alpha-blended sprites can smear in generated frames; motion image quality and frame pacing remain subject to gameplay judgement, and no performance guarantee is claimed.
           - Enhanced graphics interpolate character poses between the original 30 fps keyframes. Vulkan lighting, fog, ray reconstruction, moving shadows and history handling receive additional corrections; OpenGL/OpenGL ES and classic-graphics behavior are retained.

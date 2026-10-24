@@ -92,8 +92,6 @@ def required_paths(platform: str) -> tuple[str, ...]:
 
 
 def allowed_path(name: str, platform: str) -> bool:
-    if platform == "linux" and name == FIDELITYFX_LICENSE_PATH:
-        return True
     parts = PurePosixPath(name).parts
     if not parts or name != "/".join(parts) or name.startswith("/"):
         return False
@@ -411,9 +409,8 @@ def verify_archive(archive: Path, platform: str, arch: str) -> None:
                     or member.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
                     or not allowed_path(member.filename, platform)):
                 fail(f"Unsafe archive member: {member.filename}")
-            if (platform == "linux" and member.filename != FIDELITYFX_LICENSE_PATH
-                    and ("/" in member.filename or LINUX_SYSTEM.fullmatch(member.filename))):
-                fail(f"Linux archive must contain only flat application runtime and the FidelityFX notice: {member.filename}")
+            if platform == "linux" and ("/" in member.filename or LINUX_SYSTEM.fullmatch(member.filename)):
+                fail(f"Linux archive must contain only flat application runtime: {member.filename}")
             key = member.filename.casefold()
             if key in names:
                 fail(f"Case-folded path collision: {member.filename}")
@@ -424,10 +421,10 @@ def verify_archive(archive: Path, platform: str, arch: str) -> None:
         if not set(required_paths(platform)).issubset({member.filename for member in files}):
             fail("Archive omits a required engine binary")
         if platform == "linux":
-            if FIDELITYFX_LICENSE_PATH not in {member.filename for member in files}:
-                fail("Archive omits the FidelityFX license")
-            if hashlib.sha256(zip_file.read(FIDELITYFX_LICENSE_PATH)).hexdigest() != FIDELITYFX_LICENSE_SHA256:
-                fail("Unverified FidelityFX license")
+            notice = FIDELITYFX_LICENSE.read_bytes()
+            if (hashlib.sha256(notice).hexdigest() != FIDELITYFX_LICENSE_SHA256
+                    or notice not in zip_file.read("yami-native")):
+                fail("Archive native engine lacks the pinned embedded FidelityFX license")
         if platform != "windows":
             by_name = {member.filename: member for member in files}
             if any(not ((by_name[name].external_attr >> 16) & 0o111) for name in required_paths(platform)):
@@ -498,7 +495,10 @@ def main() -> None:
             architecture(executable, args.platform, args.arch)
         if args.platform == "linux":
             package_linux(payload, executables, args.linux_glibc_max)
-            payload.copy(FIDELITYFX_LICENSE, FIDELITYFX_LICENSE_PATH)
+            # Pre-1.2.1 updaters reject non-runtime paths. Keep updates flat and
+            # carry the MIT notice in the native ELF; installers add a readable copy.
+            command("objcopy", "--add-section", f".fidelityfx-license={FIDELITYFX_LICENSE}",
+                    payload.root / "yami-native")
         elif args.platform == "windows":
             if not args.search_dir:
                 parser.error("Windows packaging requires --search-dir pointing at the matching MSYS2 bin directory")

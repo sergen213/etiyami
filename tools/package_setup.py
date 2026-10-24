@@ -47,8 +47,8 @@ REMOVER_LOADERS = {"x86_64": "ld-linux-x86-64.so.2", "arm64": "ld-linux-aarch64.
 REMOVER_SYSTEM = re.compile(
     r"(?:lib(?:c|m|dl|pthread|rt|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z")
 UNINSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "native" / "uninstall.sh"
-# Statically linked into the engine executables (Vulkan FSR 3.1.4 upscaler); the pinned MIT terms
-# travel with the update ZIP and are stored once at the installer's top level.
+# FSR is statically linked into yami-native. Its pinned MIT terms are embedded in
+# that ELF for updates and stored once as a readable file at the installer's top level.
 
 
 def provenance(arch: str) -> bytes:
@@ -166,8 +166,6 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
         with zipfile.ZipFile(engine_archive) as engine:
             expected_engine = {}
             for member in engine.infolist():
-                if member.filename == FIDELITYFX_LICENSE_PATH:
-                    continue
                 with engine.open(member) as source:
                     expected_engine[member.filename] = hash_stream(source)
     with archive.open("rb") as stream:
@@ -295,8 +293,6 @@ def package(args) -> None:
         (root / "engine").mkdir()
         with zipfile.ZipFile(args.engine_archive) as engine:
             for member in engine.infolist():
-                if member.filename == FIDELITYFX_LICENSE_PATH:
-                    continue
                 target = root / "engine" / member.filename
                 with engine.open(member) as source, target.open("xb") as destination:
                     shutil.copyfileobj(source, destination)
