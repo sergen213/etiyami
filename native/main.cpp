@@ -52,7 +52,7 @@ struct SdlLifetime {
     ~SdlLifetime() { SDL_Quit(); }
 };
 enum GraphicsOption { Msaa, Filtering, Occlusion, Reflections, Bloom, Sharpen,
-                      EnhancedLighting, Fullscreen, Backend, RayTracing, TemporalAA,
+                      EnhancedLighting, Fullscreen, Backend, RayTracing, TemporalAA, Parallax,
                       Shadows, IndirectLighting, Exposure, RenderScale, Roughness, FrameGeneration, GraphicsOptionCount };
 struct Options {
     DisplayOptions display;
@@ -103,12 +103,12 @@ Options options(int argc, char** argv) {
             result.display.backend=backend=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
             result.graphicsOverrides[Backend]=true;
         }
-        else if (name == "--ray-tracing" || name == "--taa" || name == "--frame-generation") {
+        else if (name == "--ray-tracing" || name == "--taa" || name == "--frame-generation" || name == "--parallax") {
             const auto enabled=value();
             require(enabled=="on" || enabled=="off", "Graphics boolean must be on or off");
-            const auto option=name=="--taa"?TemporalAA:name=="--ray-tracing"?RayTracing:FrameGeneration;
+            const auto option=name=="--taa"?TemporalAA:name=="--ray-tracing"?RayTracing:name=="--parallax"?Parallax:FrameGeneration;
             (option==TemporalAA?result.display.temporal_aa:option==RayTracing?result.display.ray_tracing:
-                                result.display.frame_generation)=enabled=="on";
+             option==Parallax?result.display.parallax:result.display.frame_generation)=enabled=="on";
             result.graphicsOverrides[option]=true;
         }
         else if (name == "--shadows") { result.display.shadows=number<float>(value(),name); result.graphicsOverrides[Shadows]=true; }
@@ -161,6 +161,7 @@ GraphicsSettings merge_graphics(const Options& options, GraphicsSettings saved) 
     if (flags[Backend]) saved.backend=requested.backend;
     if (flags[RayTracing]) saved.ray_tracing=requested.ray_tracing;
     if (flags[TemporalAA]) saved.temporal_aa=requested.temporal_aa;
+    if (flags[Parallax]) saved.parallax=requested.parallax;
     if (flags[Shadows]) saved.shadows=requested.shadows;
     if (flags[IndirectLighting]) saved.indirect_lighting=requested.indirect_lighting;
     if (flags[Exposure]) saved.exposure=requested.exposure;
@@ -674,7 +675,7 @@ int main(int argc, char** argv) {
                          "  --level 1..4 --smoke (bypasses launcher) --capture FILE.ppm --classic-graphics\n"
                          "  --ao 0..1 --reflections 0..1 --bloom 0..1\n"
                          "  --sharpen 0..1 (Vulkan: FSR 3.1 sharpening)\n"
-                         "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off (Vulkan: FSR 3.1)\n"
+                         "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off --parallax on|off\n"
                          "  --shadows 0..1 --gi 0..1 --exposure .1..4\n"
                          "  --render-scale .5..1 (FSR presets 1, .667, .588, .5) --roughness .05..1 (Vulkan only)\n"
                          "  --frame-generation on|off (Vulkan: FSR 3.1.4 frame generation; needs --taa on)\n"

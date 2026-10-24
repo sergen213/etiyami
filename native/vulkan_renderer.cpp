@@ -133,7 +133,7 @@ struct VulkanRenderer::Impl {
         float offset_factor=0,offset_units=0;
     };
     struct Draw {
-        std::shared_ptr<Geometry> mesh;std::shared_ptr<Texture> texture;
+        std::shared_ptr<Geometry> mesh;std::shared_ptr<Texture> texture,height;
         RasterState raster;DrawState state;Mat4 view,projection;Viewport viewport;
         unsigned alpha_function=0;float alpha_reference=0;
         bool enhanced=false,world=false;
@@ -568,18 +568,45 @@ struct VulkanRenderer::Impl {
     void destroy_image(VulkanImage& i)noexcept{if(i.view)vk.vkDestroyImageView(device,i.view,nullptr);if(i.image)vk.vkDestroyImage(device,i.image,nullptr);if(i.memory)vk.vkFreeMemory(device,i.memory,nullptr);i={};}
     void transition(VkCommandBuffer cmd,VulkanImage& image,VkImageLayout layout,unsigned levels=1) {
         if(image.layout==layout)return;
-        VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};barrier.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;barrier.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;barrier.srcAccessMask=image.layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT;barrier.oldLayout=image.layout;barrier.newLayout=layout;barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=image.image;barrier.subresourceRange={image.format==VK_FORMAT_D32_SFLOAT?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,levels,0,1};VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dep.imageMemoryBarrierCount=1;dep.pImageMemoryBarriers=&barrier;vk.vkCmdPipelineBarrier2(cmd,&dep);image.layout=layout;
+        const auto source=vulkan_barrier_mask(image.layout),destination=vulkan_barrier_mask(layout);
+        VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        barrier.srcStageMask=source.stages;barrier.dstStageMask=destination.stages;
+        barrier.srcAccessMask=source.access;barrier.dstAccessMask=destination.access;
+        barrier.oldLayout=image.layout;barrier.newLayout=layout;
+        barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        barrier.image=image.image;
+        barrier.subresourceRange={image.format==VK_FORMAT_D32_SFLOAT?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT,0,levels,0,1};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};dep.imageMemoryBarrierCount=1;dep.pImageMemoryBarriers=&barrier;
+        vk.vkCmdPipelineBarrier2(cmd,&dep);image.layout=layout;
     }
     void begin(VkCommandBuffer cmd){checked(vk.vkResetCommandBuffer(cmd,0),"Reset command buffer");VkCommandBufferBeginInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};ci.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;checked(vk.vkBeginCommandBuffer(cmd,&ci),"Begin commands");}
     void submit_upload(){checked(vk.vkEndCommandBuffer(upload_command),"End upload");VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};cb.commandBuffer=upload_command;VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};si.commandBufferInfoCount=1;si.pCommandBufferInfos=&cb;std::scoped_lock lock(queue_mutex);checked(vk.vkQueueSubmit2(queue,1,&si,VK_NULL_HANDLE),"Submit upload");checked(vk.vkQueueWaitIdle(queue),"Wait upload");}
     template<std::size_t N> VkShaderModule shader(const std::uint32_t(&code)[N]){VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};ci.codeSize=sizeof(code);ci.pCode=code;VkShaderModule m;checked(vk.vkCreateShaderModule(device,&ci,nullptr,&m),"Create shader");return m;}
     VkSampler sampler(bool mipmaps,bool clamp=false){VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};ci.magFilter=ci.minFilter=VK_FILTER_LINEAR;ci.mipmapMode=VK_SAMPLER_MIPMAP_MODE_LINEAR;ci.addressModeU=ci.addressModeV=ci.addressModeW=clamp?VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE:VK_SAMPLER_ADDRESS_MODE_REPEAT;ci.anisotropyEnable=mipmaps&&anisotropic;ci.maxAnisotropy=settings.anisotropy;ci.maxLod=mipmaps?VK_LOD_CLAMP_NONE:0;VkSampler s;checked(vk.vkCreateSampler(device,&ci,nullptr,&s),"Create sampler");return s;}
     VkDescriptorSet descriptor(VkDescriptorSetLayout layout){VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};ai.descriptorPool=descriptor_pool;ai.descriptorSetCount=1;ai.pSetLayouts=&layout;VkDescriptorSet set;checked(vk.vkAllocateDescriptorSets(device,&ai,&set),"Allocate descriptor");return set;}
-    void write_texture_descriptor(Texture& t){VkDescriptorImageInfo ii{t.sampler,t.image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};VkDescriptorBufferInfo bi{uniforms->gpu.buffer,0,sizeof(Uniform)};VkWriteDescriptorSet writes[2]{};for(auto& w:writes){w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=t.descriptor;w.descriptorCount=1;}writes[0].dstBinding=0;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[0].pImageInfo=&ii;writes[1].dstBinding=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;writes[1].pBufferInfo=&bi;vk.vkUpdateDescriptorSets(device,2,writes,0,nullptr);}
+    void write_texture_descriptor(Texture& t){
+        VkDescriptorImageInfo ii{t.sampler,t.image.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkDescriptorBufferInfo bi{uniforms->gpu.buffer,0,sizeof(Uniform)};VkWriteDescriptorSet writes[3]{};
+        for(auto& w:writes){w.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;w.dstSet=t.descriptor;w.descriptorCount=1;}
+        writes[0].dstBinding=writes[2].dstBinding=0;writes[0].descriptorType=writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo=writes[2].pImageInfo=&ii;writes[2].dstBinding=2;
+        writes[1].dstBinding=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;writes[1].pBufferInfo=&bi;
+        vk.vkUpdateDescriptorSets(device,3,writes,0,nullptr);
+    }
     void create_layouts(){
-        VkDescriptorSetLayoutBinding bindings[2]{};bindings[0]={0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};bindings[1]={1,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=2;ci.pBindings=bindings;checked(vk.vkCreateDescriptorSetLayout(device,&ci,nullptr,&draw_set_layout),"Create draw layout");ci.bindingCount=1;checked(vk.vkCreateDescriptorSetLayout(device,&ci,nullptr,&copy_set_layout),"Create composition layout");
+        VkDescriptorSetLayoutBinding bindings[3]{};
+        bindings[0]={0,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
+        bindings[1]={1,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
+        bindings[2]={2,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};ci.bindingCount=3;ci.pBindings=bindings;
+        checked(vk.vkCreateDescriptorSetLayout(device,&ci,nullptr,&draw_set_layout),"Create draw layout");
+        ci.bindingCount=1;checked(vk.vkCreateDescriptorSetLayout(device,&ci,nullptr,&copy_set_layout),"Create composition layout");
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,8192},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,8192}};VkDescriptorPoolCreateInfo pc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pc.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;pc.maxSets=8192;pc.poolSizeCount=2;pc.pPoolSizes=sizes;checked(vk.vkCreateDescriptorPool(device,&pc,nullptr,&descriptor_pool),"Create descriptor pool");
-        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pi.setLayoutCount=1;pi.pSetLayouts=&draw_set_layout;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&draw_layout),"Create raster pipeline layout");VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,8};pi.pSetLayouts=&copy_set_layout;pi.pushConstantRangeCount=1;pi.pPushConstantRanges=&push;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&copy_layout),"Create final pipeline layout");for(auto& set:copy_sets)set=descriptor(copy_set_layout);
+        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};VkDescriptorSetLayout draw_sets[]{draw_set_layout,draw_set_layout};
+        pi.setLayoutCount=2;pi.pSetLayouts=draw_sets;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&draw_layout),"Create raster pipeline layout");
+        VkPushConstantRange push{VK_SHADER_STAGE_FRAGMENT_BIT,0,8};pi.setLayoutCount=1;pi.pSetLayouts=&copy_set_layout;
+        pi.pushConstantRangeCount=1;pi.pPushConstantRanges=&push;checked(vk.vkCreatePipelineLayout(device,&pi,nullptr,&copy_layout),"Create final pipeline layout");
+        for(auto& set:copy_sets)set=descriptor(copy_set_layout);
     }
     VkPipeline create_pipeline(VkFormat color,const RasterState* r,unsigned samples,bool world){
         VkPipelineShaderStageCreateInfo stages[2]{};for(auto& s:stages){s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;s.pName="main";}stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=r?raster_vert:final_vert;stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=r?(world?raster_frag:raster_ui_frag):final_frag;
@@ -712,7 +739,18 @@ struct VulkanRenderer::Impl {
         }
         std::memcpy(g->vertices->mapped,vertices.data(),vertices.size_bytes());++g->revision;
     }
-    void record(unsigned id,unsigned texture,const Material& m,const MaterialPass& p,const DrawState& state){if(finished)throw std::runtime_error("Cannot draw after frame capture/finalization; clear first");if(!id||id>meshes.size()||!meshes[id-1]||texture>textures.size())throw std::runtime_error("Unknown mesh or texture");if(p.alpha_test&&(p.alpha_function<0x200||p.alpha_function>0x207))throw std::runtime_error("Unsupported exported alpha function");Draw d;d.mesh=meshes[id-1];d.texture=texture?textures[texture-1]:white;d.state=state;d.view=view;d.projection=projection;d.viewport=viewport;d.world=!ui&&!world_closed;d.enhanced=settings.enhanced&&d.world;d.alpha_function=p.alpha_test?p.alpha_function:0;d.alpha_reference=std::clamp(p.alpha_reference,0.f,1.f);d.raster={m.cull,m.polygon_offset,p.blend,p.depth_test,p.depth_write,m.cull_face,p.blend_source,p.blend_destination,p.depth_function,0,m.polygon_offset_factor,m.polygon_offset_units};for(unsigned i=0;i<4;++i)if(p.color_write[i])d.raster.mask|=1u<<i;compare(p.depth_function);if(p.blend){blend(p.blend_source);blend(p.blend_destination);}if(state.lighting){normal_matrix4(multiply(view,state.model));normal_matrix4(state.model);}world_seen|=d.world;draws.push_back(std::move(d));}
+    void record(unsigned id,unsigned texture,const Material& m,const MaterialPass& p,const DrawState& state){
+        if(finished)throw std::runtime_error("Cannot draw after frame capture/finalization; clear first");
+        if(!id||id>meshes.size()||!meshes[id-1]||texture>textures.size()||state.relief>textures.size())throw std::runtime_error("Unknown mesh or texture");
+        if(p.alpha_test&&(p.alpha_function<0x200||p.alpha_function>0x207))throw std::runtime_error("Unsupported exported alpha function");
+        Draw d;d.mesh=meshes[id-1];d.texture=texture?textures[texture-1]:white;d.height=state.relief?textures[state.relief-1]:white;
+        d.state=state;d.view=view;d.projection=projection;d.viewport=viewport;
+        d.world=!ui&&!world_closed;d.enhanced=settings.enhanced&&d.world;d.alpha_function=p.alpha_test?p.alpha_function:0;d.alpha_reference=std::clamp(p.alpha_reference,0.f,1.f);
+        d.raster={m.cull,m.polygon_offset,p.blend,p.depth_test,p.depth_write,m.cull_face,p.blend_source,p.blend_destination,p.depth_function,0,m.polygon_offset_factor,m.polygon_offset_units};
+        for(unsigned i=0;i<4;++i)if(p.color_write[i])d.raster.mask|=1u<<i;
+        compare(p.depth_function);if(p.blend){blend(p.blend_source);blend(p.blend_destination);}
+        world_seen|=d.world;draws.push_back(std::move(d));
+    }
     void prepare_correspondence() {
         next_draws.clear();
         if(next_temporal_token+draws.size()>16777216) {
@@ -762,9 +800,10 @@ struct VulkanRenderer::Impl {
             }
             u.normal_world=d.world&&d.state.ray_geometry?normal_matrix4(d.state.model,d.state.lighting):identity_matrix();
             const auto light=transform_direction(d.view,{.5f,1,.3f});u.light={light.x,light.y,light.z,0};
-            u.previous_mvp=multiply(previous_vp,d.previous_model);
-            u.previous_normal_world=d.world&&d.state.ray_geometry?normal_matrix4(d.previous_model,d.state.lighting):identity_matrix();
-            u.temporal={std::int32_t(d.temporal_token),d.correspondence?1:0,0,0};
+            const bool previous=d.enhanced&&(settings.temporal_aa||(ray&&settings.ray_tracing));
+            u.previous_mvp=previous?multiply(previous_vp,d.previous_model):identity_matrix();
+            u.previous_normal_world=previous&&d.world&&d.state.ray_geometry?normal_matrix4(d.previous_model,d.state.lighting):identity_matrix();
+            u.temporal={std::int32_t(d.temporal_token),d.correspondence?1:0,settings.parallax&&d.enhanced&&d.state.relief?1:0,previous?1:0};
             u.diffuse=d.state.diffuse_light;u.diffuse[3]=d.state.fog?-1:1;
             u.color=d.state.color;u.uv=d.state.uv_transform;
             auto up=transform_direction(d.view,{0,1,0});const float length=std::sqrt(up.x*up.x+up.y*up.y+up.z*up.z);
@@ -776,7 +815,20 @@ struct VulkanRenderer::Impl {
         }
     }
     void viewport_for(VkExtent2D extent,Viewport v){const float sx=float(extent.width)/width,sy=float(extent.height)/height;VkViewport vp{v.x*sx,(height-v.y-v.height)*sy,v.width*sx,v.height*sy,0,1};VkRect2D sc{{int(vp.x),int(vp.y)},{unsigned(vp.width),unsigned(vp.height)}};vk.vkCmdSetViewport(command,0,1,&vp);vk.vkCmdSetScissor(command,0,1,&sc);}
-    void raster_draws(std::size_t first,std::size_t last,bool world){for(std::size_t i=first;i<last;++i){const auto& d=draws[i];viewport_for(world?world_extent:VkExtent2D{unsigned(width),unsigned(height)},d.viewport);vk.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,raster_pipeline(d,world));vk.vkCmdSetDepthBias(command,d.raster.offset_units,0,d.raster.offset_factor);const std::uint32_t offset=i*uniform_stride;vk.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw_layout,0,1,&d.texture->descriptor,1,&offset);VkDeviceSize offsets[2]{};VkBuffer buffers[]={d.mesh->vertices->gpu.buffer,d.previous_vertices->gpu.buffer};vk.vkCmdBindVertexBuffers(command,0,2,buffers,offsets);vk.vkCmdBindIndexBuffer(command,d.mesh->indices->gpu.buffer,0,VK_INDEX_TYPE_UINT32);vk.vkCmdDrawIndexed(command,d.mesh->index_count,1,0,0,0);}}
+    void raster_draws(std::size_t first,std::size_t last,bool world){
+        for(std::size_t i=first;i<last;++i){
+            const auto& d=draws[i];viewport_for(world?world_extent:VkExtent2D{unsigned(width),unsigned(height)},d.viewport);
+            vk.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,raster_pipeline(d,world));
+            vk.vkCmdSetDepthBias(command,d.raster.offset_units,0,d.raster.offset_factor);
+            const std::uint32_t offset=i*uniform_stride;
+            VkDescriptorSet sets[]{d.texture->descriptor,d.height->descriptor};const std::uint32_t uniform_offsets[]{offset,offset};
+            vk.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw_layout,0,2,sets,2,uniform_offsets);
+            VkDeviceSize buffer_offsets[2]{};VkBuffer buffers[]={d.mesh->vertices->gpu.buffer,d.previous_vertices->gpu.buffer};
+            vk.vkCmdBindVertexBuffers(command,0,2,buffers,buffer_offsets);
+            vk.vkCmdBindIndexBuffer(command,d.mesh->indices->gpu.buffer,0,VK_INDEX_TYPE_UINT32);
+            vk.vkCmdDrawIndexed(command,d.mesh->index_count,1,0,0,0);
+        }
+    }
     void render_world(){
         VulkanImage& color=sample>1?world_ms_color:world_color;VulkanImage& depth=sample>1?world_ms_depth:world_depth;VulkanImage& normal=sample>1?world_ms_normal:world_normal;
         VulkanImage& motion=sample>1?world_ms_motion:world_motion;VulkanImage& previous_normal=sample>1?world_ms_previous_normal:world_previous_normal;
@@ -905,7 +957,7 @@ struct VulkanRenderer::Impl {
         if(!valid_graphics(s))throw std::runtime_error("Invalid graphics settings");
         wait();
         if(s.fullscreen!=bool(SDL_GetWindowFlags(window)&SDL_WINDOW_FULLSCREEN))sdl(SDL_SetWindowFullscreen(window,s.fullscreen));
-        const bool reset=s.samples!=settings.samples||s.render_scale!=settings.render_scale||s.temporal_aa!=settings.temporal_aa||s.enhanced!=settings.enhanced;
+        const bool reset=s.samples!=settings.samples||s.render_scale!=settings.render_scale||s.temporal_aa!=settings.temporal_aa||s.enhanced!=settings.enhanced||s.parallax!=settings.parallax;
         const bool filtering=std::min(s.anisotropy,max_aniso)!=settings.anisotropy;
         settings=s;settings.anisotropy=std::min(s.anisotropy,max_aniso);select_samples();update_generation();
         if(filtering)for(auto& t:textures)if(t->mipmaps){

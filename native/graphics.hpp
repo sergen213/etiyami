@@ -9,7 +9,7 @@ struct GraphicsSettings {
     float anisotropy = 16;
     bool enhanced = true, fullscreen = false;
     GraphicsBackend backend = GraphicsBackend::OpenGL;
-    bool ray_tracing = true, temporal_aa = true;
+    bool ray_tracing = true, temporal_aa = true, parallax = true;
     bool frame_generation = false; // Vulkan FSR 3.1.4 frame interpolation; needs temporal_aa (FSR)
     float shadows = .75f, indirect_lighting = .35f, exposure = 1.f;
     float render_scale = 1.f, roughness = .85f;

@@ -95,6 +95,7 @@ layout(location=1) in vec2 aUv;
 layout(location=2) in vec3 aNormal;
 uniform mat4 uModelView, uProjection;
 uniform mat4 uShadowModel;
+uniform float uShadowStrength;
 uniform mat3 uNormal;
 uniform vec4 uLight, uDiffuse, uColor, uUvTransform;
 uniform bool uLighting, uEnhanced;
@@ -106,7 +107,7 @@ out vec3 vShadow;
 void main() {
     vec4 eye = uModelView * vec4(aPosition,1.0);
     gl_Position = uProjection * eye;
-    vShadow = (uShadowModel*vec4(aPosition,1.0)).xyz*0.5+0.5;
+    vShadow = uShadowStrength>0.0 ? (uShadowModel*vec4(aPosition,1.0)).xyz*0.5+0.5 : vec3(0.0);
     vUv = aUv*uUvTransform.xy+uUvTransform.zw;
     vFogDepth = abs(eye.z);
     vNormal = uNormal*aNormal;
@@ -125,8 +126,8 @@ in float vFogDepth;
 in vec3 vNormal, vEye;
 uniform vec4 uLight, uDiffuse;
 uniform vec3 uWorldUp;
-uniform bool uLighting, uEnhanced;
-uniform sampler2D uTexture;
+uniform bool uLighting, uEnhanced, uParallax;
+uniform sampler2D uTexture, uRelief;
 uniform bool uTextured, uFog, uFlipVertical;
 uniform int uAlphaFunction;
 uniform float uAlphaReference;
@@ -134,6 +135,27 @@ in vec3 vShadow;
 uniform highp sampler2D uShadow;
 uniform float uShadowStrength;
 uniform vec2 uShadowFilter;
+// IKV relief: 8-24 occlusion steps, one secant refinement, flat depth/motion.
+vec2 reliefUV(vec2 uv,out vec3 gradient) {
+    gradient=vec3(0);
+    vec3 dp1=dFdx(vEye),dp2=dFdy(vEye),nf=cross(dp1,dp2),view=-vEye;
+    vec2 du1=dFdx(uv),du2=dFdy(uv);float det=du1.x*du2.y-du2.x*du1.y,dist=length(view);
+    if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return uv;
+    nf=normalize(nf);view/=dist;if(dot(nf,view)<0.0)nf=-nf;
+    vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
+    vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
+    float c=dot(view,nf),depth=smoothstep(.05,.18,c)*(1.0-smoothstep(50.,90.,dist))*
+        min(12.0*min(length(pu),length(pv))/float(textureSize(uRelief,0).x),.6);
+    if(!(depth>1e-3))return uv;
+    vec2 shift=-vec2(dot(view,gu),dot(view,gv))/c*depth;
+    int steps=int(mix(24.,8.,c));float t=0.0,h=textureGrad(uRelief,uv,du1,du2).r,lastT=0.0,lastF=h-1.0;
+    for(int i=0;i<steps&&t<1.0-h;++i){lastT=t;lastF=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(uRelief,uv+shift*t,du1,du2).r;}
+    float f=t-(1.0-h);if(f>0.0&&lastF<0.0)t=mix(lastT,t,lastF/(lastF-f));
+    vec2 surface=uv+shift*t;
+    vec2 slope=(textureGrad(uRelief,surface,du1,du2).gb-.5)*.5*vec2(textureSize(uRelief,0));
+    gradient=.7*depth*(slope.x*gu+slope.y*gv);
+    return surface;
+}
 float visibility(float diffuse) {
     if (uShadowStrength == 0.0 || any(lessThan(vShadow,vec3(0.0))) ||
         any(greaterThan(vShadow,vec3(1.0)))) return 1.0;
@@ -149,14 +171,18 @@ float visibility(float diffuse) {
 out vec4 outColor;
 void main() {
     vec4 value = vColor;
+    vec2 surface=vec2(vUv.x,uFlipVertical ? 1.0-vUv.y : vUv.y);
+    vec3 gradient=vec3(0);
+    if(uParallax)surface=reliefUV(surface,gradient);
     if (uLighting && uEnhanced) {
         vec3 normal = vNormal*inversesqrt(max(dot(vNormal,vNormal),0.00000001));
+        normal=normalize(normal-gradient);
         vec3 light = normalize(uLight.xyz-vEye*uLight.w);
         float diffuse = max(dot(normal,light),0.0);
         float hemisphere = dot(normal,uWorldUp)*0.5+0.5;
         value = vec4(clamp(vec3(0.416+0.08*hemisphere)+0.8*uDiffuse.rgb*diffuse*visibility(diffuse),0.0,1.0),1.0);
     }
-    if (uTextured) value *= texture(uTexture,vec2(vUv.x,uFlipVertical ? 1.0-vUv.y : vUv.y));
+    if (uTextured) value *= texture(uTexture,surface);
     float a = value.a, r = uAlphaReference;
     bool pass = uAlphaFunction == 0 || uAlphaFunction == 519 ||
         (uAlphaFunction == 513 && a < r) || (uAlphaFunction == 514 && a == r) ||
@@ -338,12 +364,13 @@ Renderer::Renderer(const DisplayOptions& options) : desired_(options), gles_(opt
         glGenRenderbuffers(1, &color_buffer_);
         glUseProgram(program_);
         constexpr const char* names[] = {"uModelView", "uNormal", "uProjection", "uLight",
-            "uDiffuse", "uColor", "uLighting", "uFog", "uAlphaFunction", "uAlphaReference", "uTextured", "uFlipVertical", "uUvTransform", "uEnhanced", "uWorldUp"};
+            "uDiffuse", "uColor", "uLighting", "uFog", "uAlphaFunction", "uAlphaReference", "uTextured", "uFlipVertical", "uUvTransform", "uEnhanced", "uWorldUp", "uParallax"};
         for (std::size_t n = 0; n < uniforms_.size(); ++n) {
             uniforms_[n] = glGetUniformLocation(program_, names[n]);
             if (uniforms_[n] == -1) throw std::runtime_error(std::string("Inactive shader uniform: ")+names[n]);
         }
         glUniform1i(glGetUniformLocation(program_, "uTexture"), 0);
+        glUniform1i(glGetUniformLocation(program_, "uRelief"), 1);
         shadow_model_uniform_ = glGetUniformLocation(program_,"uShadowModel");
         shadow_strength_uniform_ = glGetUniformLocation(program_,"uShadowStrength");
         shadow_filter_uniform_ = glGetUniformLocation(program_,"uShadowFilter");
@@ -535,14 +562,13 @@ bool Renderer::begin_shadows(const ShadowBounds& casters, const ShadowBounds& re
     projection.values[14]=-1-2*near_depth/range;
     shadow_matrix_ = multiply(projection,basis);
     shadow_bias_ = std::max(2.f/16777215,std::clamp(texel*.3f,.03f,.75f)/range);
-    constexpr unsigned capabilities[] = {GL_DEPTH_TEST,GL_CULL_FACE,GL_BLEND,GL_SCISSOR_TEST,GL_POLYGON_OFFSET_FILL};
     auto& saved = shadow_state_;
-    for (std::size_t n=0;n<saved.enabled.size();++n) saved.enabled[n]=glIsEnabled(capabilities[n]);
+    shadow_raster_ = raster_state_;
+    saved.enabled = {raster_state_.depth_test,raster_state_.cull,raster_state_.blend,raster_state_.scissor,raster_state_.offset};
     glGetIntegerv(GL_VIEWPORT,saved.viewport.data());
     glGetIntegerv(GL_SCISSOR_BOX,saved.scissor.data());
-    glGetBooleanv(GL_COLOR_WRITEMASK,saved.color_mask.data());
-    GLboolean depth_mask;
-    glGetBooleanv(GL_DEPTH_WRITEMASK,&depth_mask); saved.depth_mask=depth_mask;
+    for (unsigned n=0;n<4;++n) saved.color_mask[n]=(raster_state_.color_mask>>n)&1;
+    saved.depth_mask=raster_state_.depth_write;
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING,&saved.read_framebuffer);
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING,&saved.draw_framebuffer);
     glGetIntegerv(GL_CURRENT_PROGRAM,&saved.program);
@@ -554,20 +580,18 @@ bool Renderer::begin_shadows(const ShadowBounds& casters, const ShadowBounds& re
     glGetIntegerv(GL_TEXTURE_BINDING_2D,&saved.shadow_texture);
     glBindTexture(GL_TEXTURE_2D,0);
     glActiveTexture(GL_TEXTURE0);
-    glGetIntegerv(GL_DEPTH_FUNC,&saved.depth_function);
-    glGetIntegerv(GL_CULL_FACE_MODE,&saved.cull_face);
+    saved.depth_function=raster_state_.depth_function;
+    saved.cull_face=raster_state_.cull_face;
     glGetIntegerv(GL_FRONT_FACE,&saved.front_face);
-    glGetIntegerv(GL_BLEND_SRC_RGB,&saved.blend_source);
-    glGetIntegerv(GL_BLEND_DST_RGB,&saved.blend_destination);
-    glGetIntegerv(GL_BLEND_SRC_ALPHA,&saved.blend_source_alpha);
-    glGetIntegerv(GL_BLEND_DST_ALPHA,&saved.blend_destination_alpha);
-    glGetFloatv(GL_POLYGON_OFFSET_FACTOR,&saved.polygon_factor);
-    glGetFloatv(GL_POLYGON_OFFSET_UNITS,&saved.polygon_units);
+    saved.blend_source=saved.blend_source_alpha=raster_state_.blend_source;
+    saved.blend_destination=saved.blend_destination_alpha=raster_state_.blend_destination;
+    saved.polygon_factor=raster_state_.offset_factor;
+    saved.polygon_units=raster_state_.offset_units;
     glBindFramebuffer(GL_FRAMEBUFFER,shadow_framebuffer_);
     glUseProgram(shadow_program_);
     glViewport(0,0,shadow_size_,shadow_size_);
-    glDisable(GL_SCISSOR_TEST);
-    glDepthMask(GL_TRUE);
+    glDisable(GL_SCISSOR_TEST); raster_state_.scissor = false;
+    glDepthMask(GL_TRUE); raster_state_.depth_write = true;
     glClear(GL_DEPTH_BUFFER_BIT);
     shadow_pass_=true; shadow_drawn_=false;
     return true;
@@ -597,6 +621,7 @@ void Renderer::end_shadows() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D,saved.texture);
     glActiveTexture(saved.active_texture);
+    raster_state_ = shadow_raster_;
     shadow_pass_=false; shadow_valid_=shadow_drawn_;
     model_valid_=normal_valid_=false;
     gl_check("Character shadow pass");
@@ -758,6 +783,7 @@ void Renderer::clear() {
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
+    raster_state_.scissor = false; raster_state_.color_mask = 15; raster_state_.depth_write = true;
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 }
 void Renderer::camera(const Mat4& view, const Mat4& projection, bool interface) {
@@ -781,7 +807,7 @@ void Renderer::camera(const Mat4& view, const Mat4& projection, bool interface) 
     const auto viewport = interface ? fit_original_interface(width_, height_) : Viewport{0, 0, width_, height_};
     glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
     glScissor(viewport.x, viewport.y, viewport.width, viewport.height);
-    glEnable(GL_SCISSOR_TEST);
+    glEnable(GL_SCISSOR_TEST); raster_state_.scissor = true;
     glUniformMatrix4fv(uniforms_[2], 1, GL_FALSE, projection.values.data());
     light_[0] = 0.5f; light_[1] = 1; light_[2] = 0.3f; light_[3] = 0;
     if (!interface) {
@@ -812,16 +838,12 @@ void Renderer::finish_world() {
     // touch the scene uniforms, and invalidating the model cache keeps later draws safe.
     constexpr unsigned capabilities[] = {GL_DEPTH_TEST, GL_CULL_FACE, GL_BLEND,
                                         GL_SCISSOR_TEST, GL_POLYGON_OFFSET_FILL};
-    std::array<bool, 5> enabled{};
-    for (std::size_t n = 0; n < enabled.size(); ++n) enabled[n] = glIsEnabled(capabilities[n]);
+    const auto saved = raster_state_;
+    const std::array<bool,5> enabled{saved.depth_test,saved.cull,saved.blend,saved.scissor,saved.offset};
     std::array<int, 4> viewport{}, scissor{};
-    std::array<GLboolean, 4> color_mask{};
-    GLboolean depth_mask;
     int texture, vao;
     glGetIntegerv(GL_VIEWPORT, viewport.data());
     glGetIntegerv(GL_SCISSOR_BOX, scissor.data());
-    glGetBooleanv(GL_COLOR_WRITEMASK, color_mask.data());
-    glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
     glActiveTexture(GL_TEXTURE0);
     glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
     glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
@@ -856,12 +878,13 @@ void Renderer::finish_world() {
     glUseProgram(program_);
     glBindTexture(GL_TEXTURE_2D, texture);
     glBindVertexArray(vao);
-    glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
-    glDepthMask(depth_mask);
+    glColorMask(saved.color_mask&1,(saved.color_mask>>1)&1,(saved.color_mask>>2)&1,(saved.color_mask>>3)&1);
+    glDepthMask(saved.depth_write);
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
     glScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
     for (std::size_t n = 0; n < enabled.size(); ++n)
         if (enabled[n]) glEnable(capabilities[n]);
+    raster_state_ = saved;
     model_valid_ = normal_valid_ = false;
     world_finished_ = true;
     gl_check("World composition");
@@ -983,6 +1006,10 @@ void Renderer::draw(unsigned id, unsigned texture, const Material& material, con
     if (pass.depth_test) glDepthFunc(pass.depth_function);
     glDepthMask(pass.depth_write);
     glColorMask(pass.color_write[0], pass.color_write[1], pass.color_write[2], pass.color_write[3]);
+    const unsigned mask = pass.color_write[0] | pass.color_write[1]<<1 | pass.color_write[2]<<2 | pass.color_write[3]<<3;
+    raster_state_ = {material.cull,material.polygon_offset,pass.blend,pass.depth_test,pass.depth_write,raster_state_.scissor,
+        material.cull_face,pass.blend_source,pass.blend_destination,pass.depth_function,mask,
+        material.polygon_offset_factor,material.polygon_offset_units};
     if (shadow_pass_) {
         const auto matrix = multiply(shadow_matrix_,state.model);
         glUniformMatrix4fv(shadow_uniforms_[0],1,GL_FALSE,matrix.values.data());
@@ -997,6 +1024,14 @@ void Renderer::draw(unsigned id, unsigned texture, const Material& material, con
         glDrawElements(GL_TRIANGLES,static_cast<int>(meshes_[id-1].index_count),GL_UNSIGNED_SHORT,nullptr);
         shadow_drawn_ = true;
         return;
+    }
+    if (state.relief > textures_.size()) throw std::runtime_error("Unknown relief texture");
+    const bool relief = enhanced_ && desired_.parallax && world_camera_ && state.relief;
+    glUniform1i(uniforms_[15], relief);
+    if (relief) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D,textures_[state.relief-1].id);
+        glActiveTexture(GL_TEXTURE0);
     }
     const bool receiver = shadow_valid_ && shadow_enabled() && world_camera_ && state.lighting &&
         state.ray_geometry && state.ray_primary && !pass.blend && pass.depth_write && !pass.video;
@@ -1049,6 +1084,8 @@ void Renderer::finish_frame() {
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    raster_state_.scissor = raster_state_.depth_test = raster_state_.cull = raster_state_.blend = false;
+    raster_state_.color_mask = 15;
     glViewport(0, 0, width_, height_);
     glUseProgram(post_program_);
     glUniform1i(copy_uniform_, GL_FALSE);

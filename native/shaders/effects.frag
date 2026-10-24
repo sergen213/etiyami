@@ -372,10 +372,10 @@ void main() {
     }
 }
 #else
-float rasterAO(vec3 position,vec3 normal) {
+float rasterAO(vec3 position,vec3 normal,float random) {
     float obscured=0, valid=0;
     for(int i=0;i<12;++i) {
-        float a=(float(i)+noise(gl_FragCoord.xy))*2.399963;
+        float a=(float(i)+random)*2.399963;
         vec2 uv=vUv+vec2(cos(a),sin(a))*(2+float(i)*1.8)/p.extent.xy;
         if(any(lessThan(uv,vec2(0)))||any(greaterThanEqual(uv,vec2(1)))) continue;
         ivec2 t=ivec2(floor(uv*p.extent.xy));
@@ -395,13 +395,13 @@ float rasterAO(vec3 position,vec3 normal) {
 vec3 screenReflection(vec3 origin,vec3 direction) {
     // Only an actual depth intersection contributes; screen misses are black.
     float travel=.35;
+    ivec2 size=ivec2(p.extent.xy);
     for(int i=0;i<28;++i) {
         travel+=.3+float(i)*.12;
         vec3 at=origin+direction*travel;
         vec4 clip=p.currentVP*vec4(at,1); if(clip.w<=0) break;
         vec2 uv=clip.xy/clip.w*.5+.5+p.jitter.xy;
         if(any(lessThan(uv,vec2(0)))||any(greaterThanEqual(uv,vec2(1)))) break;
-        ivec2 size=textureSize(worldDepth,0);
         ivec2 texel=ivec2(floor(uv*vec2(size)));
         float depth=texelFetch(worldDepth,texel,0).r;
         vec4 hitNormal=normalAt(texel);
@@ -474,7 +474,7 @@ void main() {
               gainOut,reflectionOut);
 #else
     vec3 reflectedDirection=normalize(mix(mirror,hemisphere(physical,random),p.post.w*p.post.w));
-    if(p.strengths.x>0) ao=rasterAO(position,physical);
+    if(p.strengths.x>0) ao=rasterAO(position,physical,random.x);
     if(p.strengths.y>0) reflected=screenReflection(position+physical*.1,reflectedDirection);
     gainOut=vec4(max(indirect*p.strengths.w,vec3(0)),mix(1,ao,p.strengths.x));
     reflectionOut=vec4(max(reflected*p.strengths.y*fresnel*(1-.65*p.post.w),vec3(0)),complete);

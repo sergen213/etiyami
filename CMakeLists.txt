@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-set(YAMI_RELEASE_VERSION "1.3.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
+set(YAMI_RELEASE_VERSION "1.4.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
 if(NOT YAMI_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "YAMI_RELEASE_VERSION must be MAJOR.MINOR.PATCH")
 endif()
@@ -181,7 +181,7 @@ endif()
 add_library(yami_engine STATIC
     native/assets.cpp native/script_vm.cpp native/gameplay.cpp native/enemy_ai.cpp
     native/entity.cpp native/combat.cpp native/media.cpp native/menu.cpp
-    native/ending.cpp native/renderer.cpp native/scene.cpp native/game.cpp
+    native/ending.cpp native/renderer.cpp native/scene.cpp native/game.cpp native/parallax.cpp
     native/launcher.cpp native/update.cpp native/update_install.cpp)
 target_compile_features(yami_engine PUBLIC cxx_std_20)
 target_compile_definitions(yami_engine PUBLIC
@@ -285,7 +285,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(component assets script_vm gameplay enemy_ai entity combat media menu ending renderer update update_install)
+    foreach(component assets script_vm gameplay enemy_ai entity combat media menu ending renderer update update_install parallax)
         add_executable(check_${component} native/check_${component}.cpp)
         target_link_libraries(check_${component} PRIVATE yami_engine)
         if(MSVC)

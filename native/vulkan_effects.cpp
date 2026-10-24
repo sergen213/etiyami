@@ -276,11 +276,13 @@ struct VulkanEffects::Impl {
         image.extent=extent; image.format=info.format;
     }
     void transition(VkCommandBuffer cmd,VulkanImage& image,VkImageLayout layout) {
+        if(image.layout==layout)return;
+        const auto source=vulkan_barrier_mask(image.layout),destination=vulkan_barrier_mask(layout);
         VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
-        b.srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        b.srcAccessMask=image.layout==VK_IMAGE_LAYOUT_UNDEFINED?0:VK_ACCESS_2_MEMORY_WRITE_BIT|VK_ACCESS_2_MEMORY_READ_BIT;
-        b.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; b.dstAccessMask=VK_ACCESS_2_MEMORY_WRITE_BIT|VK_ACCESS_2_MEMORY_READ_BIT;
-        b.oldLayout=image.layout; b.newLayout=layout; b.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        b.srcStageMask=source.stages; b.srcAccessMask=source.access;
+        b.dstStageMask=destination.stages; b.dstAccessMask=destination.access;
+        b.oldLayout=image.layout; b.newLayout=layout;
+        b.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED; b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
         b.image=image.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
         VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dependency.imageMemoryBarrierCount=1; dependency.pImageMemoryBarriers=&b;
         c.vk.vkCmdPipelineBarrier2(cmd,&dependency); image.layout=layout;
@@ -830,7 +832,7 @@ struct VulkanEffects::Impl {
         if(camera_distance>400 || camera_change>.75f) valid=false;
         if(f.settings.temporal_aa!=previous_settings.temporal_aa || f.settings.render_scale!=previous_settings.render_scale ||
             f.settings.samples!=previous_settings.samples || f.settings.anisotropy!=previous_settings.anisotropy ||
-            f.settings.ray_tracing!=previous_settings.ray_tracing || f.settings.enhanced!=previous_settings.enhanced ||
+            f.settings.ray_tracing!=previous_settings.ray_tracing || f.settings.enhanced!=previous_settings.enhanced || f.settings.parallax!=previous_settings.parallax ||
             f.settings.roughness!=previous_settings.roughness || f.settings.ambient_occlusion!=previous_settings.ambient_occlusion ||
             f.settings.reflections!=previous_settings.reflections || f.settings.shadows!=previous_settings.shadows || f.settings.indirect_lighting!=previous_settings.indirect_lighting) valid=false;
         p.extent={float(f.extent.width),float(f.extent.height),float(f.output_extent.width),float(f.output_extent.height)};

@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "parallax.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
@@ -375,6 +376,52 @@ void check_actor_shadows(DisplayOptions options) {
     renderer.release_mesh(hud); renderer.release_mesh(cloud);
     renderer.release_mesh(caster); renderer.release_mesh(receiver);
 }
+void check_parallax_render(DisplayOptions options) {
+    options.width = 384; options.height = 216; options.samples = 0;
+    options.enhanced = true; options.parallax = true;
+    options.ambient_occlusion = options.reflections = options.bloom = options.sharpen = 0;
+    options.shadows = 0;
+    Renderer renderer(options);
+    const std::array<Vertex,4> vertices{{
+        {{-20,-2,-20},{0,0},{0,1,0}}, {{20,-2,-20},{1,0},{0,1,0}},
+        {{20,-2,-100},{1,1},{0,1,0}}, {{-20,-2,-100},{0,1},{0,1,0}}
+    }};
+    const std::array<std::uint16_t,6> indices{{0,1,2,0,2,3}};
+    const auto floor = renderer.upload_mesh(vertices, indices);
+    std::vector<std::uint8_t> pixels(64*64*4);
+    for (unsigned y = 0; y < 64; ++y) for (unsigned x = 0; x < 64; ++x) {
+        const auto at = (y*64+x)*4;
+        pixels[at] = pixels[at+1] = pixels[at+2] = (x%8 == 0 || y%8 == 0) ? 32 : 208;
+        pixels[at+3] = 255;
+    }
+    const auto diffuse = renderer.upload_texture(64, 64, pixels, true, false);
+    auto generated = derive_relief(pixels, 64, 64);
+    assert(!generated.rgba.empty());
+    const auto relief = renderer.upload_texture(generated.width, generated.height, generated.rgba, true, false);
+    Material material; material.cull = false;
+    MaterialPass pass;
+    DrawState state;
+    state.lighting = state.temporal_static = true;
+    state.diffuse_light = {.5f,.5f,.5f,1}; state.relief = relief;
+    const auto render = [&] {
+        renderer.clear();
+        renderer.camera(identity_matrix(), frustum_projection(.75f, float(renderer.pixel_width())/renderer.pixel_height(), 1, 30000));
+        renderer.draw(floor, diffuse, material, pass, state);
+        renderer.finish_world();
+        return renderer.capture_rgba();
+    };
+    const auto on = render();
+    auto graphics = renderer.graphics_settings(); graphics.parallax = false; renderer.set_graphics(graphics);
+    const auto off = render();
+    assert(on != off);
+    graphics.enhanced = false; graphics.parallax = false; renderer.set_graphics(graphics);
+    const auto classic = render();
+    graphics.parallax = true; renderer.set_graphics(graphics);
+    assert(render() == classic);
+    renderer.release_mesh(floor);
+    std::cout << renderer.backend_name() << " parallax: oblique enhanced on/off and identical classic PASS\n";
+}
+
 
 int main(int argc, char** argv) {
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::cerr << SDL_GetError() << '\n'; return 1; }
@@ -461,6 +508,7 @@ int main(int argc, char** argv) {
             std::cout << renderer.backend_name() << " renderer: " << width << 'x' << height
                       << " MSAA=" << renderer.samples() << " gamma/orientation/alpha/resolve/video/update PASS\n";
         }
+        check_parallax_render(options);
         if (options.backend == GraphicsBackend::OpenGL) {
             check_world_effects(options);
             std::cout << "live classic/enhanced AO/rough-reflection/hit-miss/strength MSAA4/0/4 widescreen HUD PASS\n";

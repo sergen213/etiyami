@@ -1,6 +1,6 @@
 # ETI Yami Native — Linux and Windows
 
-A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. **v1.3.0 adds native 64-bit Windows**, including the same settings launcher, OpenGL/GLES rendering, Vulkan/optional ray tracing, AMD FSR 3.1.4 upscaling and optional frame generation, enhanced character-pose interpolation and shadows, widescreen support, checkpoints, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
+A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. **v1.4.0 adds IKV-style parallax occlusion mapping and renderer optimizations** alongside the settings launcher, OpenGL/GLES rendering, Vulkan/optional ray tracing, AMD FSR 3.1.4 upscaling and optional frame generation, enhanced character-pose interpolation and shadows, widescreen support, checkpoints, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows is available for x86_64. macOS releases are deferred.
 
@@ -183,6 +183,8 @@ Enhanced OpenGL/GLES character shadows were already available in v1.1.0 and are 
 
 The original assets have no authored roughness/metalness maps: roughness is a conservative global dielectric treatment, not replacement PBR artwork. This is hybrid raster/RT, not full path tracing. No 1440p/60-fps performance guarantee or physical ARM64 GPU verification is claimed.
 
+Enhanced-only **parallax occlusion mapping** is enabled by default and can be toggled with `--parallax on|off`. Following the IKV implementation, static opaque primary world materials derive separate relief textures from diffuse luminance (8–24 occlusion steps plus one secant refinement); original assets are not modified. Relief affects primary artwork and shading normals only: silhouettes, geometry, depth, motion data, alpha hits and secondary RT intersections remain flat. Actors, HUD, videos, blended/alpha-tested surfaces and classic rendering do not use it.
+
 ## Game controls
 
 | Input | Action |
@@ -336,6 +338,7 @@ Effect strengths accept values from `0` to `1`; zero disables that effect. CLI g
 |---|---|
 | `--renderer` | `opengl` or `vulkan`; default OpenGL unless saved otherwise |
 | `--ray-tracing`, `--taa` | `on` / `off`; Vulkan only, enabled by default; `--taa` toggles FSR 3.1 |
+| `--parallax` | `on` / `off`; enhanced-only generated relief on eligible static world materials, default on |
 | `--frame-generation` | `on` / `off`; Vulkan FSR 3.1.4 frame generation, default off; needs FSR on and a supporting GPU |
 | `--gpu-timings` | Vulkan only, not saved; records GPU timestamps per frame stage (world raster, acceleration builds, RT classify/effects/Sun, temporal, FSR inputs/dispatch, display, composite, frame generation, UI, present blit) plus CPU wall time from frame start to submit (`cpu`) and between consecutive real-frame presents (`interval`), and prints count/mean/median/p95 ms plus per-frame BLAS/TLAS/instance counters to stderr on exit |
 | `--shadows` | `0..1`; shared enhanced GL/GLES character-shadow / Vulkan RT shadow strength, default `0.75`; zero disables shadows |

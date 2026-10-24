@@ -50,11 +50,14 @@ vec3 litRadiance(vec3 base,ivec2 t,float depth,float sampleSun,out vec3 composed
         // down the street, which read as artefacts and alias at render resolution: keep it in the
         // near street (up to 200 units, about 5 m) and fade it to none at 500.
         if(depth>0) ao=mix(ao,1,smoothstep(200.,500.,depth));
-        vec3 sun=sampleSun>=0?vec3(mix(1,.3+.7*sampleSun,p.strengths.z)):
-            gain.a>=0?vec3(mix(1,.3+.7*gain.a,p.strengths.z)):currentSunModulation(t);
-        // The same modulation scales retained artwork AA; GI and reflection
-        // remain independent of the deterministic current-frame Sun.
-        composed+=ao*sun;
+        if(p.strengths.z<=0) composed+=ao;
+        else {
+            vec3 sun=sampleSun>=0?vec3(mix(1,.3+.7*sampleSun,p.strengths.z)):
+                gain.a>=0?vec3(mix(1,.3+.7*gain.a,p.strengths.z)):currentSunModulation(t);
+            // The same modulation scales retained artwork AA; GI and reflection
+            // remain independent of the deterministic current-frame Sun.
+            composed+=ao*sun;
+        }
     }
     reflection=texelFetch(accumulatedReflection,t,0).rgb;
     vec3 lit=base*composed+reflection;

@@ -32,8 +32,8 @@ void main() {
     vEye=eye.xyz;
     vNormal=u.normalEye*normal;
     vWorldNormal=mat3(u.normalWorld)*normal;
-    vPreviousClip=u.previousMVP*vec4(previousPosition,1);
-    vPreviousNormal=mat3(u.previousNormalWorld)*previousNormal;
+    vPreviousClip=u.temporal.w!=0?u.previousMVP*vec4(previousPosition,1):vec4(0);
+    vPreviousNormal=u.temporal.w!=0?mat3(u.previousNormalWorld)*previousNormal:vec3(0);
     vPosition=position;
     vPreviousPosition=previousPosition;
     if(u.flags.x>0.5 && u.flags.y<0.5) {

@@ -14,7 +14,7 @@ struct MeshResource {
     unsigned static_gpu = 0;
     ShadowBounds static_bounds;
 };
-struct MaterialResource { Material material; std::vector<unsigned> textures; };
+struct MaterialResource { Material material; std::vector<unsigned> textures, relief; };
 struct ModelResource {
     Model model;
     struct Part { MeshResource* mesh; MaterialResource* material; };
@@ -53,6 +53,7 @@ public:
     ModelResource& model(std::string_view descriptor); // game-relative model.dat path
     MaterialResource& material(std::string_view name); // data/materials/<name>.dat
     unsigned image(std::string_view filename); // original missing-image white semantics
+    unsigned relief(std::string_view filename); // Lazily derived diffuse relief; zero means flat/unusable.
     void prepare(ModelInstance&, std::size_t animation, std::uint32_t elapsed);
     void draw_shadow(ModelInstance&, DrawState);
     void draw(ModelInstance&, DrawState, std::size_t animation, std::uint32_t elapsed,
@@ -76,7 +77,7 @@ private:
     std::map<std::string, std::unique_ptr<MeshResource>, std::less<>> meshes_;
     std::map<std::string, std::unique_ptr<ModelResource>, std::less<>> models_;
     std::map<std::string, std::unique_ptr<MaterialResource>, std::less<>> materials_;
-    std::map<std::string, unsigned, std::less<>> images_;
+    std::map<std::string, unsigned, std::less<>> images_, relief_images_;
     std::map<std::string, Video, std::less<>> videos_;
     unsigned quad_ = 0, white_ = 0;
     MeshResource& mesh(const std::filesystem::path&);

@@ -1,4 +1,5 @@
 #include "scene.hpp"
+#include "parallax.hpp"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -18,6 +19,21 @@ constexpr std::array<Vertex, 4> quad_vertices{{
     {{1,0,0},{1,0},{0,0,1}}, {{0,0,0},{0,0},{0,0,1}}
 }};
 std::string model_key(const std::filesystem::path& path) { return path.generic_string(); }
+bool image_flip_vertical(const std::filesystem::path& path) {
+    bool flip = true;
+    auto extension = path.extension().string();
+    for (auto& c : extension) if (c >= 'A' && c <= 'Z') c = char(c+'a'-'A');
+    if (extension == ".tga") {
+        std::array<std::uint8_t, 18> header{};
+        std::ifstream input(path, std::ios::binary);
+        if (!input.read(reinterpret_cast<char*>(header.data()), header.size()))
+            throw std::runtime_error("Truncated TGA header: "+path.string());
+        // 00417a30 ignores origin bit. The one original top-first TGA is therefore
+        // inverted relative to FFmpeg's canonical top-left image; retain that fact.
+        flip = (header[17]&0x20) == 0;
+    }
+    return flip;
+}
 ShadowBounds indexed_bounds(std::span<const Vertex> vertices, std::span<const std::uint16_t> indices) {
     ShadowBounds bounds;
     for (const auto index : indices) bounds.include(vertices[index].position);
@@ -99,6 +115,7 @@ MaterialResource& SceneCache::material(std::string_view name) {
     auto resource = std::make_unique<MaterialResource>();
     resource->material = read_material(resolve("data/materials/"+std::string(name)+".dat"));
     resource->textures.resize(resource->material.passes.size());
+    resource->relief.resize(resource->material.passes.size());
     return *materials_.emplace(std::string(name), std::move(resource)).first->second;
 }
 unsigned SceneCache::image(std::string_view name) {
@@ -118,23 +135,25 @@ unsigned SceneCache::image(std::string_view name) {
         images_.emplace(std::string(name), white_);
         return white_;
     }
-    bool flip_vertical = true;
-    auto extension = path.extension().string();
-    for (auto& c : extension) if (c >= 'A' && c <= 'Z') c = char(c+'a'-'A');
-    if (extension == ".tga") {
-        std::array<std::uint8_t, 18> header{};
-        std::ifstream input(path, std::ios::binary);
-        if (!input.read(reinterpret_cast<char*>(header.data()), header.size()))
-            throw std::runtime_error("Truncated TGA header: "+path.string());
-        // 00417a30 ignores origin bit. The one original top-first TGA is therefore
-        // inverted relative to FFmpeg's canonical top-left image; retain that fact.
-        flip_vertical = (header[17]&0x20) == 0;
-    }
+    const bool flip_vertical = image_flip_vertical(path);
     VideoDecoder decoder(path);
     VideoFrame frame;
     if (!decoder.next(frame)) throw std::runtime_error("Image contains no frame: "+path.string());
     const auto texture = renderer_.upload_texture(frame.width, frame.height, frame.rgba, true, flip_vertical);
     images_.emplace(std::string(name), texture);
+    return texture;
+}
+unsigned SceneCache::relief(std::string_view name) {
+    if (const auto found = relief_images_.find(name); found != relief_images_.end()) return found->second;
+    const auto path = resolve(name);
+    VideoDecoder decoder(path);
+    VideoFrame frame;
+    if (!decoder.next(frame)) throw std::runtime_error("Image contains no frame: "+path.string());
+    auto generated = derive_relief(frame.rgba, frame.width, frame.height);
+    unsigned texture = 0;
+    if (!generated.rgba.empty())
+        texture = renderer_.upload_texture(generated.width, generated.height, generated.rgba, true, image_flip_vertical(path));
+    relief_images_.emplace(std::string(name), texture);
     return texture;
 }
 bool SceneCache::video_texture(std::string_view name, std::uint32_t time, bool loop, unsigned& texture) {
@@ -222,6 +241,8 @@ void SceneCache::draw_shadow(ModelInstance& instance, DrawState state) {
 void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t animation,
                       std::uint32_t elapsed, std::uint32_t wall_clock) {
     prepare(instance, animation, elapsed);
+    const auto graphics = renderer_.graphics_settings();
+    const bool parallax = graphics.enhanced && graphics.parallax;
     const auto& model = instance.resource();
     for (std::size_t n = 0; n < model.parts.size(); ++n) {
         const auto& part = instance.parts[n];
@@ -237,6 +258,9 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             submission.ray_geometry = state.ray_geometry && submission.ray_primary;
             submission.temporal_static = state.temporal_static && !part.owned && !pass.video;
             submission.temporal_id = submission.ray_geometry && !pass.video ? part.temporal_id : 0;
+            if (parallax && submission.temporal_static && submission.ray_geometry && !pass.blend && !pass.alpha_test &&
+                pass.depth_test && pass.depth_write && texture != white_)
+                submission.relief = relief(pass.texture_name);
             renderer_.draw(part.gpu, texture, material.material, pass, submission);
         }
     }

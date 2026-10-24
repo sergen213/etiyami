@@ -26,6 +26,7 @@ struct DrawState {
     std::array<float, 4> diffuse_light{{1, 1, 1, 1}};
     std::array<float, 4> uv_transform{{1, 1, 0, 0}}; // scale.xy, offset.xy
     std::uint64_t temporal_id = 0; // Stable instance/part identity; zero has no dynamic correspondence.
+    unsigned relief = 0; // Enhanced static-world relief texture; zero keeps original flat shading.
 };
 struct ShadowBounds {
     Vec3 min{}, max{};
@@ -103,6 +104,11 @@ private:
     Mat4 shadow_matrix_ = identity_matrix(), projection_ = identity_matrix();
     float shadow_bias_ = 0;
     bool shadow_pass_ = false, shadow_valid_ = false, shadow_drawn_ = false;
+    struct RasterState {
+        bool cull = false, offset = true, blend = false, depth_test = false, depth_write = true, scissor = false;
+        unsigned cull_face = 0x405, blend_source = 1, blend_destination = 0, depth_function = 0x203, color_mask = 15;
+        float offset_factor = 0, offset_units = 0;
+    } raster_state_, shadow_raster_;
     struct ShadowState {
         std::array<bool, 5> enabled{};
         std::array<int, 4> viewport{}, scissor{};
@@ -128,7 +134,7 @@ private:
     Mat4 last_model_, last_model_view_;
     bool model_valid_ = false, normal_valid_ = false;
     std::array<float, 4> light_{{0.5f, 1, 0.3f, 0}};
-    std::array<int, 15> uniforms_{};
+    std::array<int, 16> uniforms_{};
     int width_ = 0, height_ = 0, samples_ = 0, max_samples_ = 0, max_texture_size_ = 0;
     int requested_samples_ = 0;
     float anisotropy_ = 1, max_anisotropy_ = 1;

@@ -1,5 +1,6 @@
 #version 460
 layout(set=0,binding=0) uniform sampler2D artwork;
+layout(set=1,binding=2) uniform sampler2D relief;
 layout(set=0,binding=1,std140) uniform Draw {
     mat4 modelView, projection;
     mat3 normalEye;
@@ -39,11 +40,33 @@ int packFacet(vec3 facet,mat3 normalWorld,vec3 authored) {
     return int(packSnorm2x16(oct));
 }
 #endif
+// IKV relief: 8-24 occlusion steps, one secant refinement, flat depth/motion/RT geometry.
+vec2 reliefUV(vec2 uv,out vec3 gradient) {
+    gradient=vec3(0);
+    vec3 dp1=dFdx(vEye),dp2=dFdy(vEye),nf=cross(dp1,dp2),view=-vEye;
+    vec2 du1=dFdx(uv),du2=dFdy(uv);float det=du1.x*du2.y-du2.x*du1.y,dist=length(view);
+    if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return uv;
+    nf=normalize(nf);view/=dist;if(dot(nf,view)<0.0)nf=-nf;
+    vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
+    vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
+    float c=dot(view,nf),depth=smoothstep(.05,.18,c)*(1.0-smoothstep(50.,90.,dist))*
+        min(12.0*min(length(pu),length(pv))/float(textureSize(relief,0).x),.6);
+    if(!(depth>1e-3))return uv;
+    vec2 shift=-vec2(dot(view,gu),dot(view,gv))/c*depth;
+    int steps=int(mix(24.,8.,c));float t=0.0,h=textureGrad(relief,uv,du1,du2).r,lastT=0.0,lastF=h-1.0;
+    for(int i=0;i<steps&&t<1.0-h;++i){lastT=t;lastF=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(relief,uv+shift*t,du1,du2).r;}
+    float f=t-(1.0-h);if(f>0.0&&lastF<0.0)t=mix(lastT,t,lastF/(lastF-f));
+    vec2 surface=uv+shift*t;
+    vec2 slope=(textureGrad(relief,surface,du1,du2).gb-.5)*.5*vec2(textureSize(relief,0));
+    gradient=.7*depth*(slope.x*gu+slope.y*gv);
+    return surface;
+}
+
 void main() {
 #ifndef YAMI_INTERFACE_ONLY
     // Local derivatives avoid translated-world cancellation; evaluate before discard.
     int currentFacet=packFacet(cross(dFdxFine(vPosition),dFdyFine(vPosition)),mat3(u.normalWorld),vWorldNormal);
-    int previousFacet=packFacet(cross(dFdxFine(vPreviousPosition),dFdyFine(vPreviousPosition)),mat3(u.previousNormalWorld),vPreviousNormal);
+    int previousFacet=u.temporal.w!=0?packFacet(cross(dFdxFine(vPreviousPosition),dFdyFine(vPreviousPosition)),mat3(u.previousNormalWorld),vPreviousNormal):int(0x80008000u);
     // Hardware snaps vertex coverage; these affine fields recover the physical
     // point at the ideal pixel centre without changing artwork or actual depth.
     float inverseW=1/vCurrentClip.w;
@@ -76,16 +99,18 @@ void main() {
             if(currentW!=0 && !isnan(currentW) && !isinf(currentW) && !isnan(depth) && !isinf(depth)) {
                 currentDepth=depth;
                 currentValid=true;
-                vec4 previous=previousOverW+previousDx*lambda.x+previousDy*lambda.y;
-                float previousW=previous.w*currentW;
-                if(previous.w!=0 && previousW>0 && !isnan(previousW) && !isinf(previousW) &&
-                   !any(isnan(previous)) && !any(isinf(previous))) {
-                    bool orthographic=length(vec3(u.previousMVP[0][3],u.previousMVP[1][3],u.previousMVP[2][3]))<1e-8;
-                    float previousDepth=orthographic?1+previous.z/previous.w:previousW;
-                    vec3 coordinate=vec3(previous.xy/previous.w*.5+.5,previousDepth);
-                    if(!any(isnan(coordinate)) && !any(isinf(coordinate))) {
-                        previousCoordinate=coordinate;
-                        valid=u.temporal.y!=0;
+                if(u.temporal.w!=0) {
+                    vec4 previous=previousOverW+previousDx*lambda.x+previousDy*lambda.y;
+                    float previousW=previous.w*currentW;
+                    if(previous.w!=0 && previousW>0 && !isnan(previousW) && !isinf(previousW) &&
+                       !any(isnan(previous)) && !any(isinf(previous))) {
+                        bool orthographic=length(vec3(u.previousMVP[0][3],u.previousMVP[1][3],u.previousMVP[2][3]))<1e-8;
+                        float previousDepth=orthographic?1+previous.z/previous.w:previousW;
+                        vec3 coordinate=vec3(previous.xy/previous.w*.5+.5,previousDepth);
+                        if(!any(isnan(coordinate)) && !any(isinf(coordinate))) {
+                            previousCoordinate=coordinate;
+                            valid=u.temporal.y!=0;
+                        }
                     }
                 }
             }
@@ -94,8 +119,11 @@ void main() {
 #endif
     vec4 value=vColor;
     bool enhanced=u.flags.y>.5;
+    vec2 surface=vec2(vUv.x,u.worldUp.w>.5 ? 1-vUv.y:vUv.y);
+    vec3 gradient=vec3(0);
+    if(u.temporal.z!=0)surface=reliefUV(surface,gradient);
     if(u.flags.x>.5 && enhanced) {
-        vec3 n=normalize(vNormal);
+        vec3 n=normalize(vNormal-gradient);
         float d=max(dot(n,normalize(u.light.xyz-vEye*u.light.w)),0);
         float h=dot(n,u.worldUp.xyz)*.5+.5;
         value=vec4(clamp(vec3(.416+.08*h)+.8*u.diffuse.rgb*d,0,1),1);
@@ -104,7 +132,7 @@ void main() {
     // display-authored domain, including MSAA. The floating world attachment
     // retains emissive headroom; effects decodes the entire resolved world once.
     if(u.flags.z>.5) {
-        vec4 texel=texture(artwork,vec2(vUv.x,u.worldUp.w>.5 ? 1-vUv.y:vUv.y));
+        vec4 texel=texture(artwork,surface);
         value*=texel;
     }
     float a=value.a,r=u.alphaJitter.y;
@@ -115,7 +143,8 @@ void main() {
     if(u.diffuse.w<0) value.rgb=mix(vec3(.2),value.rgb,clamp((2000-abs(vEye.z))/1000,0,1));
     outColor=value;
 #ifndef YAMI_INTERFACE_ONLY
-    outNormal=ivec4(round(normalize(vWorldNormal+vec3(1e-20))*32767),int(u.flags.w));
+    vec3 worldNormal=vWorldNormal-transpose(mat3(u.modelView))*gradient;
+    outNormal=ivec4(round(normalize(worldNormal+vec3(1e-20))*32767),int(u.flags.w));
     outMotion=ivec4(floatBitsToInt(previousCoordinate),
                     u.flags.w>=0 && (u.temporal.x>0 || u.temporal.y!=0)?u.temporal.x:-1);
     vec3 priorNormal=normalize(vPreviousNormal+vec3(1e-20));
