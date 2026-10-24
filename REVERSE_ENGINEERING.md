@@ -258,6 +258,16 @@ This local-source correction is separate from the historical v1.1.1 implementati
 
 ## Exercised verification
 
+### v1.3.0 — native Windows and local multi-platform release
+
+The Windows x86_64 build uses the same C++20/SDL3 game, settings launcher, original assets, checkpoints, OpenGL/GLES, Vulkan/optional ray-query effects and AMD FSR 3.1.4 paths as Linux. The offline per-user installer reads the original ISO without executing disc installers, creates Start Menu and optional Desktop shortcuts, and preserves saves, settings and unrecorded files during repair/uninstall. Update ZIPs remain flat; the pinned FidelityFX MIT notice is embedded in `yami-native.exe` and also included readably in the installer.
+
+Local Windows verification covered update/uninstall suites and a real ISO install/cancel/repair/rollback/shortcut/uninstall cycle with preservation. OpenGL and Vulkan gameplay each completed 123 level-2 ticks under Wine, including RT/FSR/frame-generation captures. These are Wine runtime results, not native Windows GPU certification; native Windows GLES execution is also unverified. Feature availability remains GPU/driver dependent, frame generation is off by default, and alpha-sprite motion-quality/performance guarantees are not claimed.
+
+All eight release artifacts were built locally: Windows engine ZIP and single-file installer, plus Linux x86_64/ARM64 engine ZIP, `.run` and AppImage packages. Every package passed its platform/architecture/runtime-policy verifier. The extracted ARM64 setup also printed `ETI Yami Linux setup 1.3.0` and its help text under `qemu-aarch64-static` with Ubuntu 22.04 ARM64 runtime/graphics libraries. Physical ARM64 GPU execution and blanket Linux-distribution compatibility remain unverified.
+
+[v1.3.0](https://github.com/sergen213/etiyami/releases/tag/v1.3.0) was tagged from source `e5280c6` and published manually from the verified local artifacts, not by a tag-triggered CI build. The public release is latest, non-draft and non-prerelease, with exactly eight assets. Fresh public downloads matched all eight local files byte-for-byte, and an unauthenticated request for the Windows installer returned HTTP 200. Earlier release artifacts were not replaced.
+
 ### v1.2.2 — automatic-update compatibility hotfix
 
 Public v1.2.1 added `licenses/fidelityfx/LICENSE.txt` to its update ZIPs, but the unchanged v1.2.0 updater accepted only executables and runtime libraries. A genuine installed v1.2.0 launcher reproduced the generic metadata/integrity/package-validation failure after digest verification and removed its stage before helper launch. Installer-owned installations also rejected the nested path during engine-inventory serialization. The v1.2.2 packager keeps update ZIPs flat, embeds the exact pinned MIT notice in a `.fidelityfx-license` section of `yami-native`, and leaves the separate readable notice at installer top level. A regression rejects the old nested layout and accepts the compatible embedded-notice layout.
