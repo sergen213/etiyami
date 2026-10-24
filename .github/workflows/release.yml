@@ -264,7 +264,8 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes '## v1.2.2 automatic-update compatibility hotfix
+            --notes-file - <<'RELEASE_NOTES'
+          ## v1.2.2 automatic-update compatibility hotfix
 
           - Installed v1.2.0 launchers can update again: update ZIPs retain the flat runtime-only layout accepted by the old trusted helper and its ownership inventory. The pinned FidelityFX MIT notice is embedded in yami-native, and installers also include the readable licenses/fidelityfx/LICENSE.txt copy. This corrects v1.2.1's incompatible nested update-ZIP license entry without replacing either earlier release's artifacts.
           - AMD FidelityFX SDK 1.1.4 / FSR 3.1.4 replaces the custom Vulkan artwork TAA, with Native AA, Quality, Balanced and Performance modes, HDR input, RCAS sharpening and a native-resolution HUD. FSR requires compatible Vulkan storage-image and compute-subgroup features; unsupported devices retain the non-FSR path.
@@ -276,7 +277,8 @@ jobs:
 
           Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. Installers accept your original ISO and display its original game artwork. Apps / the application-menu entries are primary; Desktop play/uninstall shortcuts are optional when a usable location is available, without extensions, trust changes or global desktop changes. A .desktop file is launcher metadata, not a shell script. ZIPs are compatible updates. Both installer formats include application libraries and the offline ISO tool, not original game assets or saves.
 
-          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Packages target native Linux x86_64/ARM64 CI; physical ARM64 GPU execution, blanket Linux compatibility and a performance guarantee are not claimed. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.'
+          Requires glibc 2.35+ and host graphics drivers; no sudo, Wine or manual application dependencies. Packages target native Linux x86_64/ARM64 CI; physical ARM64 GPU execution, blanket Linux compatibility and a performance guarantee are not claimed. Vulkan requires a Vulkan 1.3-capable driver; ray-query effects additionally require compatible hardware and driver support. AppImages use a fully static runtime with automatic extraction fallback if FUSE is unavailable; --appimage-extract-and-run explicitly runs without FUSE. Windows/macOS releases are deferred.
+          RELEASE_NOTES
           gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.
           release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
