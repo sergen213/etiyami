@@ -4,7 +4,7 @@ A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's ar
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows is available for x86_64. macOS releases are deferred.
 
-**v1.3.0 is public/latest:** [the native Windows and multi-platform release](https://github.com/sergen213/etiyami/releases/tag/v1.3.0), tagged from source `e5280c6`, contains eight locally built Windows and Linux artifacts. Public downloads matched the uploaded files byte-for-byte, and an unauthenticated Windows installer request returned HTTP 200. Windows verification used Wine; native Windows GPU and GLES execution remain uncertified.
+**v1.4.0 is public/latest:** [the parallax and renderer-performance release](https://github.com/sergen213/etiyami/releases/tag/v1.4.0), tagged from source `c77f3c3`, contains eight CI-built Windows and Linux artifacts. Every job in [run 40140449028](https://github.com/sergen213/etiyami/actions/runs/40140449028) passed, all eight public downloads match GitHub's SHA256 digests, and anonymous installer range requests returned HTTP 206. The public Windows package passed local validation and both executables reported 1.4.0 under Wine; native Windows GPU and GLES execution remain uncertified.
 
 Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**, available in [the public v1.0.3 release](https://github.com/sergen213/etiyami/releases/tag/v1.0.3); the 1.0.2 installer does not provide them.
 

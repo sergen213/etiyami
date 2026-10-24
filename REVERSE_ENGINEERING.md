@@ -274,6 +274,13 @@ This local-source correction is separate from the historical v1.1.1 implementati
 
 ## Exercised verification
 
+### v1.4.0 — parallax occlusion and renderer-performance release
+
+The release includes the IKV-style relief mapping, shared scene-cache and Vulkan upload optimizations documented above. Windows x86_64 and Linux x86_64/ARM64 packages were built by CI from the same tagged source. Native Windows CI compiled the engine/installer and passed the update, update-install, Windows update-install and Windows uninstall groups; Windows package validation and both Linux package/AppImage jobs also passed.
+
+[v1.4.0](https://github.com/sergen213/etiyami/releases/tag/v1.4.0) was tagged from `c77f3c37ff567ec023f3b32a0035dff92bd3edda`; every job in [run 40140449028](https://github.com/sergen213/etiyami/actions/runs/40140449028), including digest-gated publication, passed. The release is latest, non-draft and non-prerelease with exactly eight assets. Fresh downloads of all eight files matched GitHub's SHA256 digests. The public Windows engine ZIP and installer passed local integrity, payload, PE/DLL closure, license and corruption checks, and both public executables printed **1.4.0** under Wine. Anonymous Windows-installer and Linux-AppImage range requests returned HTTP 206. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain unverified.
+
+
 ### v1.3.0 — native Windows and local multi-platform release
 
 The Windows x86_64 build uses the same C++20/SDL3 game, settings launcher, original assets, checkpoints, OpenGL/GLES, Vulkan/optional ray-query effects and AMD FSR 3.1.4 paths as Linux. The offline per-user installer reads the original ISO without executing disc installers, creates Start Menu and optional Desktop shortcuts, and preserves saves, settings and unrecorded files during repair/uninstall. Update ZIPs remain flat; the pinned FidelityFX MIT notice is embedded in `yami-native.exe` and also included readably in the installer.
