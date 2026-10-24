@@ -54,6 +54,7 @@ inline fs::path absolute_path(const fs::path& path) {
 }
 inline bool path_equal(const fs::path& a, const fs::path& b) {
     const auto equal = [](const fs::path& left, const fs::path& right) {
+        if (left == right) return true;
         return left.native().size() == right.native().size() &&
                CompareStringOrdinal(left.c_str(), static_cast<int>(left.native().size()),
                                     right.c_str(), static_cast<int>(right.native().size()), TRUE) == CSTR_EQUAL;
