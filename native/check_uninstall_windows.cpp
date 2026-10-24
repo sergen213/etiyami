@@ -61,6 +61,9 @@ void rejected(const fs::path& root) {
 }
 void queue_console(std::string_view value) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (!GetConsoleMode(input, &mode))
+        removal::require(AllocConsole() != 0, "Cannot allocate uninstall test console");
     removal::require(input != INVALID_HANDLE_VALUE, "Console input unavailable");
     for (const char c : value) {
         for (const bool down : {true, false}) {
