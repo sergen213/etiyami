@@ -60,10 +60,13 @@ void rejected(const fs::path& root) {
     throw std::runtime_error("Unsafe uninstall was accepted");
 }
 void queue_console(std::string_view value) {
-    const auto input = GetStdHandle(STD_INPUT_HANDLE);
+    auto input = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
-    if (!GetConsoleMode(input, &mode))
+    if (!GetConsoleMode(input, &mode)) {
+        (void)FreeConsole();
         removal::require(AllocConsole() != 0, "Cannot allocate uninstall test console");
+        input = GetStdHandle(STD_INPUT_HANDLE);
+    }
     removal::require(input != INVALID_HANDLE_VALUE, "Console input unavailable");
     for (const char c : value) {
         for (const bool down : {true, false}) {
