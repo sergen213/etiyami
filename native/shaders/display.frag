@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 layout(location=0) in vec2 vUv;
 layout(location=0) out vec4 displayOut;
 layout(set=0,binding=0) uniform sampler2D accumulatedBase;
@@ -17,6 +18,8 @@ layout(std140,set=0,binding=3) uniform Parameters {
     vec4 previousCamera;
 } p;
 layout(set=0,binding=4) uniform sampler2D rasterColor;
+layout(set=0,binding=5) uniform isampler2D accumulatedGeometry;
+layout(set=0,binding=6) uniform sampler2D sourceSun;
 vec3 toneMap(vec3 hdr) {
     hdr=max(hdr*p.post.x,vec3(0));
     // Preserve the authored palette below the neutral HDR shoulder and scale
@@ -25,13 +28,15 @@ vec3 toneMap(vec3 hdr) {
     if(peak>.8) hdr*=(1-.04/(peak-.6))/peak;
     return pow(hdr,vec3(1.0/2.2));
 }
+#include "lit_radiance.glsl"
 vec3 radianceAt(ivec2 t) {
-    return texelFetch(accumulatedBase,t,0).rgb*texelFetch(accumulatedGain,t,0).rgb+
-        texelFetch(accumulatedReflection,t,0).rgb;
+    vec3 base=texelFetch(accumulatedBase,t,0).rgb;
+    // With FSR (post.z) binding 0 already holds the upscaled composed lit radiance.
+    return p.post.z>0?base:litRadiance(base,t);
 }
 void main() {
     ivec2 size=textureSize(accumulatedBase,0),center=ivec2(gl_FragCoord.xy);
-    vec4 base=texelFetch(accumulatedBase,center,0);
+    // Both native display and bloom reconstruct the same typed illumination.
     vec3 bloom=vec3(0); float bloomWeight=0;
     for(int y=-2;y<=2 && p.post.y>0;++y) for(int x=-2;x<=2;++x) {
         ivec2 t=clamp(center+ivec2(x,y),ivec2(0),size-1);
@@ -42,8 +47,7 @@ void main() {
     }
     // The old neutral filter difference is zero for deterministic artwork.
     // Preserve the base; adding noisy radiance back defeats illumination history.
-    vec3 hdr=base.rgb*texelFetch(accumulatedGain,center,0).rgb+
-        texelFetch(accumulatedReflection,center,0).rgb;
+    vec3 hdr=radianceAt(center);
     if(bloomWeight>0) hdr+=bloom/bloomWeight*p.post.y*.22;
     vec2 sourceUV=vUv+(p.temporal.y>0?p.jitter.xy:vec2(0));
     float alpha;

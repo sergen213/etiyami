@@ -1,7 +1,7 @@
 #version 460
 layout(location=0) in vec2 vUv;
 layout(location=0) out vec4 gainOut;
-layout(location=1) out vec4 geometryOut;
+layout(location=1) out ivec4 geometryOut;
 layout(location=2) out vec4 baseOut;
 layout(location=3) out vec4 reflectionOut;
 layout(set=0,binding=0) uniform sampler2D currentGain;
@@ -20,13 +20,54 @@ layout(std140,set=0,binding=3) uniform Parameters {
     vec4 previousCamera;
 } p;
 layout(set=0,binding=4) uniform sampler2D historyGain;
-layout(set=0,binding=5) uniform sampler2D historyGeometry;
+layout(set=0,binding=5) uniform isampler2D historyGeometry;
 layout(set=0,binding=6) uniform sampler2D rasterColor;
 layout(set=0,binding=7) uniform sampler2D currentReflection;
 layout(set=0,binding=8) uniform sampler2D historyBase;
 layout(set=0,binding=9) uniform sampler2D historyReflection;
 layout(set=0,binding=10) uniform isampler2D worldMotion;
 layout(set=0,binding=11) uniform isampler2D previousNormal;
+layout(set=0,binding=12) uniform sampler2D sourceSun;
+vec2 sourcePixel(vec2 nativeCentre,ivec2 nativeSize,ivec2 sourceSize,bool taa,
+                 out vec2 nativeUV,out vec2 sampleUV) {
+    // Preserve canonical native-centre division and SOURCE acquisition.
+    // Precise intermediates prohibit different multiply/add contraction paths.
+    precise vec2 point=nativeCentre/vec2(nativeSize);
+    precise vec2 sampled=point+(taa?p.jitter.xy:vec2(0));
+    precise vec2 pixel=sampled*vec2(sourceSize);
+    nativeUV=point; sampleUV=sampled;
+    return pixel;
+}
+float completeness(float flags) { return mod(flags,4.0); }
+// History alpha is an exact normal-half code, not the raw source flags:
+// half bits = ((confidence+2)<<9) | RMS-noise-bin.
+// The 5-exponent/4-mantissa noise bin decodes at its upper half-float edge.
+// Noise bin 495 is the conservative unmeasured marker, not a known model.
+const float maximumReflectionSigma=65504.0;
+uint historyCode(float alpha) { return packHalf2x16(vec2(abs(alpha),0))&0xffffu; }
+bool historyMetadataValid(float alpha) {
+    uint code=historyCode(alpha);
+    return code>=1024u && (code>>9)<=61u && (code&511u)<=495u;
+}
+int historyConfidence(float alpha) {
+    return historyMetadataValid(alpha)?int(historyCode(alpha)>>9)-2:0;
+}
+bool historyNoiseModelKnown(float alpha) {
+    return historyMetadataValid(alpha) && (historyCode(alpha)&511u)<495u;
+}
+float historyFrameVariance(float alpha) {
+    uint bin=historyCode(alpha)&511u;
+    float sigma=bin==0u?0:unpackHalf2x16((bin<<6)|63u).x;
+    return 3*sigma*sigma;
+}
+float historyAlpha(int confidence,float frameVariance) {
+    float sigma=sqrt(max(frameVariance/3,0));
+    uint halfSigma=packHalf2x16(vec2(sigma,0))&0xffffu;
+    if(unpackHalf2x16(halfSigma).x<sigma) ++halfSigma;
+    uint bin=sigma==0?0u:max(halfSigma>>6,1u);
+    uint code=(uint(confidence+2)<<9)|min(bin,495u);
+    return unpackHalf2x16(code).x;
+}
 vec4 normalAt(ivec2 t) {
     ivec4 n=texelFetch(worldNormal,t,0);
     return vec4(vec3(n.xyz)/32767.0,float(n.w));
@@ -75,14 +116,34 @@ vec3 oldPosition(vec2 uv,float encodedDepth) {
     float z=(1/encodedDepth-h.w)/depthColumn.w;
     return (h.xyz+depthColumn.xyz*z)*encodedDepth;
 }
-bool previousNormalAt(ivec2 t,out vec3 normal) {
-    int encoded=texelFetch(previousNormal,t,0).x;
+bool decodeNormal(int encoded,out vec3 normal) {
+    normal=vec3(0);
     if(encoded==int(0x80008000u)) return false;
     vec2 oct=unpackSnorm2x16(uint(encoded));
-    normal=vec3(oct,1-abs(oct.x)-abs(oct.y));
-    if(normal.z<0) normal.xy=(1-abs(normal.yx))*
-        mix(vec2(-1),vec2(1),greaterThanEqual(normal.xy,vec2(0)));
-    normal=normalize(normal); return true;
+    vec3 decoded=vec3(oct,1-abs(oct.x)-abs(oct.y));
+    if(decoded.z<0) decoded.xy=(1-abs(decoded.yx))*
+        mix(vec2(-1),vec2(1),greaterThanEqual(decoded.xy,vec2(0)));
+    float squared=dot(decoded,decoded);
+    if(squared<=.01 || isnan(squared) || isinf(squared)) return false;
+    normal=decoded*inversesqrt(squared); return true;
+}
+int encodeNormal(vec3 normal) {
+    normal/=abs(normal.x)+abs(normal.y)+abs(normal.z);
+    vec2 oct=normal.xy;
+    if(normal.z<0) oct=(1-abs(oct.yx))*
+        mix(vec2(-1),vec2(1),greaterThanEqual(oct,vec2(0)));
+    return int(packSnorm2x16(oct));
+}
+bool physicalNormalAt(ivec2 t,vec3 authored,out vec3 normal) {
+    if(p.temporal.w<=0) {
+        normal=authored;
+        return dot(normal,normal)>.01 && !any(isnan(normal)) && !any(isinf(normal));
+    }
+    return decodeNormal(texelFetch(previousNormal,t,0).z,normal);
+}
+bool previousNormalsAt(ivec2 t,out vec3 normal,out vec3 physical) {
+    ivec4 encoded=texelFetch(previousNormal,t,0);
+    return decodeNormal(encoded.x,normal) && decodeNormal(encoded.w,physical);
 }
 vec3 coverageGain(vec3 lit,vec3 base) {
     // Encode mixed display coverage only AFTER filtering the independently
@@ -94,32 +155,38 @@ int tokenAt(ivec2 t) {
     return p.temporal.w>0?texelFetch(worldMotion,t,0).w:0;
 }
 bool worldAt(vec4 n,float z) { return n.w>=0 && z<1 && dot(n.xyz,n.xyz)>.01; }
-bool sourceAgrees(ivec2 t,vec3 at,vec3 normal,int token,float tolerance) {
+bool sourceAgrees(ivec2 t,vec3 at,vec3 normal,vec3 physical,int token,float tolerance) {
     vec4 n=normalAt(t); float z=texelFetch(worldDepth,t,0).r;
-    if(!worldAt(n,z) || tokenAt(t)!=token) return false;
-    vec3 adjacent=normalize(n.xyz);
-    if(dot(adjacent,normal)<(token>0?.8:.9)) return false;
-    vec3 delta=position((vec2(t)+.5)/p.extent.xy,centerDepthAt(t))-at;
-    // A smooth curved surface's chord lies in the symmetric tangent plane.
+    if(!worldAt(n,z) || tokenAt(t)!=token || dot(physical,physical)<=.01) return false;
+    vec3 adjacent=normalize(n.xyz),adjacentPhysical;
+    float threshold=token>0?.8:.9;
+    if(dot(adjacent,normal)<threshold ||
+       !physicalNormalAt(t,adjacent,adjacentPhysical) ||
+       dot(adjacentPhysical,physical)<threshold) return false;
+    float depth=centerDepthAt(t);
+    if((p.temporal.w>0 && depth<=0) || isnan(depth) || isinf(depth)) return false;
+    vec3 delta=position((vec2(t)+.5)/p.extent.xy,depth)-at;
+    // Facets, not authored lighting normals, define the symmetric tangent plane.
     // Keep the strict depth tolerance instead of admitting a depth-gradient
     // band that could join overlapping limbs or a revealed background.
-    return abs(dot(delta,normalize(adjacent+normal)))<=tolerance;
+    return abs(dot(delta,normalize(adjacentPhysical+physical)))<=tolerance;
 }
 bool currentSurface(ivec2 reference,vec3 referenceAt,vec2 uv,
-                    vec3 normal,int token,float tolerance,out vec3 at,
+                    vec3 normal,vec3 physical,int token,float tolerance,out vec3 at,
                     out ivec2 neighbor[2],out vec3 weights,out vec3 depths,
                     out float nativeDepth) {
     // Validate the physical surface before interpolating its projective plane.
     // Authored shading normals remain guidance, not the reconstruction plane.
     vec3 axis[2];
     depths.x=centerDepthAt(reference);
+    if(depths.x<=0 || isnan(depths.x) || isinf(depths.x)) return false;
     for(int component=0;component<2;++component) {
         bool found=false;
         for(int side=0;side<2;++side) {
             ivec2 offset=component==0?ivec2(side==0?1:-1,0):ivec2(0,side==0?1:-1);
             ivec2 t=reference+offset;
             if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,ivec2(p.extent.xy)))) continue;
-            if(!sourceAgrees(t,referenceAt,normal,token,tolerance)) continue;
+            if(!sourceAgrees(t,referenceAt,normal,physical,token,tolerance)) continue;
             float depth=centerDepthAt(t);
             if(depth<=0 || isnan(depth) || isinf(depth)) continue;
             axis[component]=position((vec2(t)+.5)/p.extent.xy,depth)-referenceAt;
@@ -143,12 +210,14 @@ bool currentSurface(ivec2 reference,vec3 referenceAt,vec2 uv,
 bool dynamicPrevious(ivec2 reference,int token,ivec2 neighbor[2],
                      vec3 weights,vec3 currentDepths,out vec2 previousUV,
                      out float previousDepth,out vec3 previousAt,out vec3 previousN,
-                     out vec3 oldCoordinate[3]) {
-    if(token<0 || !previousNormalAt(reference,previousN)) return false;
+                     out vec3 previousPhysical) {
+    if(token<0 || !previousNormalsAt(reference,previousN,previousPhysical)) return false;
+    vec3 oldCoordinate[3];
     oldCoordinate[0]=intBitsToFloat(texelFetch(worldMotion,reference,0).xyz);
     for(int component=0;component<2;++component) {
-        vec3 oldN;
-        if(!previousNormalAt(neighbor[component],oldN) || dot(oldN,previousN)<.8) return false;
+        vec3 oldN,oldPhysical;
+        if(!previousNormalsAt(neighbor[component],oldN,oldPhysical) ||
+           dot(oldN,previousN)<.8 || dot(oldPhysical,previousPhysical)<.8) return false;
         oldCoordinate[component+1]=intBitsToFloat(texelFetch(worldMotion,neighbor[component],0).xyz);
     }
     bool currentOrtho=orthographic(p.currentVP),previousOrtho=orthographic(p.previousVP);
@@ -174,97 +243,95 @@ bool dynamicPrevious(ivec2 reference,int token,ivec2 neighbor[2],
     previousAt=oldPosition(previousUV,previousDepth);
     return !any(isnan(previousAt)) && !any(isinf(previousAt));
 }
-bool currentArtistMapping(vec3 currentDepths,vec3 oldCoordinate[3],
-                          out vec4 inverseAxes,out vec3 wRatio) {
-    // Invert the relative old screen basis once for the native fragment.
-    // Screen barycentrics carry clip W in opposite directions in each pose.
-    vec2 axisX=oldCoordinate[1].xy-oldCoordinate[0].xy;
-    vec2 axisY=oldCoordinate[2].xy-oldCoordinate[0].xy;
-    float xx=dot(axisX,axisX),yy=dot(axisY,axisY);
-    float determinant=axisX.x*axisY.y-axisX.y*axisY.x;
-    if(isnan(xx) || isinf(xx) || isnan(yy) || isinf(yy) ||
-       isnan(determinant) || isinf(determinant) ||
-       determinant*determinant<=xx*yy*.000001) return false;
-    inverseAxes=vec4(axisY.y,-axisY.x,-axisX.y,axisX.x)/determinant;
-    vec3 currentW=orthographic(p.currentVP)?vec3(1):currentDepths;
-    vec3 oldW=orthographic(p.previousVP)?vec3(1):
-        vec3(oldCoordinate[0].z,oldCoordinate[1].z,oldCoordinate[2].z);
-    wRatio=currentW/oldW;
-    return !any(isnan(inverseAxes)) && !any(isinf(inverseAxes)) &&
-        !any(isnan(wRatio)) && !any(isinf(wRatio)) && all(greaterThan(wRatio,vec3(0)));
+bool historyBaseAt(ivec2 t,ivec2 size,int token,vec3 at,vec3 normal,vec3 physical,
+                   float clipW) {
+    if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,size))) return false;
+    float owner=texelFetch(historyBase,t,0).a;
+    ivec4 geometry=texelFetch(historyGeometry,t,0);
+    float depth=intBitsToFloat(geometry.w);
+    vec3 oldN,oldPhysical;
+    if(owner!=float(token) || depth<=0 || isnan(depth) || isinf(depth) ||
+       !decodeNormal(geometry.x,oldN) || !decodeNormal(geometry.y,oldPhysical)) return false;
+    float threshold=token>0?.8:.9;
+    if(dot(oldN,normal)<threshold || dot(oldPhysical,physical)<threshold) return false;
+    vec3 delta=oldPosition((vec2(t)+.5)/vec2(size),depth)-at;
+    return abs(dot(delta,normalize(oldPhysical+physical)))<=clipW*.001;
 }
-vec3 cachedRasterAt(ivec2 t,inout ivec2 coordinates[8],inout vec3 colors[8],
-                    inout int count,inout int next) {
-    for(int i=0;i<count;++i) if(all(equal(t,coordinates[i]))) return colors[i];
-    vec3 color=rasterAt(t);
-    coordinates[next]=t; colors[next]=color;
-    count=min(count+1,8); next=(next+1)%8;
-    return color;
+float legacyVisibilityAt(ivec2 t) {
+    return p.strengths.z>0?texelFetch(sourceSun,t,0).g:1;
 }
-bool currentArtistAt(ivec2 reference,ivec2 neighbor[2],vec2 oldOrigin,
-                     vec4 inverseAxes,vec3 wRatio,vec2 oldTapUV,ivec2 size,
-                     vec3 referenceAt,vec3 normal,int token,float tolerance,
-                     inout ivec2 coordinates[8],inout vec3 colors[8],
-                     inout int count,inout int next,out vec3 color) {
-    vec2 delta=oldTapUV-oldOrigin;
-    vec2 amount=vec2(dot(inverseAxes.xy,delta),dot(inverseAxes.zw,delta));
-    vec3 weights=vec3(1-amount.x-amount.y,amount)*wRatio;
-    float total=dot(weights,vec3(1));
-    if(total<=0 || isnan(total) || isinf(total) ||
-       any(isnan(weights)) || any(isinf(weights))) return false;
-    weights/=total;
-    // SOURCE pixel centres already contain the current raster jitter.
-    vec2 pixel=vec2(reference)+.5+weights.y*vec2(neighbor[0]-reference)+
-        weights.z*vec2(neighbor[1]-reference);
-    if(any(isnan(pixel)) || any(isinf(pixel)) ||
-       any(lessThan(pixel,vec2(.5))) || any(greaterThan(pixel,vec2(size)-.5))) return false;
-    ivec2 corner=ivec2(floor(pixel-.5)); vec2 phase=fract(pixel-.5);
-    color=vec3(0); float acceptedWeight=0;
+vec3 legacyGain(vec4 gain,float visibility) {
+    return vec3(gain.a*mix(1,.3+.7*visibility,p.strengths.z))+gain.rgb;
+}
+float currentSunState(float visibility) {
+    // Alpha is half-float: publish a binary state only if its two modulation
+    // endpoints remain distinct. A weak Sun must not manufacture a lit state.
+    float dark=unpackHalf2x16(packHalf2x16(vec2(mix(1,.3,p.strengths.z),0))).x;
+    if(!(dark>0 && dark<1)) return -2;
+    return visibility==1?-1:(visibility==0?-dark:-2);
+}
+float sunStateVisibility(float state) {
+    if(state>=0 && state<=1) return state;
+    float dark=unpackHalf2x16(packHalf2x16(vec2(mix(1,.3,p.strengths.z),0))).x;
+    if(!(dark>0 && dark<1)) return -1;
+    return state==-1?1:(state==-dark?0:-1);
+}
+bool sunStateChanged(float previous,float current) {
+    // Fixed/fixed keeps the original raw-visibility tolerance; negatives
+    // decode queried binary G, not a modulation factor in visibility units.
+    float previousVisibility=sunStateVisibility(previous);
+    float currentVisibility=sunStateVisibility(current);
+    return previousVisibility>=0 && currentVisibility>=0 &&
+        abs(previousVisibility-currentVisibility)>.01;
+}
+bool independentSource(ivec2 t,vec3 at,vec3 normal,vec3 physical,
+                       int token,float owner,float tolerance) {
+    return sourceAgrees(t,at,normal,physical,token,tolerance) &&
+        normalAt(t).w==owner && completeness(texelFetch(currentReflection,t,0).a)>.5;
+}
+bool fixedSunAt(vec2 nativeUV,vec3 at,vec3 normal,vec3 physical,int token,float owner,
+                float tolerance,out float visibility) {
+    visibility=1;
+    if(p.strengths.z<=0) return true;
+    // Sun samples live at unjittered source centres, unlike raster/AO/GI.
+    vec2 pixel=nativeUV*p.extent.xy-.5;
+    ivec2 corner=ivec2(floor(pixel)); vec2 phase=fract(pixel);
+    visibility=0; float total=0;
     for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
         float w=(x==0?1-phase.x:phase.x)*(y==0?1-phase.y:phase.y);
         if(w<=.00001) continue;
         ivec2 t=corner+ivec2(x,y);
-        if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,size)) ||
-           !sourceAgrees(t,referenceAt,normal,token,tolerance) ||
-           texelFetch(currentReflection,t,0).a!=1) return false;
-        // Decode each resolved display-authored tap before interpolation,
-        // exactly as for the current native artwork reconstruction.
-        color+=cachedRasterAt(t,coordinates,colors,count,next)*w; acceptedWeight+=w;
+        if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,ivec2(p.extent.xy))) ||
+           !independentSource(t,at,normal,physical,token,owner,tolerance)) return false;
+        vec4 sun=texelFetch(sourceSun,t,0);
+        if(sun.b<.5) return false;
+        visibility+=sun.r*w; total+=w;
     }
-    if(acceptedWeight<=.00001) return false;
-    color/=acceptedWeight;
-    return true;
-}
-bool historyBaseAt(ivec2 t,ivec2 size,int token,vec3 at,vec3 normal,
-                   float clipW,out vec4 base) {
-    if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,size))) return false;
-    base=texelFetch(historyBase,t,0);
-    vec4 geometry=texelFetch(historyGeometry,t,0);
-    if(base.a!=float(token) || geometry.w<=0) return false;
-    if(dot(geometry.xyz,normal)<(token>0?.8:.9)) return false;
-    vec3 delta=oldPosition((vec2(t)+.5)/vec2(size),geometry.w)-at;
-    return abs(dot(delta,normalize(geometry.xyz+normal)))<=clipW*.001;
+    if(total<=.00001) return false;
+    visibility/=total; return true;
 }
 void main() {
     ivec2 size=textureSize(currentGain,0);
     bool taa=p.temporal.y>0;
-    vec2 sampleUV=vUv+(taa?p.jitter.xy:vec2(0));
-    vec2 pixel=sampleUV*vec2(size);
+    ivec2 nativeSize=textureSize(historyBase,0);
+    precise vec2 nativeUV,sampleUV;
+    vec2 pixel=sourcePixel(gl_FragCoord.xy,nativeSize,size,taa,nativeUV,sampleUV);
     ivec2 reference=clamp(ivec2(floor(pixel)),ivec2(0),size-1);
     vec2 referenceUV=(vec2(reference)+.5)/vec2(size);
     vec4 n=normalAt(reference);
     float z=texelFetch(worldDepth,reference,0).r;
     int token=tokenAt(reference);
-    vec3 authored=rasterAt(reference),baseLo=authored,baseHi=authored;
-    ivec2 rasterCoordinates[8]; vec3 rasterColors[8];
-    rasterCoordinates[0]=reference; rasterColors[0]=authored;
-    int rasterCount=1,rasterNext=1;
+    vec3 authored=rasterAt(reference);
     bool world=worldAt(n,z),eligible=world && token>=0 && (n.w>.5 || p.temporal.w>0);
     vec3 normal=world?normalize(n.xyz):vec3(0);
+    vec3 physical;
+    bool physicalValid=world && physicalNormalAt(reference,normal,physical);
+    if(!physicalValid) physical=vec3(0);
+    eligible=eligible && physicalValid;
     float centerDepth=centerDepthAt(reference);
     vec3 referenceAt=world?position(referenceUV,centerDepth):vec3(0),at=referenceAt;
     float geometryDepth=0,tolerance=0;
-    bool surfaceValid=world;
+    bool surfaceValid=world && physicalValid;
     vec3 screenWeights,currentDepths;
     ivec2 neighbor[2];
     if(world) {
@@ -272,8 +339,9 @@ void main() {
         tolerance=abs(p.temporal.w>0?(ortho?1:centerDepth):
             (p.currentVP*vec4(referenceAt,1)).w)*.001;
         if(p.temporal.w>0)
-            surfaceValid=currentSurface(reference,referenceAt,sampleUV,normal,token,tolerance,
-                                        at,neighbor,screenWeights,currentDepths,geometryDepth);
+            surfaceValid=physicalValid &&
+                currentSurface(reference,referenceAt,sampleUV,normal,physical,token,tolerance,
+                               at,neighbor,screenWeights,currentDepths,geometryDepth);
         else {
             vec3 origin=ortho?depthPosition(sampleUV,0):p.camera.xyz;
             vec3 ray=ortho?depthPosition(sampleUV,1)-origin:depthPosition(sampleUV,centerDepth)-origin;
@@ -291,96 +359,90 @@ void main() {
     vec4 rawGain=texelFetch(currentGain,reference,0);
     vec4 rawReflectionSample=texelFetch(currentReflection,reference,0);
     vec3 rawReflection=rawReflectionSample.rgb;
-    eligible=eligible && rawReflectionSample.a>.5;
-    bool artistValid=eligible && rawReflectionSample.a<1.5;
-    vec3 currentLit=authored*rawGain.rgb,currentReflected=rawReflection;
+    eligible=eligible && completeness(rawReflectionSample.a)>.5;
+    float fixedVisibility=1;
+    bool typed=eligible && surfaceValid;
+    bool fixedSunReady=typed &&
+        fixedSunAt(nativeUV,referenceAt,normal,physical,token,n.w,tolerance,fixedVisibility);
+    float rawVisibility=legacyVisibilityAt(reference),uniformVisibility=rawVisibility;
+    bool currentSunReady=p.strengths.z<=0 || texelFetch(sourceSun,reference,0).a>=.5;
+    bool currentSunUniform=true;
+    if(typed && (taa || any(notEqual(p.extent.xy,p.extent.zw)))) {
+        ivec2 corner=ivec2(floor(pixel-.5)); vec2 phase=fract(pixel-.5);
+        currentSunReady=true;
+        uniformVisibility=-1;
+        for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+            float w=(x==0?1-phase.x:phase.x)*(y==0?1-phase.y:phase.y);
+            if(w<=.00001) continue;
+            ivec2 t=clamp(corner+ivec2(x,y),ivec2(0),size-1);
+            if(!independentSource(t,referenceAt,normal,physical,token,n.w,tolerance)) typed=false;
+            if(p.strengths.z>0) {
+                vec4 sun=texelFetch(sourceSun,t,0);
+                if(sun.a<.5) currentSunReady=false;
+                if(uniformVisibility<0) uniformVisibility=sun.g;
+                else if(sun.g!=uniformVisibility) currentSunUniform=false;
+            }
+        }
+    }
+    typed=typed && (fixedSunReady || currentSunReady);
+    vec3 rawComposedGain=legacyGain(rawGain,rawVisibility);
+    vec3 currentLit=authored*rawComposedGain,currentReflected=rawReflection;
     vec3 surfaceBase=world?authored:vec3(0),surfaceLit=world?currentLit:vec3(0);
     vec3 surfaceReflection=world?rawReflection:vec3(0);
-    float surfaceCoverage=world?1:0,visibility=rawGain.a;
-    // Reconstruct deterministic artwork separately. Its local footprint bounds
-    // are not illumination bounds and must not collapse to the current color.
+    float surfaceCoverage=world?1:0;
     if(taa || any(notEqual(p.extent.xy,p.extent.zw))) {
         ivec2 corner=ivec2(floor(pixel-.5)); vec2 phase=fract(pixel-.5);
-        authored=vec3(0); currentLit=vec3(0); currentReflected=vec3(0);
+        authored=vec3(0);
+        currentLit=vec3(0); currentReflected=vec3(0);
         surfaceBase=vec3(0); surfaceLit=vec3(0); surfaceReflection=vec3(0);
-        surfaceCoverage=0; visibility=0; float acceptedWeight=0;
+        surfaceCoverage=0;
+        float acceptedWeight=0;
         for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
             ivec2 t=clamp(corner+ivec2(x,y),ivec2(0),size-1);
             float w=(x==0?1-phase.x:phase.x)*(y==0?1-phase.y:phase.y);
             if(w<=.00001) continue;
             vec4 adjacent=normalAt(t);
-            bool belongs=world && sourceAgrees(t,referenceAt,normal,token,tolerance);
+            bool belongs=world && sourceAgrees(t,referenceAt,normal,physical,token,tolerance);
             bool sameSky=!world && z>=1 && texelFetch(worldDepth,t,0).r>=1;
             // Upscaling without TAA must not invent opposite-surface coverage.
             // The selected raster sample already contains authored MSAA
             // coverage; gate taps BEFORE mixing any base or lighting signal.
             if(!taa && !belongs && !sameSky && any(notEqual(t,reference))) continue;
             vec4 reflectionSample=texelFetch(currentReflection,t,0);
-            vec3 b=taa && token>0 && p.temporal.x>0 && p.temporal.w>0 && artistValid?
-                cachedRasterAt(t,rasterCoordinates,rasterColors,rasterCount,rasterNext):rasterAt(t);
+            vec3 b=rasterAt(t);
             vec3 r=reflectionSample.rgb;
             vec4 g=texelFetch(currentGain,t,0);
-            authored+=b*w; currentLit+=b*g.rgb*w; currentReflected+=r*w;
-            visibility+=g.a*w; acceptedWeight+=w;
-            if(!belongs || reflectionSample.a<=.5 || (adjacent.w<=.5 && p.temporal.w<=0)) eligible=false;
-            if(!belongs || reflectionSample.a<.5 || reflectionSample.a>1.5) artistValid=false;
-            if(belongs && abs(g.a-rawGain.a)<=.01) {
-                surfaceBase+=b*w; surfaceLit+=b*g.rgb*w;
+            float adjacentVisibility=legacyVisibilityAt(t);
+            vec3 composed=legacyGain(g,adjacentVisibility);
+            currentLit+=b*composed*w; currentReflected+=r*w;
+            authored+=b*w;
+            acceptedWeight+=w;
+            if(!belongs || completeness(reflectionSample.a)<=.5 ||
+               (adjacent.w<=.5 && p.temporal.w<=0)) eligible=false;
+            if(belongs && (typed || abs(adjacentVisibility-rawVisibility)<=.01)) {
+                surfaceBase+=b*w; surfaceLit+=b*composed*w;
                 surfaceReflection+=r*w; surfaceCoverage+=w;
             }
         }
         if(acceptedWeight>.00001) {
-            authored/=acceptedWeight; currentLit/=acceptedWeight; currentReflected/=acceptedWeight;
+            authored/=acceptedWeight;
+            currentLit/=acceptedWeight; currentReflected/=acceptedWeight;
             surfaceBase/=acceptedWeight; surfaceLit/=acceptedWeight; surfaceReflection/=acceptedWeight;
-            surfaceCoverage/=acceptedWeight; visibility/=acceptedWeight;
+            surfaceCoverage/=acceptedWeight;
         } else {
-            authored=rasterAt(reference); currentLit=authored*rawGain.rgb; currentReflected=rawReflection;
+            authored=rasterAt(reference);
+            currentLit=authored*rawComposedGain; currentReflected=rawReflection;
             surfaceBase=world?authored:vec3(0); surfaceLit=world?currentLit:vec3(0);
-            surfaceReflection=world?rawReflection:vec3(0); surfaceCoverage=world?1:0; visibility=rawGain.a;
+            surfaceReflection=world?rawReflection:vec3(0); surfaceCoverage=world?1:0;
         }
     }
-    vec3 currentBase=authored;
-    gainOut=vec4(coverageGain(currentLit,currentBase),0);
-    artistValid=artistValid && eligible;
-    reflectionOut=vec4(currentReflected,artistValid?1:0);
-    baseOut=vec4(authored,-1); geometryOut=vec4(0);
-    if(!world) return;
-    // Mixed visibility is composited for display below, not a selected-surface
-    // lighting signal: carrying it as such would composite its shadow twice.
-    // Artwork history stays independent of this lighting-only restriction.
-    bool lightingHistoryEligible=eligible && surfaceCoverage>=.99999;
-    vec3 gainSum=vec3(0),reflectionSum=vec3(0);
-    float weight=0;
-    for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
-        ivec2 t=reference+ivec2(x,y);
-        if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,size))) continue;
-        if(!sourceAgrees(t,referenceAt,normal,token,tolerance)) continue;
-        if(taa && abs(x)<=1 && abs(y)<=1) {
-            baseLo=min(baseLo,rasterAt(t)); baseHi=max(baseHi,rasterAt(t));
-        }
-        vec4 g=texelFetch(currentGain,t,0);
-        // Hard visibility never diffuses across a blocker boundary; artwork
-        // history remains independent of this lighting-only gate.
-        if(abs(g.a-rawGain.a)>.01) continue;
-        float similarity=dot(normal,normalize(normalAt(t).xyz));
-        vec2 offset=vec2(t)+.5-pixel;
-        float w=exp(-dot(offset,offset)*.45)*pow(max(similarity,0),8);
-        vec3 r=texelFetch(currentReflection,t,0).rgb;
-        gainSum+=g.rgb*w; reflectionSum+=r*w; weight+=w;
-    }
-    vec3 gain=weight>.00001?gainSum/weight:rawGain.rgb;
-    vec3 reflected=weight>.00001?reflectionSum/weight:rawReflection;
-    // Physical signal bounds retain Monte Carlo history even if this frame's
-    // entire local ray kernel misses. Local extrema alone freeze actor noise.
-    float minimumGain=mix(1,0,p.strengths.x)*mix(1,.3,p.strengths.z);
-    vec3 previousAt=at,previousN=normal;
+    vec3 previousAt=at,previousN=normal,previousPhysical=physical;
     vec2 oldUV=vec2(0); float oldDepth=0,oldClipW=0;
-    vec3 oldCoordinate[3];
     bool correspondence=false;
     if(p.temporal.x>0 && eligible && surfaceValid) {
         if(p.temporal.w>0) {
             correspondence=dynamicPrevious(reference,token,neighbor,screenWeights,currentDepths,
-                                           oldUV,oldDepth,previousAt,previousN,oldCoordinate);
+                                           oldUV,oldDepth,previousAt,previousN,previousPhysical);
             oldClipW=orthographic(p.previousVP)?1:oldDepth;
         } else if(token==0) {
             vec4 clip=p.previousVP*vec4(previousAt,1);
@@ -388,74 +450,155 @@ void main() {
             oldUV=clip.xy/clip.w*.5+.5; oldClipW=clip.w;
         }
     }
+    vec3 currentBase=authored;
+    typed=typed && eligible && surfaceCoverage>=.99999;
+    float sunState=fixedSunReady?fixedVisibility:
+        (currentSunReady && currentSunUniform?currentSunState(uniformVisibility):-2);
+    gainOut=vec4(coverageGain(currentLit,currentBase),0);
+    reflectionOut=vec4(currentReflected,historyAlpha(0,0));
+    baseOut=vec4(authored,-1);
+    geometryOut=ivec4(0,0,floatBitsToInt(-1.0),0);
+    if(!world) return;
+    // Only a complete current physical owner carries independent stochastic
+    // history. Sun stays current: fixed-grid visibility when available, else
+    // display reconstructs queried source visibility with raster covariance.
+    bool lightingHistoryEligible=typed;
+    vec3 gainSum=vec3(0),reflectionSum=vec3(0),reflectionSquares=vec3(0);
+    float weight=0,weightSquares=0,aoSum=0;
+    for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x) {
+        ivec2 t=reference+ivec2(x,y);
+        if(any(lessThan(t,ivec2(0))) || any(greaterThanEqual(t,size))) continue;
+        if(!sourceAgrees(t,referenceAt,normal,physical,token,tolerance)) continue;
+        vec4 g=texelFetch(currentGain,t,0);
+        // Unsafe legacy composition still respects hard visibility boundaries.
+        // Independent AO/GI/reflection never partition samples by current Sun.
+        if(!typed && abs(legacyVisibilityAt(t)-rawVisibility)>.01) continue;
+        if(typed && !independentSource(t,referenceAt,normal,physical,token,n.w,tolerance)) continue;
+        float similarity=dot(normal,normalize(normalAt(t).xyz));
+        vec2 offset=vec2(t)+.5-pixel;
+        float w=exp(-dot(offset,offset)*.45)*pow(max(similarity,0),8);
+        vec3 r=texelFetch(currentReflection,t,0).rgb;
+        gainSum+=(typed?g.rgb:legacyGain(g,legacyVisibilityAt(t)))*w;
+        aoSum+=g.a*w; reflectionSum+=r*w; weight+=w;
+        reflectionSquares+=r*r*w; weightSquares+=w*w;
+    }
+    vec3 gain=weight>.00001?gainSum/weight:(typed?rawGain.rgb:rawComposedGain);
+    float ao=weight>.00001?aoSum/weight:rawGain.a;
+    vec3 reflected=weight>.00001?reflectionSum/weight:rawReflection;
+    bool reflectionFinite=!any(isnan(reflected)) && !any(isinf(reflected)) &&
+        !any(isnan(reflectionSquares)) && !any(isinf(reflectionSquares));
+    float reflectionFrameVariance=0;
+    bool reflectionObservationValid=false,reflectionNoiseKnown=false;
+    if(reflectionFinite) {
+        float denominator=weight*weight-weightSquares;
+        // A finite multiple-ray zero is a valid observation, but cannot measure
+        // population noise. Ownership validity and unknown variance differ.
+        reflectionFrameVariance=3*maximumReflectionSigma*maximumReflectionSigma;
+        reflectionObservationValid=weight>.00001 && denominator>weight*weight*.000001;
+        if(reflectionObservationValid && any(greaterThan(reflectionSum,vec3(0)))) {
+            vec3 variance=max(reflectionSquares/weight-reflected*reflected,vec3(0));
+            reflectionFrameVariance=dot(variance,vec3(1))*weightSquares/denominator;
+            reflectionNoiseKnown=!isnan(reflectionFrameVariance) && !isinf(reflectionFrameVariance);
+            reflectionObservationValid=reflectionNoiseKnown;
+        } else reflectionObservationValid=reflectionObservationValid &&
+            all(equal(reflectionSum,vec3(0)));
+    }
+    int reflectionConfidence=lightingHistoryEligible && reflectionNoiseKnown && p.strengths.y>0?1:0;
+    // Physical signal bounds retain Monte Carlo history even if this frame's
+    // entire local ray kernel misses. Local extrema alone freeze actor noise.
+    float minimumAO=mix(1,0,p.strengths.x);
     if(p.temporal.x>0 && eligible && correspondence && oldClipW>0) {
         ivec2 oldSize=textureSize(historyBase,0);
         vec2 oldPixel=oldUV*vec2(oldSize)-.5;
         ivec2 corner=ivec2(floor(oldPixel)); vec2 phase=fract(oldPixel);
         vec3 oldGain=vec3(0),oldReflection=vec3(0);
-        float lightingWeight=0;
-        bool artistEnabled=taa && artistValid && token>0 && p.temporal.w>0;
-        vec4 inverseAxes; vec3 wRatio;
-        bool artistComplete=false;
-        if(artistEnabled)
-            artistComplete=currentArtistMapping(currentDepths,oldCoordinate,inverseAxes,wRatio);
-        vec3 artistResidual=vec3(0),oldBaseLo=authored,oldBaseHi=authored;
+        float lightingWeight=0,oldAO=0,oldKnownFrameVariance=0;
+        int oldConfidence=59;
+        bool lightingComplete=lightingHistoryEligible,oldNoiseKnown=false;
         for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
             ivec2 t=corner+ivec2(x,y);
             float w=(x==0?1-phase.x:phase.x)*(y==0?1-phase.y:phase.y);
-            if(w<=.00001 || (!lightingHistoryEligible && !artistComplete)) continue;
-            vec4 b;
-            if(!historyBaseAt(t,oldSize,token,previousAt,previousN,oldClipW,b)) {
-                artistComplete=false;
+            if(w<=0 || !lightingHistoryEligible) continue;
+            bool acceptedTap=w>.00001;
+            if(!historyBaseAt(t,oldSize,token,previousAt,previousN,previousPhysical,oldClipW)) {
+                lightingComplete=false;
                 continue;
             }
-            // Both signals reuse positive taps and the same physical owner;
-            // artwork is independent of the lighting gain and shadow gates.
             vec4 oldRef=texelFetch(historyReflection,t,0);
-            if(artistComplete) {
-                vec3 counterpart;
-                if(oldRef.a!=1 ||
-                   !currentArtistAt(reference,neighbor,oldCoordinate[0].xy,inverseAxes,wRatio,
-                                    (vec2(t)+.5)/vec2(oldSize),size,referenceAt,
-                                    normal,token,tolerance,rasterCoordinates,rasterColors,
-                                    rasterCount,rasterNext,counterpart))
-                    artistComplete=false;
-                else {
-                    artistResidual+=(b.rgb-counterpart)*w;
-                    oldBaseLo=min(oldBaseLo,b.rgb); oldBaseHi=max(oldBaseHi,b.rgb);
-                }
-            }
             if(lightingHistoryEligible) {
                 vec4 g=texelFetch(historyGain,t,0);
-                if(g.a>.5 && abs(g.a-(.75+.25*visibility))<.01) {
-                    oldGain+=g.rgb*w; oldReflection+=oldRef.rgb*w;
-                    lightingWeight+=w;
+                float storedAO=intBitsToFloat(texelFetch(historyGeometry,t,0).z);
+                // A known current hard-Sun transition rejects stochastic
+                // history only; unknown Sun never disables a physical owner.
+                if(acceptedTap && p.strengths.z>0 && sunStateChanged(g.a,sunState)) {
+                    lightingComplete=false;
+                    continue;
                 }
+                if(storedAO>=0 && !isnan(storedAO) && !isinf(storedAO)) {
+                    if(acceptedTap) {
+                        oldGain+=g.rgb*w; oldAO+=storedAO*w; oldReflection+=oldRef.rgb*w;
+                        lightingWeight+=w;
+                    }
+                    if(historyMetadataValid(oldRef.a) &&
+                       !any(isnan(oldRef.rgb)) && !any(isinf(oldRef.rgb))) {
+                        if(acceptedTap) {
+                            oldConfidence=min(oldConfidence,historyConfidence(oldRef.a));
+                            if(historyNoiseModelKnown(oldRef.a)) {
+                                oldKnownFrameVariance=max(oldKnownFrameVariance,historyFrameVariance(oldRef.a));
+                                oldNoiseKnown=true;
+                            }
+                        }
+                    } else lightingComplete=false;
+                } else lightingComplete=false;
             }
-        }
-        if(artistComplete) {
-            // Carry AA error at each old native-grid physical centre, never
-            // recursively filter whole artwork or renormalize a partial owner.
-            vec3 candidate=authored+.88*artistResidual;
-            baseLo=min(baseLo,oldBaseLo); baseHi=max(baseHi,oldBaseHi);
-            authored=clamp(candidate,baseLo,baseHi);
         }
         if(lightingWeight>.00001) {
             // Indirect gain and reflections are unbounded HDR; only their
             // physical lower bounds are known. Single-frame misses must not
             // erase samples collected from valid earlier rays.
-            gain=mix(gain,max(oldGain/lightingWeight,vec3(minimumGain)),.9);
-            reflected=mix(reflected,max(oldReflection/lightingWeight,vec3(0)),.9);
+            gain=mix(gain,max(oldGain/lightingWeight,vec3(0)),.9);
+            ao=mix(ao,max(oldAO/lightingWeight,minimumAO),.9);
+            vec3 previousReflection=max(oldReflection/lightingWeight,vec3(0));
+            if(lightingComplete && reflectionObservationValid &&
+               (reflectionNoiseKnown || (oldNoiseKnown && oldKnownFrameVariance>0)) &&
+               p.strengths.y>0) {
+                // A zero MC observation borrows only positive measured prior
+                // population noise, never zero variance or an unknown maximum.
+                if(!reflectionNoiseKnown) reflectionFrameVariance=oldKnownFrameVariance;
+                float previousFrameVariance=oldNoiseKnown?oldKnownFrameVariance:reflectionFrameVariance;
+                vec3 innovation=reflected-previousReflection;
+                float noise=max(reflectionFrameVariance,previousFrameVariance)+
+                    previousFrameVariance/float(max(oldConfidence,1));
+                reflectionConfidence=1;
+                // Compare source innovation to FRAME noise, not accumulated
+                // mean noise: a legitimate local MC miss must retain history.
+                if(dot(innovation,innovation)<=9*noise) {
+                    float retained=oldConfidence>0?float(oldConfidence)/float(oldConfidence+1):.9;
+                    reflected=mix(reflected,previousReflection,retained);
+                    // A physically valid cold mean keeps exact legacy retention,
+                    // but bootstraps only one conservative effective estimate.
+                    reflectionFrameVariance=oldConfidence>0?
+                        mix(reflectionFrameVariance,previousFrameVariance,retained):
+                        max(reflectionFrameVariance,previousFrameVariance);
+                    reflectionConfidence=oldConfidence>0?min(oldConfidence+1,59):1;
+                }
+                // A real source change keeps the fresh color/count one.
+            } else {
+                reflected=mix(reflected,previousReflection,.9);
+                reflectionConfidence=0;
+            }
         }
     }
-    if(surfaceCoverage<.99999) {
+    if(!typed && surfaceCoverage<.99999) {
         // Preserve exact current sky/opposite-surface/shadow coverage. Only
         // this surface's contribution is replaced by its denoised lighting.
         gain=coverageGain(max(currentLit-surfaceLit,vec3(0))+surfaceBase*gain,currentBase);
         reflected=max(currentReflected-surfaceReflection,vec3(0))+reflected*surfaceCoverage;
     }
-    gainOut=vec4(gain,lightingHistoryEligible?.75+.25*visibility:0);
-    reflectionOut=vec4(reflected,artistValid?1:0);
+    gainOut=vec4(gain,typed?sunState:0);
+    reflectionOut=vec4(reflected,historyAlpha(reflectionConfidence,reflectionFrameVariance));
     baseOut=vec4(authored,eligible?float(token):-1);
-    geometryOut=surfaceValid?vec4(normal,geometryDepth):vec4(0);
+    geometryOut=surfaceValid?
+        ivec4(encodeNormal(normal),encodeNormal(physical),floatBitsToInt(typed?max(ao,0):-1.0),
+              floatBitsToInt(geometryDepth)):ivec4(0,0,floatBitsToInt(-1.0),0);
 }

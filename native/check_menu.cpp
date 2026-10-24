@@ -85,19 +85,13 @@ void check_graphics(Menu& menu) {
     menu.set_launcher_backend(yami::GraphicsBackend::Vulkan);
     for (const bool gameplay:{false,true}) {
         menu.set_graphics_device(gameplay,gameplay); // Launcher preview remains GL even with Vulkan selected.
-        const auto draws=menu.draw({});
-        assert(std::any_of(draws.begin(),draws.end(),[](const Draw& draw) {
-            return draw.glyph && draw.text=="OpenGL/GLES için";
-        }));
+        // Vulkan sharpening is FSR 3.1 RCAS: the basic row is active for both backends.
+        const auto sharpness=menu.settings().graphics.sharpen;
+        menu.clear_commands(); click_button(menu,sharpenPlus);
+        assert(near(menu.settings().graphics.sharpen,sharpness+.05f)); changed_graphics(menu);
+        menu.clear_commands(); click_button(menu,sharpenMinus);
+        assert(near(menu.settings().graphics.sharpen,sharpness)); changed_graphics(menu);
         const auto before=menu.settings().graphics;
-        std::ostringstream savedBefore; write_settings(savedBefore,menu.settings());
-        for (const auto button:{sharpenMinus,sharpenPlus}) {
-            menu.clear_commands(); click_button(menu,button);
-            assert(menu.settings().graphics==before);
-            assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
-        }
-        std::ostringstream savedAfter; write_settings(savedAfter,menu.settings());
-        assert(savedAfter.str()==savedBefore.str());
         menu.clear_commands(); click_button(menu,32);
         menu.clear_commands(); click_button(menu,25); // Advanced row 4 is exposure, not sharpening.
         auto exposed=before; exposed.exposure+=.05f;
@@ -105,15 +99,26 @@ void check_graphics(Menu& menu) {
         menu.clear_commands(); click_button(menu,24);
         assert(near(menu.settings().graphics.exposure,before.exposure));
         assert(menu.settings().graphics.sharpen==before.sharpen); changed_graphics(menu);
+        if (gameplay) {
+            // Advanced row 5 steps a custom scale to the adjacent FSR preset, then between presets.
+            menu.clear_commands(); click_button(menu,27);
+            assert(menu.settings().graphics.render_scale==1); changed_graphics(menu);
+            const auto draws=menu.draw({});
+            assert(std::any_of(draws.begin(),draws.end(),[](const Draw& draw) {
+                return draw.glyph && draw.text=="Native AA";
+            }));
+            for (const float scale:{1/1.5f,1/1.7f,.5f}) {
+                menu.clear_commands(); click_button(menu,26);
+                assert(menu.settings().graphics.render_scale==scale); changed_graphics(menu);
+            }
+            menu.clear_commands(); click_button(menu,26);
+            assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
+        }
         menu.clear_commands(); click_button(menu,32);
     }
     menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
     menu.set_graphics_device(false,false);
-    assert(menu.settings().graphics.sharpen==settings.graphics.sharpen);
-    const auto glDraws=menu.draw({});
-    assert(std::none_of(glDraws.begin(),glDraws.end(),[](const Draw& draw) {
-        return draw.glyph && draw.text=="OpenGL/GLES için";
-    }));
+    assert(near(menu.settings().graphics.sharpen,settings.graphics.sharpen));
     menu.clear_commands(); click_button(menu,sharpenPlus);
     assert(near(menu.settings().graphics.sharpen,.237f)); changed_graphics(menu);
     menu.clear_commands(); click_button(menu,sharpenMinus);

@@ -264,13 +264,12 @@ jobs:
           # A failed upload stays draft. Existing releases are never overwritten by this workflow.
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
-            --notes '## v1.1.1 graphics and installer improvements
+            --notes '## v1.2.0 FSR and rendering improvements
 
-          - Existing enhanced OpenGL/OpenGL ES character shadows are retained from public v1.1.0: animated, alpha-cutout actors cast into a near-gameplay directional depth map, preserving original artwork/fog compositing. Classic graphics or zero shadow strength bypasses them.
-          - Vulkan denoising preserves deterministic authored artwork separately from stochastic illumination/reflections. Dynamic pose, geometry/material changes and ordered untracked-overlay replay reject stale history; complete MSAA coverage ownership and sample-coherent geometry retain authored color averaging.
-          - Camera-relative reconstruction stabilizes large-coordinate ray positions. Four-positive-bilinear antialiasing-error transport avoids whole-texture accumulation; TAA rotates the same eight sample locations over a 64-frame epoch cycle without changing amplitude, not a guarantee of independence from arbitrary motion.
-          - Existing optional hardware ray-query shadows, reflections, ambient occlusion and global illumination are retained, alongside HDR/exposure, TAA, native-resolution HUD and render-scale upscaling. Ray tracing is optional, not full path tracing; OpenGL remains the default and launcher-preview backend.
-          - Removed Vulkan sharpening to avoid amplifying residual noise, without adding an unsharp replacement. The shared saved sharpening strength remains available only in OpenGL/OpenGL ES and is inactive under Vulkan.
+          - AMD FidelityFX SDK 1.1.4 / FSR 3.1.4 replaces the custom Vulkan artwork TAA, with Native AA, Quality, Balanced and Performance modes, HDR input, RCAS sharpening and a native-resolution HUD. FSR requires compatible Vulkan storage-image and compute-subgroup features; unsupported devices retain the non-FSR path.
+          - Optional FSR frame generation adds optical-flow interpolation with shading-change and moving-Sun-shadow handling. It is off by default and requires FSR plus a supporting GPU. Alpha-blended sprites can smear in generated frames; motion image quality and frame pacing remain subject to gameplay judgement, and no performance guarantee is claimed.
+          - Enhanced graphics interpolate character poses between the original 30 fps keyframes. Vulkan lighting, fog, ray reconstruction, moving shadows and history handling receive additional corrections; OpenGL/OpenGL ES and classic-graphics behavior are retained.
+          - Existing optional hardware ray-query shadows, reflections, ambient occlusion and indirect lighting remain available. Ray tracing is optional, not full path tracing; OpenGL remains the default and launcher-preview backend.
 
           ## Linux downloads and installation
 

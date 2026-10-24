@@ -33,6 +33,8 @@ public:
         std::uint64_t temporal_id = 0;
         bool owned = false;
         std::size_t animation = static_cast<std::size_t>(-1), frame = static_cast<std::size_t>(-1);
+        std::uint32_t elapsed = 0;
+        bool interpolated = false;
         SkinningState skin;
         ShadowBounds bounds;
         std::size_t primary_pass = static_cast<std::size_t>(-1);

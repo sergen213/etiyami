@@ -1,0 +1,81 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Frame generation's midpoint Sun selector (vulkan_effects.cpp midpoint_select, only while interpolating with RT
+// Sun). The generated frame lies halfway between the previous and this real frame, so a moving shadow belongs
+// halfway between where it was and where it is now on the same surface. For a hard shadow moving one way, every
+// point it sweeps is, at that midpoint, either still in its current state or still in its previous one, and
+// frame interpolation's game-vector path already samples both real frames at that surface point. This pass
+// tells it which (local SDK patch: midpointSelect).
+// Splat (default): each lighting texel t has this frame's Sun factor F(t) (litRadiance's Sun term) and the Sun
+// pass's current-frame UV offset r to the same shadow's previous position on the same receiver. F is splatted to
+// t + r/2 with an atomic minimum (the darker shadow wins overlaps), giving the midpoint factor.
+// -DYAMI_MIDPOINT_SELECT: select(t) = 1 - smoothstep(.02, .15, |midpoint - current factor|): 1 keeps this
+// frame's state, 0 takes the previous frame's.
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0) uniform sampler2D accumulatedGain;
+layout(set=0,binding=1) uniform isampler2D accumulatedGeometry;
+layout(set=0,binding=2) uniform sampler2D rasterColor;
+layout(std140,set=0,binding=3) uniform Parameters {
+    mat4 inverseVP, currentVP, previousVP;
+    vec4 camera, extent, jitter, strengths, post, temporal;
+    mat4 inversePreviousVP;
+    vec4 rayBasisX;
+    vec4 rayBasisY;
+    vec4 rayBasisZ;
+    vec4 previousRayBasisX;
+    vec4 previousRayBasisY;
+    vec4 previousRayBasisZ;
+    vec4 previousCamera;
+} p;
+layout(set=0,binding=4) uniform sampler2D sourceSun;
+// Sun pass second output: xy offset (current-frame UV), z valid.
+layout(set=0,binding=5) uniform sampler2D shadowOffset;
+// F(t) (1 where the Sun term is unused) and the splatted midpoint factor as float bits, cleared to 1.0 every
+// frame (positive floats order like their bits).
+#ifdef YAMI_MIDPOINT_SELECT
+layout(set=0,binding=6,r32f) uniform readonly image2D sunNow;
+layout(set=0,binding=7,r32ui) uniform readonly uimage2D sunMid;
+// R8_UNORM selector, written formatless (shaderStorageImageWriteWithoutFormat, required for FSR).
+layout(set=0,binding=9) uniform writeonly image2D midpointSelect;
+#else
+layout(set=0,binding=6,r32f) uniform writeonly image2D sunNow;
+layout(set=0,binding=7,r32ui) uniform uimage2D sunMid;
+#endif
+// Declared for lit_radiance.glsl's litRadiance, which this pass does not call.
+layout(set=0,binding=8) uniform sampler2D accumulatedReflection;
+#include "lit_radiance.glsl"
+// ponytail: shadows moving more than 64 lighting texels per frame relative to their receiver keep this frame's
+// position (splat in place); raise it if fast shadows step visibly.
+const float cap=64;
+void main() {
+    ivec2 t=ivec2(gl_GlobalInvocationID.xy),size=textureSize(accumulatedGain,0);
+    if(any(greaterThanEqual(t,size))) return;
+    float ao=intBitsToFloat(texelFetch(accumulatedGeometry,t,0).z);
+#ifdef YAMI_MIDPOINT_SELECT
+    // Where the Sun term is unused, nothing arriving there changes the texel: keep this frame's state.
+    float change=ao>=0?abs(uintBitsToFloat(imageLoad(sunMid,t).r)-imageLoad(sunNow,t).r):0;
+    imageStore(midpointSelect,t,vec4(1-smoothstep(.02,.15,change)));
+#else
+    vec4 gain=texelFetch(accumulatedGain,t,0);
+    float factor=1;
+    // litRadiance's Sun term; its per-channel modulation is reduced to luminance.
+    if(ao>=0) factor=gain.a>=0?mix(1,.3+.7*gain.a,p.strengths.z):
+        dot(currentSunModulation(t),vec3(.2126,.7152,.0722));
+    imageStore(sunNow,t,vec4(factor));
+    if(!(ao>=0) || !(factor<1)) return;
+    // The lighting grid equals the Sun pass grid while frame generation runs (FSR: both at render size).
+    vec4 offset=texelFetch(shadowOffset,t,0);
+    vec2 shift=offset.z>0?offset.xy*vec2(size)*.5:vec2(0);
+    if(!(length(shift)<=cap*.5)) shift=vec2(0);
+    // Texels containing the destination centre: exactly t for a static shadow, else up to 2x2.
+    vec2 corner=vec2(t)+shift;
+    ivec2 base=ivec2(floor(corner));
+    vec2 phase=corner-vec2(base);
+    ivec2 reach=ivec2(greaterThan(phase,vec2(1e-3)));
+    uint value=floatBitsToUint(max(factor,0));
+    for(int y=0;y<=reach.y;++y) for(int x=0;x<=reach.x;++x) {
+        ivec2 at=base+ivec2(x,y);
+        if(all(greaterThanEqual(at,ivec2(0))) && all(lessThan(at,size))) imageAtomicMin(sunMid,at,value);
+    }
+#endif
+}

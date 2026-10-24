@@ -5,7 +5,10 @@ layout(location=2) in vec3 normal;
 layout(location=3) in vec3 previousPosition;
 layout(location=4) in vec3 previousNormal;
 layout(set=0,binding=1,std140) uniform Draw {
-    mat4 modelView, projection, normalEye, normalWorld;
+    mat4 modelView, projection;
+    mat3 normalEye;
+    vec4 rasterGrid;
+    mat4 normalWorld;
     vec4 light, diffuse, color, uvTransform, worldUp, flags, alphaJitter;
     mat4 previousMVP, previousNormalWorld;
     ivec4 temporal;
@@ -17,18 +20,22 @@ layout(location=3) out vec3 vNormal;
 layout(location=4) out vec3 vWorldNormal;
 layout(location=5) out vec4 vPreviousClip;
 layout(location=6) out vec3 vPreviousNormal;
-layout(location=7) out vec2 vCurrentDepth;
+layout(location=7) out vec4 vCurrentClip;
+layout(location=8) out vec3 vPosition;
+layout(location=9) out vec3 vPreviousPosition;
 void main() {
     vec4 eye=u.modelView*vec4(position,1);
     gl_Position=u.projection*eye;
     gl_Position.xy+=u.alphaJitter.zw*gl_Position.w;
-    vCurrentDepth=gl_Position.zw;
+    vCurrentClip=gl_Position;
     vUv=uv*u.uvTransform.xy+u.uvTransform.zw;
     vEye=eye.xyz;
-    vNormal=mat3(u.normalEye)*normal;
+    vNormal=u.normalEye*normal;
     vWorldNormal=mat3(u.normalWorld)*normal;
     vPreviousClip=u.previousMVP*vec4(previousPosition,1);
     vPreviousNormal=mat3(u.previousNormalWorld)*previousNormal;
+    vPosition=position;
+    vPreviousPosition=previousPosition;
     if(u.flags.x>0.5 && u.flags.y<0.5) {
         float d=max(dot(vNormal,normalize(u.light.xyz-eye.xyz*u.light.w)),0);
         vColor=vec4(clamp(vec3(.456)+.8*u.diffuse.rgb*d,0,1),1);

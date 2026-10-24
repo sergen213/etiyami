@@ -3,6 +3,9 @@
 #include "launcher.hpp"
 #include "update.hpp"
 #include "update_install.hpp"
+#if YAMI_HAS_VULKAN
+#include "vulkan_renderer.hpp"
+#endif
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <algorithm>
@@ -50,7 +53,7 @@ struct SdlLifetime {
 };
 enum GraphicsOption { Msaa, Filtering, Occlusion, Reflections, Bloom, Sharpen,
                       EnhancedLighting, Fullscreen, Backend, RayTracing, TemporalAA,
-                      Shadows, IndirectLighting, Exposure, RenderScale, Roughness, GraphicsOptionCount };
+                      Shadows, IndirectLighting, Exposure, RenderScale, Roughness, FrameGeneration, GraphicsOptionCount };
 struct Options {
     DisplayOptions display;
     fs::path assets, saves, capture;
@@ -100,11 +103,13 @@ Options options(int argc, char** argv) {
             result.display.backend=backend=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
             result.graphicsOverrides[Backend]=true;
         }
-        else if (name == "--ray-tracing" || name == "--taa") {
+        else if (name == "--ray-tracing" || name == "--taa" || name == "--frame-generation") {
             const auto enabled=value();
             require(enabled=="on" || enabled=="off", "Graphics boolean must be on or off");
-            (name=="--taa"?result.display.temporal_aa:result.display.ray_tracing)=enabled=="on";
-            result.graphicsOverrides[name=="--taa"?TemporalAA:RayTracing]=true;
+            const auto option=name=="--taa"?TemporalAA:name=="--ray-tracing"?RayTracing:FrameGeneration;
+            (option==TemporalAA?result.display.temporal_aa:option==RayTracing?result.display.ray_tracing:
+                                result.display.frame_generation)=enabled=="on";
+            result.graphicsOverrides[option]=true;
         }
         else if (name == "--shadows") { result.display.shadows=number<float>(value(),name); result.graphicsOverrides[Shadows]=true; }
         else if (name == "--gi") { result.display.indirect_lighting=number<float>(value(),name); result.graphicsOverrides[IndirectLighting]=true; }
@@ -129,6 +134,9 @@ Options options(int argc, char** argv) {
             else if (name == "--no-updates") result.checkUpdates = false;
             else if (name == "--version") result.printVersion = true;
             else if (name == "--smoke") result.smoke = true;
+#if YAMI_HAS_VULKAN
+            else if (name == "--gpu-timings") VulkanRenderer::gpu_timings = true;
+#endif
             else if (name == "--help" || name == "-h") result.help = true;
             else throw std::runtime_error(std::string("Unknown option: ")+std::string(name));
         }
@@ -158,6 +166,7 @@ GraphicsSettings merge_graphics(const Options& options, GraphicsSettings saved) 
     if (flags[Exposure]) saved.exposure=requested.exposure;
     if (flags[RenderScale]) saved.render_scale=requested.render_scale;
     if (flags[Roughness]) saved.roughness=requested.roughness;
+    if (flags[FrameGeneration]) saved.frame_generation=requested.frame_generation;
     return saved;
 }
 
@@ -456,9 +465,7 @@ struct Platform {
     }
 };
 
-void capture_ppm(Renderer& renderer, const fs::path& destination) {
-    const auto pixels = renderer.capture_rgba();
-    const int width = renderer.pixel_width(), height = renderer.pixel_height();
+void write_ppm(const std::vector<std::uint8_t>& pixels, int width, int height, const fs::path& destination) {
     require(pixels.size() == static_cast<std::size_t>(width)*height*4, "Invalid captured surface");
     std::ofstream output(destination, std::ios::binary | std::ios::trunc);
     require(bool(output), "Cannot open capture destination");
@@ -473,6 +480,17 @@ void capture_ppm(Renderer& renderer, const fs::path& destination) {
         output.write(row.data(), static_cast<std::streamsize>(row.size()));
     }
     require(bool(output), "Cannot write captured surface");
+}
+// With Vulkan frame generation, also FILE-fg-generated.ppm: the frame interpolated and shown before this one.
+void capture_ppm(Renderer& renderer, const fs::path& destination) {
+    const auto pixels = renderer.capture_rgba();
+    const int width = renderer.pixel_width(), height = renderer.pixel_height();
+    write_ppm(pixels, width, height, destination);
+    const auto generated = renderer.capture_generated_rgba();
+    if (generated.empty()) return;
+    auto name = destination.stem();
+    name += "-fg-generated"; name += destination.extension();
+    write_ppm(generated, width, height, fs::path(destination).replace_filename(name));
 }
 
 void push(SDL_Event event) { sdl_check(SDL_PushEvent(&event)); }
@@ -633,8 +651,7 @@ void smoke(Platform& host, const Options& opts) {
               << " ao=" << activeGraphics.ambient_occlusion
               << " reflections=" << activeGraphics.reflections
               << " bloom=" << activeGraphics.bloom
-              << (activeGraphics.backend==GraphicsBackend::Vulkan ? " sharpen_gl_preference=" : " sharpen=")
-              << activeGraphics.sharpen
+              << " sharpen=" << activeGraphics.sharpen
               << " api=" << host.renderer.backend_name()
               << " rtAvailable=" << host.renderer.ray_tracing_available()
               << " rtEnabled=" << (host.renderer.ray_tracing_available() &&
@@ -656,10 +673,12 @@ int main(int argc, char** argv) {
                          "  --fullscreen --samples N --anisotropy N --gles --skip-intro\n"
                          "  --level 1..4 --smoke (bypasses launcher) --capture FILE.ppm --classic-graphics\n"
                          "  --ao 0..1 --reflections 0..1 --bloom 0..1\n"
-                         "  --sharpen 0..1 (OpenGL/GLES only; preference retained in Vulkan)\n"
-                         "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off\n"
+                         "  --sharpen 0..1 (Vulkan: FSR 3.1 sharpening)\n"
+                         "  --renderer opengl|vulkan --ray-tracing on|off --taa on|off (Vulkan: FSR 3.1)\n"
                          "  --shadows 0..1 --gi 0..1 --exposure .1..4\n"
-                         "  --render-scale .5..1 --roughness .05..1 (Vulkan only)\n"
+                         "  --render-scale .5..1 (FSR presets 1, .667, .588, .5) --roughness .05..1 (Vulkan only)\n"
+                         "  --frame-generation on|off (Vulkan: FSR 3.1.4 frame generation; needs --taa on)\n"
+                         "  --gpu-timings (Vulkan: per-stage GPU timestamps, summary on stderr at exit)\n"
 #ifdef YAMI_LAUNCHER_DEFAULT
                          "  Default: launcher; assets discovered beside executable or in game/.\n";
 #else

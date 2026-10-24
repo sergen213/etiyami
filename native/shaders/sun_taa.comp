@@ -1,0 +1,83 @@
+#version 460
+// Temporal filter of the FSR input's per-sample Sun visibility (vulkan_effects.cpp render, under FSR with RT Sun).
+// Each render sample traces its own jittered Sun ray, so a shadow edge is a freshly aliased step every frame,
+// and FSR's reactive mask (which must stop moving shadows from trailing) drops FSR's own history there. This
+// accumulates the visibility alone before FSR. It has no texture, so the 3x3 neighbourhood clamp stays as
+// narrow as the edge itself and the history cannot trail.
+layout(local_size_x=8,local_size_y=8) in;
+// Sun pass output: .g this sample's own visibility where .a > .5 (traced); otherwise the surface has none.
+layout(set=0,binding=0) uniform sampler2D sourceSun;
+layout(set=0,binding=1) uniform sampler2D worldDepth;
+// Raster metadata: previous UV, previous clip W, temporal token (< 0: not a ray-geometry surface).
+layout(set=0,binding=2) uniform isampler2D worldMotion;
+layout(std140,set=0,binding=3) uniform Parameters {
+    mat4 inverseVP, currentVP, previousVP;
+    vec4 camera, extent, jitter, strengths, post, temporal;
+    mat4 inversePreviousVP;
+    vec4 rayBasisX;
+    vec4 rayBasisY;
+    vec4 rayBasisZ;
+    vec4 previousRayBasisX;
+    vec4 previousRayBasisY;
+    vec4 previousRayBasisZ;
+    vec4 previousCamera;
+} p;
+// Filtered visibility and clip W (linear view depth) of every render sample: the previous frame's, and this
+// frame's output, which fsr_inputs.frag reads.
+layout(set=0,binding=4) uniform sampler2D previousSun;
+layout(set=0,binding=5,rg32f) uniform writeonly image2D filteredSun;
+// previousJitter: the previous frame's jitter (UV); history > 0: previousSun was written by the previous frame.
+layout(push_constant) uniform History { vec2 previousJitter; float history; } u;
+float visibility(ivec2 t,out bool valid) {
+    vec4 sun=texelFetch(sourceSun,t,0);
+    valid=texelFetch(worldMotion,t,0).w>=0;
+    return sun.a>.5?sun.g:1;
+}
+void main() {
+    ivec2 t=ivec2(gl_GlobalInvocationID.xy),size=ivec2(p.extent.xy);
+    if(any(greaterThanEqual(t,size))) return;
+    bool valid;
+    float v=visibility(t,valid),result=v;
+    // UNJITTERED position of this sample and its clip W, reconstructed as fsr_inputs.frag does.
+    vec2 current=(vec2(t)+.5)/p.extent.xy-p.jitter.xy;
+    vec4 h=p.inverseVP*vec4(current*2-1,texelFetch(worldDepth,t,0).r,1);
+    float depth=1/h.w;
+    // p.jitter.z: FSR keeps its history this frame (no reset, resize or settings change).
+    if(valid && u.history>0 && p.jitter.z>0) {
+        // Previous position: raster metadata, else camera reprojection (fsr_inputs.frag's motion).
+        vec3 previous=intBitsToFloat(texelFetch(worldMotion,t,0).xyz);
+        vec2 previousUV=vec2(-1);
+        float previousDepth=0;
+        if(previous.z>0 && !isinf(previous.z) && !any(isnan(previous.xy)) && !any(isinf(previous.xy))) {
+            previousUV=previous.xy; previousDepth=previous.z;
+        } else {
+            vec4 clip=p.previousVP*vec4(h.xyz/h.w,1);
+            if(clip.w>0) { previousUV=clip.xy/clip.w*.5+.5; previousDepth=clip.w; }
+        }
+        if(previousDepth>0 && !isinf(previousDepth) && all(greaterThanEqual(previousUV,vec2(0))) &&
+           all(lessThanEqual(previousUV,vec2(1)))) {
+            // History texels hold the previous frame's jittered samples: texel c sits at unjittered
+            // (c + .5)/size - previousJitter. Bilinear over the same surface only (clip W within 2%).
+            vec2 pixel=(previousUV+u.previousJitter)*p.extent.xy-.5,phase=fract(pixel);
+            ivec2 base=ivec2(floor(pixel));
+            float sum=0,weight=0;
+            for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+                float w=(x==0?1-phase.x:phase.x)*(y==0?1-phase.y:phase.y);
+                vec2 old=texelFetch(previousSun,clamp(base+ivec2(x,y),ivec2(0),size-1),0).rg;
+                if(w>0 && abs(old.y-previousDepth)<=previousDepth*.02) { sum+=old.x*w; weight+=w; }
+            }
+            if(weight>0) {
+                // This frame's 3x3 range of visibility on ray-geometry surfaces.
+                float low=v,high=v;
+                for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+                    bool neighbour;
+                    float n=visibility(clamp(t+ivec2(x,y),ivec2(0),size-1),neighbour);
+                    if(neighbour) { low=min(low,n); high=max(high,n); }
+                }
+                // ponytail: constant blend weight; make it adaptive if slow shadows still shimmer or fast ones lag.
+                result=mix(clamp(sum/weight,low,high),v,.15);
+            }
+        }
+    }
+    imageStore(filteredSun,t,vec4(result,depth,0,0));
+}

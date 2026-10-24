@@ -9,6 +9,8 @@ public:
     ~VulkanRenderer() noexcept;
     VulkanRenderer(const VulkanRenderer&) = delete;
     VulkanRenderer& operator=(const VulkanRenderer&) = delete;
+    // --gpu-timings: set before construction to record per-stage GPU timestamps and print a summary to stderr on exit.
+    static inline bool gpu_timings = false;
     SDL_Window* window() const noexcept;
     int pixel_width() const noexcept;
     int pixel_height() const noexcept;
@@ -32,6 +34,7 @@ public:
     void draw(unsigned, unsigned, const Material&, const MaterialPass&, const DrawState&);
     void present();
     std::vector<std::uint8_t> capture_rgba();
+    std::vector<std::uint8_t> capture_generated_rgba();
     void reset_history();
     const char* backend_name() const noexcept;
     bool ray_tracing_available() const noexcept;

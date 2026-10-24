@@ -46,6 +46,11 @@ REMOVER_LOADERS = {"x86_64": "ld-linux-x86-64.so.2", "arm64": "ld-linux-aarch64.
 REMOVER_SYSTEM = re.compile(
     r"(?:lib(?:c|m|dl|pthread|rt|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z")
 UNINSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "native" / "uninstall.sh"
+# Statically linked into the engine executables (Vulkan FSR 3.1.4 upscaler); the MIT terms travel with
+# the installer like the archiver's notices. The update ZIP stays executables/libraries only.
+FIDELITYFX_LICENSE = UNINSTALL_SCRIPT.parent.parent / "third_party" / "fidelityfx-sdk" / "LICENSE.txt"
+FIDELITYFX_LICENSE_PATH = "licenses/fidelityfx/LICENSE.txt"
+FIDELITYFX_LICENSE_SHA256 = "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
 
 
 def provenance(arch: str) -> bytes:
@@ -125,7 +130,7 @@ def permitted(name: str) -> bool:
             return allowed_path(leaf, "linux") and not LINUX_SYSTEM.fullmatch(leaf)
         return (leaf in RUNTIME_PROGRAMS or
                 (leaf.startswith("lib") and allowed_path(leaf, "linux") and not LINUX_SYSTEM.fullmatch(leaf)))
-    return name == PROVENANCE_PATH or name in {f"licenses/7zip/{name}" for name in LICENSES}
+    return name in (PROVENANCE_PATH, FIDELITYFX_LICENSE_PATH) or name in {f"licenses/7zip/{name}" for name in LICENSES}
 
 
 def check_elf(path: Path, arch: str, siblings: set[str], glibc_max: str | None) -> set[str]:
@@ -208,7 +213,7 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
                     if target.stat().st_size != member.size:
                         fail(f"Truncated installer member: {name}")
             required = {"engine/" + name for name in BINARIES}
-            required |= {"runtime/" + name for name in RUNTIME_PROGRAMS} | {PROVENANCE_PATH}
+            required |= {"runtime/" + name for name in RUNTIME_PROGRAMS} | {PROVENANCE_PATH, FIDELITYFX_LICENSE_PATH}
             required |= {"licenses/7zip/" + name for name in LICENSES}
             if not {name.casefold() for name in required}.issubset(names):
                 fail("Installer lacks engine/setup/remover/script/archiver/license files")
@@ -219,6 +224,8 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
             for name, expected in LICENSES.items():
                 if digest(root / "licenses/7zip" / name) != expected:
                     fail(f"Unverified 7-Zip license: {name}")
+            if digest(root / FIDELITYFX_LICENSE_PATH) != FIDELITYFX_LICENSE_SHA256:
+                fail("Unverified FidelityFX license")
             if expected_engine is not None:
                 actual_engine = {path.name: digest(path) for path in (root / "engine").iterdir()}
                 if actual_engine != expected_engine:
@@ -281,6 +288,10 @@ def package(args) -> None:
         shutil.copyfile(script, root / "runtime/uninstall.sh")
         (root / "runtime/uninstall.sh").chmod(0o755)
         unpack_sevenzip(args.sevenzip_archive, root, args.arch)
+        if digest(FIDELITYFX_LICENSE) != FIDELITYFX_LICENSE_SHA256:
+            fail("Vendored FidelityFX license differs from the pinned notice")
+        (root / FIDELITYFX_LICENSE_PATH).parent.mkdir(parents=True)
+        shutil.copyfile(FIDELITYFX_LICENSE, root / FIDELITYFX_LICENSE_PATH)
         (root / "engine").mkdir()
         with zipfile.ZipFile(args.engine_archive) as engine:
             for member in engine.infolist():

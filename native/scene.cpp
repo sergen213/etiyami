@@ -184,6 +184,7 @@ bool SceneCache::video_texture(std::string_view name, std::uint32_t time, bool l
 }
 void SceneCache::prepare(ModelInstance& instance, std::size_t animation, std::uint32_t elapsed) {
     const auto& model = instance.resource();
+    const bool interpolate = renderer_.graphics_settings().enhanced; // smooth 30fps poses (enhanced only)
     for (std::size_t n = 0; n < model.parts.size(); ++n) {
         auto& part = instance.parts[n];
         const auto& source = model.parts[n];
@@ -192,11 +193,13 @@ void SceneCache::prepare(ModelInstance& instance, std::size_t animation, std::ui
                 throw std::runtime_error("Entity animation ordinal exceeds model mesh animation list");
             const auto& clip = source.mesh->animations[animation];
             const auto frame = animation_frame(clip, elapsed);
-            if (animation != part.animation || frame != part.frame) {
-                skin_mesh(source.mesh->mesh, clip, elapsed, model.model.scale, model.model.offset, part.skin);
+            if (animation != part.animation || frame != part.frame || interpolate != part.interpolated ||
+                (interpolate && elapsed != part.elapsed)) {
+                skin_mesh(source.mesh->mesh, clip, elapsed, model.model.scale, model.model.offset, part.skin, interpolate);
                 renderer_.update_mesh(part.gpu, part.skin.vertices);
                 part.bounds = indexed_bounds(part.skin.vertices, source.mesh->mesh.indices);
                 part.animation = animation; part.frame = frame;
+                part.elapsed = elapsed; part.interpolated = interpolate;
             }
         }
     }

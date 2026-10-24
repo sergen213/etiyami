@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-set(YAMI_RELEASE_VERSION "1.1.1" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
+set(YAMI_RELEASE_VERSION "1.2.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
 if(NOT YAMI_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "YAMI_RELEASE_VERSION must be MAJOR.MINOR.PATCH")
 endif()
@@ -32,13 +32,16 @@ if(YAMI_ENABLE_VULKAN)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     set(YAMI_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/native/shaders")
     set(YAMI_SHADER_NAMES vulkan_raster.vert vulkan_raster.frag vulkan_final.vert
-        vulkan_final.frag effects.frag temporal.frag display.frag)
-    set(YAMI_SHADER_SOURCES)
+        vulkan_final.frag effects.frag temporal.frag display.frag fsr_inputs.frag
+        effects_rt.comp effects_resolve.vert effects_resolve.frag sun_midpoint.comp sun_taa.comp)
+    # display.frag, fsr_inputs.frag and sun_midpoint.comp #include the shared lit-radiance composition;
+    # effects.frag, effects_rt.comp and effects_resolve.vert the shared RT sampling code.
+    set(YAMI_SHADER_SOURCES "${YAMI_SHADER_DIR}/lit_radiance.glsl" "${YAMI_SHADER_DIR}/effects_rt.glsl")
     foreach(shader IN LISTS YAMI_SHADER_NAMES)
         list(APPEND YAMI_SHADER_SOURCES "${YAMI_SHADER_DIR}/${shader}")
     endforeach()
     # Variants share source; RT-off SPIR-V contains no ray-query operations.
-    list(APPEND YAMI_SHADER_NAMES effects_rt.frag effects_ms.frag effects_rt_ms.frag vulkan_raster_ui.frag vulkan_raster_mask.frag)
+    list(APPEND YAMI_SHADER_NAMES effects_rt.frag effects_ms.frag effects_rt_ms.frag effects_sun.frag effects_classify.frag effects_classify_ms.frag vulkan_raster_ui.frag sun_midpoint_select.comp)
     set(YAMI_SPIRV_FILES)
     foreach(shader IN LISTS YAMI_SHADER_NAMES)
         set(spirv "${CMAKE_CURRENT_BINARY_DIR}/spirv/${shader}.spv")
@@ -53,12 +56,21 @@ if(YAMI_ENABLE_VULKAN)
         elseif(shader STREQUAL "effects_rt_ms.frag")
             set(shader_source "${YAMI_SHADER_DIR}/effects.frag")
             set(shader_defines -DYAMI_RAY_QUERY=1 -DYAMI_MSAA_METADATA=1)
+        elseif(shader STREQUAL "effects_sun.frag")
+            set(shader_source "${YAMI_SHADER_DIR}/effects.frag")
+            set(shader_defines -DYAMI_RAY_QUERY=1 -DYAMI_SUN_PASS=1)
+        elseif(shader STREQUAL "effects_classify.frag")
+            set(shader_source "${YAMI_SHADER_DIR}/effects.frag")
+            set(shader_defines -DYAMI_RAY_QUERY=1 -DYAMI_SOURCE_CLASSIFY=1)
+        elseif(shader STREQUAL "effects_classify_ms.frag")
+            set(shader_source "${YAMI_SHADER_DIR}/effects.frag")
+            set(shader_defines -DYAMI_RAY_QUERY=1 -DYAMI_SOURCE_CLASSIFY=1 -DYAMI_MSAA_METADATA=1)
+        elseif(shader STREQUAL "sun_midpoint_select.comp")
+            set(shader_source "${YAMI_SHADER_DIR}/sun_midpoint.comp")
+            set(shader_defines -DYAMI_MIDPOINT_SELECT=1)
         elseif(shader STREQUAL "vulkan_raster_ui.frag")
             set(shader_source "${YAMI_SHADER_DIR}/vulkan_raster.frag")
             set(shader_defines -DYAMI_INTERFACE_ONLY=1)
-        elseif(shader STREQUAL "vulkan_raster_mask.frag")
-            set(shader_source "${YAMI_SHADER_DIR}/vulkan_raster.frag")
-            set(shader_defines -DYAMI_ARTIST_MASK=1)
         endif()
         if(YAMI_GLSLANG_VALIDATOR)
             set(shader_command "${YAMI_GLSLANG_VALIDATOR}" -V --target-env vulkan1.3
@@ -80,6 +92,87 @@ if(YAMI_ENABLE_VULKAN)
             --output "${YAMI_SHADER_HEADER}" ${YAMI_SPIRV_FILES}
         DEPENDS ${YAMI_SPIRV_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_spirv.py"
         VERBATIM)
+
+    # AMD FidelityFX SDK v1.1.4 (third_party/fidelityfx-sdk): FSR 3.1.4 upscaler, frame interpolation and optical flow
+    # with embedded GLSL permutations. Only what yami_ffx_clamp_capabilities lets the SDK request is built (FP32, wave32,
+    # render-resolution unjittered motion vectors, standard depth); tools/embed_fsr_shaders.py checks the set.
+    set(YAMI_FFX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/fidelityfx-sdk")
+    set(YAMI_FFX_GPU "${YAMI_FFX_DIR}/include/FidelityFX/gpu")
+    file(GLOB_RECURSE YAMI_FFX_GPU_HEADERS "${YAMI_FFX_GPU}/*.h")
+    set(YAMI_FFX_SPIRV_FILES)
+    # Compiles src/backends/vk/shaders/<effect>/<stem>.glsl to ffx/<stem><suffix>.spv with the extra defines.
+    function(yami_ffx_shader effect stem suffix)
+        set(source "${YAMI_FFX_DIR}/src/backends/vk/shaders/${effect}/${stem}.glsl")
+        set(spirv "${CMAKE_CURRENT_BINARY_DIR}/ffx/${stem}${suffix}.spv")
+        set(defines -DFFX_GPU=1 -DFFX_GLSL=1 -DFFX_HALF=0 ${ARGN} "-I${YAMI_FFX_GPU}" "-I${YAMI_FFX_GPU}/${effect}")
+        if(YAMI_GLSLANG_VALIDATOR)
+            set(command "${YAMI_GLSLANG_VALIDATOR}" -V --target-env vulkan1.2 -S comp -Os ${defines} -o "${spirv}" "${source}")
+        else()
+            set(command "${YAMI_GLSLC}" --target-env=vulkan1.2 -fshader-stage=compute -Os ${defines} -o "${spirv}" "${source}")
+        endif()
+        add_custom_command(OUTPUT "${spirv}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/ffx"
+            COMMAND ${command}
+            DEPENDS "${source}" ${YAMI_FFX_GPU_HEADERS}
+            VERBATIM)
+        set(YAMI_FFX_SPIRV_FILES ${YAMI_FFX_SPIRV_FILES} "${spirv}" PARENT_SCOPE)
+    endfunction()
+    # Base defines from the SDK's CMakeCompile{FSR3Upscaler,Frameinterpolation,Opticalflow}Shaders.txt.
+    set(YAMI_FSR3_DEFINES
+        -DFFX_FSR3UPSCALER_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0 -DFFX_FSR3UPSCALER_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FSR3UPSCALER_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1 -DFFX_FSR3UPSCALER_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FSR3UPSCALER_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2 -DFFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE=0
+        -DFFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS=1 -DFFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS=0
+        -DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH=0)
+    foreach(pass IN ITEMS prepare_inputs luma_pyramid shading_change_pyramid shading_change prepare_reactivity
+            luma_instability accumulate rcas debug_view autogen_reactive)
+        foreach(sharpen 0 1)
+            foreach(hdr 0 1)
+                yami_ffx_shader(fsr3upscaler ffx_fsr3upscaler_${pass}_pass .h${hdr}s${sharpen} ${YAMI_FSR3_DEFINES}
+                    -DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=${hdr} -DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING=${sharpen})
+            endforeach()
+        endforeach()
+    endforeach()
+    foreach(pass IN ITEMS reconstruct_and_dilate_pass setup_pass reconstruct_previous_depth_pass game_motion_vector_field_pass
+            optical_flow_vector_field_pass disocclusion_mask_pass pass compute_inpainting_pyramid_pass inpainting_pass
+            compute_game_vector_field_inpainting_pyramid_pass debug_view_pass)
+        yami_ffx_shader(frameinterpolation ffx_frameinterpolation_${pass} ""
+            -DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0 -DFFX_FRAMEINTERPOLATION_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0
+            -DFFX_FRAMEINTERPOLATION_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1 -DFFX_FRAMEINTERPOLATION_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
+            -DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2 -DFFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS=1
+            -DFFX_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS=0 -DFFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH=0)
+    endforeach()
+    foreach(pass IN ITEMS prepare_luma_pass compute_luminance_pyramid_pass generate_scd_histogram_pass compute_scd_divergence_pass
+            compute_optical_flow_advanced_pass_v5 filter_optical_flow_pass_v5 scale_optical_flow_advanced_pass_v5)
+        yami_ffx_shader(opticalflow ffx_opticalflow_${pass} "" -DFFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT=0)
+    endforeach()
+    set(YAMI_FSR_BLOBS "${CMAKE_CURRENT_BINARY_DIR}/ffx/ffx_shader_blobs.cpp")
+    add_custom_command(OUTPUT "${YAMI_FSR_BLOBS}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_fsr_shaders.py"
+            --output "${YAMI_FSR_BLOBS}" ${YAMI_FFX_SPIRV_FILES}
+        DEPENDS ${YAMI_FFX_SPIRV_FILES} "${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_fsr_shaders.py"
+        VERBATIM)
+    set(YAMI_FFX_UPSTREAM_SOURCES
+        "${YAMI_FFX_DIR}/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp"
+        "${YAMI_FFX_DIR}/src/components/frameinterpolation/ffx_frameinterpolation.cpp"
+        "${YAMI_FFX_DIR}/src/components/opticalflow/ffx_opticalflow.cpp" "${YAMI_FFX_DIR}/src/backends/vk/ffx_vk.cpp"
+        "${YAMI_FFX_DIR}/src/shared/ffx_assert.cpp" "${YAMI_FFX_DIR}/src/shared/ffx_message.cpp"
+        "${YAMI_FFX_DIR}/src/shared/ffx_breadcrumbs_list.cpp" "${YAMI_FFX_DIR}/src/shared/ffx_object_management.cpp")
+    add_library(yami_fsr3 STATIC ${YAMI_FFX_UPSTREAM_SOURCES} "${YAMI_FFX_DIR}/yami/yami_ffx_vulkan.cpp" "${YAMI_FSR_BLOBS}")
+    target_compile_features(yami_fsr3 PRIVATE cxx_std_17)
+    # Vulkan is resolved at runtime (yami_ffx_load_vulkan); the library must not reference vk* symbols.
+    target_compile_definitions(yami_fsr3 PRIVATE VK_NO_PROTOTYPES)
+    # yami/ first: it shadows FidelityFX/host/ffx_types.h to size the opaque context for 4-byte wchar_t.
+    target_include_directories(yami_fsr3 SYSTEM PUBLIC "${YAMI_FFX_DIR}/yami" "${YAMI_FFX_DIR}/include" "${YAMI_VULKAN_INCLUDE_DIR}")
+    target_include_directories(yami_fsr3 PRIVATE
+        "${YAMI_FFX_DIR}/src/shared" "${YAMI_FFX_DIR}/src/backends/shared" "${YAMI_FFX_DIR}/src/components")
+    if(MSVC)
+        target_compile_options(yami_fsr3 PRIVATE "/FI${YAMI_FFX_DIR}/yami/ffx_compat.h")
+        set_source_files_properties(${YAMI_FFX_UPSTREAM_SOURCES} PROPERTIES COMPILE_OPTIONS /w)
+    else()
+        target_compile_options(yami_fsr3 PRIVATE "-include${YAMI_FFX_DIR}/yami/ffx_compat.h")
+        set_source_files_properties(${YAMI_FFX_UPSTREAM_SOURCES} PROPERTIES COMPILE_OPTIONS -w)
+    endif()
 endif()
 
 add_library(yami_engine STATIC
@@ -95,6 +188,7 @@ target_compile_definitions(yami_engine PUBLIC YAMI_HAS_VULKAN=$<BOOL:${YAMI_ENAB
 if(YAMI_ENABLE_VULKAN)
     target_sources(yami_engine PRIVATE native/vulkan_renderer.cpp native/vulkan_effects.cpp "${YAMI_SHADER_HEADER}")
     target_include_directories(yami_engine PRIVATE "${YAMI_VULKAN_INCLUDE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+    target_link_libraries(yami_engine PRIVATE yami_fsr3)
 endif()
 if(WIN32)
     target_link_libraries(yami_engine PUBLIC advapi32)

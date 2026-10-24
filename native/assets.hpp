@@ -115,10 +115,11 @@ std::filesystem::path animation_path(const std::filesystem::path& mesh_file, con
 struct SkinningState { std::vector<Mat4> local, final; std::vector<Vertex> vertices; };
 void prepare_skinning(const Mesh&, SkinningState&);
 std::size_t animation_frame(const Animation&, std::uint32_t elapsed_milliseconds);
-// Exact original 30fps discrete frames, no interpolation. Parent composition is
+// Exact original 30fps discrete frames unless `interpolate` (enhanced graphics
+// only) blends toward the next keyframe within the clip. Parent composition is
 // child * parent * grandparent, NOT the usual parent * child convention.
 // Pass Model.scale/offset verbatim; conversion is already included here.
 // Caller applies original upright instance matrix and the half-height Y shift.
 void skin_mesh(const Mesh&, const Animation&, std::uint32_t elapsed_milliseconds,
-               float model_scale, Vec3 model_offset, SkinningState&);
+               float model_scale, Vec3 model_offset, SkinningState&, bool interpolate = false);
 } // namespace yami

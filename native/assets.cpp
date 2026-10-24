@@ -451,16 +451,18 @@ void prepare_skinning(const Mesh& mesh, SkinningState& state) {
     state.local.resize(mesh.bones.size()); state.final.resize(mesh.bones.size());
     state.vertices = mesh.vertices;
 }
-std::size_t animation_frame(const Animation& animation, std::uint32_t elapsed) {
-    if (!animation.frame_count) throw std::runtime_error("cannot sample empty animation");
+static double animation_frames(std::uint32_t elapsed) {
     // 004015c4 FILD integer, FMUL .001f, FMUL 30f, FSTP double: no
     // intermediate binary32 store. CRT 0044adc8 selects x87 53-bit precision.
     const double seconds = static_cast<double>(elapsed) * static_cast<double>(0.0010000000474974513f);
-    const double frames = seconds * 30.0;
-    return static_cast<std::size_t>(std::floor(frames)) % animation.frame_count;
+    return seconds * 30.0;
+}
+std::size_t animation_frame(const Animation& animation, std::uint32_t elapsed) {
+    if (!animation.frame_count) throw std::runtime_error("cannot sample empty animation");
+    return static_cast<std::size_t>(std::floor(animation_frames(elapsed))) % animation.frame_count;
 }
 void skin_mesh(const Mesh& mesh, const Animation& animation, std::uint32_t elapsed,
-               float scale, Vec3 offset, SkinningState& state) {
+               float scale, Vec3 offset, SkinningState& state, bool interpolate) {
     if (state.vertices.size() != mesh.vertices.size() || state.local.size() != mesh.bones.size() ||
         state.final.size() != mesh.bones.size() || mesh.vertex_bones.size() != mesh.vertices.size())
         throw std::runtime_error("skinning buffers must be prepared for this mesh");
@@ -472,9 +474,24 @@ void skin_mesh(const Mesh& mesh, const Animation& animation, std::uint32_t elaps
     if (!count || count > std::numeric_limits<std::size_t>::max() / animation.frame_count ||
         animation.frames.size() != count * animation.frame_count)
         throw std::runtime_error("invalid animation frame storage");
+    // Enhanced only: blend toward the next keyframe, never across the loop
+    // seam (the original shows the last frame until it wraps).
+    const double frames = animation_frames(elapsed);
+    const float t = interpolate ? static_cast<float>(frames - std::floor(frames)) : 0.0f;
+    const bool blend = t > 0 && frame + 1 < animation.frame_count;
     for (std::size_t i = 0; i < mesh.bones.size() && i < count; ++i) {
         const auto& pose = animation.frames[frame * count + i];
-        state.local[i] = pose_matrix(pose.rotation, pose.translation);
+        if (!blend) { state.local[i] = pose_matrix(pose.rotation, pose.translation); continue; }
+        const auto& next = animation.frames[(frame + 1) * count + i];
+        const auto& a = pose.rotation;
+        auto b = next.rotation;
+        if (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w < 0) b = {-b.x, -b.y, -b.z, -b.w};
+        Quaternion q{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t};
+        const float length = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (length > 0) q = {q.x / length, q.y / length, q.z / length, q.w / length};
+        const auto& p = pose.translation;
+        const auto& n = next.translation;
+        state.local[i] = pose_matrix(q, {p.x + (n.x - p.x) * t, p.y + (n.y - p.y) * t, p.z + (n.z - p.z) * t});
     }
     static const Mat4 conversion = [] {
         auto result = identity_matrix();

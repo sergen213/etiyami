@@ -1059,4 +1059,10 @@ std::vector<std::uint8_t> Renderer::capture_rgba() {
     gl_check("Frame capture");
     return pixels;
 }
+std::vector<std::uint8_t> Renderer::capture_generated_rgba() {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) return vulkan_->capture_generated_rgba();
+#endif
+    return {};
+}
 } // namespace yami

@@ -1,0 +1,35 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#define YAMI_RAY_QUERY 1
+#define YAMI_PENDING 1
+#include "effects_rt.glsl"
+// Samples 1..15 and outputs of the history-unsafe pixels effects.frag queued after sample 0.
+layout(local_size_x=YAMI_PENDING_GROUP) in;
+void finish(uint slot) {
+    Pending s=pending[slot];
+    // effects.frag's expressions. stable stays a stored per-pixel value (always false here) so
+    // sampleCount and the divisors compile to the same operations as in effects.frag.
+    bool diffuse=p.strengths.x>0 || p.strengths.w>0;
+    bool reflectionActive=p.strengths.y>0;
+    bool roughReflection=reflectionActive && p.post.w!=0;
+    bool stochastic=diffuse || roughReflection;
+    bool stable=s.stable!=0u;
+    int sampleCount=(diffuse||reflectionActive)?(stable?1:16):0;
+    int reflectionCount=p.post.w==0?1:sampleCount;
+    float aoSum=s.gain.w; vec3 indirectSum=s.gain.xyz,reflected=s.reflection.xyz;
+    for(int i=1;i<sampleCount;++i)
+        effectSample(i,s.pixel,stochastic,stable,diffuse,reflectionActive,reflectionCount,
+                     s.origin.xyz,s.physical.xyz,s.mirror.xyz,vec2(s.physical.w,s.mirror.w),aoSum,indirectSum,reflected);
+    vec4 gain,reflection;
+    rtOutputs(diffuse,reflectionActive,sampleCount,reflectionCount,aoSum,indirectSum,reflected,s.origin.w,s.reflection.w,
+              gain,reflection);
+    pending[slot].gain=gain; pending[slot].reflection=reflection;
+}
+// At most YAMI_PENDING_GROUPS workgroups are dispatched (the guaranteed limit); larger queues stride.
+void main() {
+    for(uint slot=gl_GlobalInvocationID.x;slot<queue.count;slot+=YAMI_PENDING_GROUP*YAMI_PENDING_GROUPS) finish(slot);
+}

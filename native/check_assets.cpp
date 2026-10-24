@@ -65,6 +65,22 @@ void check_math_and_skinning() {
     yami::skin_mesh(mesh, animation, 34, 1, {}, state);
     check(near(state.vertices[0].position.x, -2), "animation must sample frame-major ordinals");
     check(state.vertices.data() == allocation, "skinning allocated a new vertex buffer");
+    // Enhanced pose interpolation: exact at keyframes, halfway between two
+    // keyframes, and never blended across the clip's loop seam.
+    const auto sample = [&](std::uint32_t elapsed, bool interpolate) {
+        yami::skin_mesh(mesh, animation, elapsed, 1, {}, state, interpolate);
+        return state.vertices[0].position;
+    };
+    const auto same = [](yami::Vec3 a, yami::Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+    check(same(sample(0, true), sample(0, false)), "interpolation must keep exact keyframe pose at t=0");
+    // 4.5 frames: halfway from frame 0 (parent x=1, child 90deg) to frame 1 (parent x=2, child 0deg):
+    // parent x=1.5 and child nlerp 45deg, so vertex (1.5cos45, 1.5sin45) then Y-pi conversion.
+    const auto mid = sample(150, true);
+    const auto keyframe = sample(150, false);
+    check(near(mid.x, -1.5f * std::sqrt(0.5f)) && near(mid.y, 1.5f * std::sqrt(0.5f)) &&
+          near(keyframe.x, 0) && near(keyframe.y, 1), "interpolation midpoint between keyframes");
+    check(same(sample(50, true), sample(50, false)) && near(sample(50, true).x, -2),
+          "last frame must not blend toward frame 0");
 }
 std::string lower_path(std::string value) {
     std::replace(value.begin(), value.end(), '\\', '/');

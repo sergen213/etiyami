@@ -75,6 +75,8 @@ public:
               const DrawState&);
     void present();
     std::vector<std::uint8_t> capture_rgba(); // Finished frame, bottom-left; call before present().
+    // Vulkan frame generation: the generated frame shown before the captured one, same layout; empty if none.
+    std::vector<std::uint8_t> capture_generated_rgba();
 private:
 #if YAMI_HAS_VULKAN
     std::unique_ptr<VulkanRenderer> vulkan_;

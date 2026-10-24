@@ -33,13 +33,13 @@ constexpr std::array<std::string_view,8> graphicsLabels{{
     "Işıklandırma","Ortam gölgesi","Yansımalar","Parlama","Keskinlik",
     "Yumuşatma","Doku filtresi","Tam ekran"}};
 constexpr std::array<std::string_view,8> vulkanLabels{{
-    "Işın izleme","Zamansal AA","Gölge gücü","Dolaylı ışık",
-    "Pozlama","Çizim ölçeği","Pürüzlülük","Grafik desteği"}};
-constexpr std::array<std::string_view,16> graphicsFields{{
+    "Işın izleme","FSR 3.1","Gölge gücü","Dolaylı ışık",
+    "Pozlama","Çizim ölçeği","Pürüzlülük","Kare üretimi"}};
+constexpr std::array<std::string_view,17> graphicsFields{{
     "grafik_gelistirilmis","grafik_ao","grafik_yansima","grafik_parlama",
     "grafik_keskinlik","grafik_msaa","grafik_anizotropi","grafik_tamekran",
     "grafik_backend","grafik_rt","grafik_taa","grafik_golge","grafik_gi",
-    "grafik_pozlama","grafik_olcek","grafik_puruz"}};
+    "grafik_pozlama","grafik_olcek","grafik_puruz","grafik_kare_uretimi"}};
 constexpr auto sampleChoices=[] {
     std::array<int,30> choices{};
     int value=4; // 2 samples is rounded up to 4 by some drivers.
@@ -50,10 +50,13 @@ constexpr auto sampleChoices=[] {
     return choices;
 }();
 constexpr std::array<int,5> filterChoices{{1,2,4,8,16}};
-template<class T>
-T quality_step(T current, T cap, std::span<const int> choices, bool increase) {
+// FSR 3.1 quality presets as render scales: Performans 1/2, Dengeli 1/1.7, Kalite 1/1.5, Native AA 1.
+constexpr std::array<float,4> renderScales{{.5f,1/1.7f,1/1.5f,1}};
+constexpr std::array<std::string_view,4> renderScaleNames{{"Performans","Dengeli","Kalite","Native AA"}};
+template<class T,class C,std::size_t N>
+T quality_step(T current, T cap, const std::array<C,N>& choices, bool increase) {
     T result=current;
-    for (int choice:choices) {
+    for (C choice:choices) {
         const T value=T(choice);
         if (value>cap) break;
         if (increase && value>current) return value;
@@ -266,10 +269,10 @@ Settings read_settings(std::istream& input) {
         if (index==8) {
             require(value=="opengl" || value=="vulkan", "Invalid native graphics backend");
             graphics.backend=value=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
-        } else if (index==0 || index==7 || index==9 || index==10) {
+        } else if (index==0 || index==7 || index==9 || index==10 || index==16) {
             require(value=="0" || value=="1", "Invalid native graphics boolean");
             bool* target=index==0?&graphics.enhanced:index==7?&graphics.fullscreen:
-                         index==9?&graphics.ray_tracing:&graphics.temporal_aa;
+                         index==9?&graphics.ray_tracing:index==10?&graphics.temporal_aa:&graphics.frame_generation;
             *target=value=="1";
         } else if (index==5) {
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),graphics.samples);
@@ -336,6 +339,7 @@ void write_settings(std::ostream& output, const Settings& settings) {
     append(graphicsFields[13],graphics.exposure);
     append(graphicsFields[14],graphics.render_scale);
     append(graphicsFields[15],graphics.roughness);
+    append(graphicsFields[16],graphics.frame_generation?1:0);
     require(bool(output), "Cannot write original settings stream");
 }
 void save_settings(const std::filesystem::path& path, const Settings& settings) {
@@ -659,15 +663,16 @@ void Menu::dispatch(const Context& context, bool released) {
             if (advancedGraphics_) {
                 if (row==0) graphics_.ray_tracing=increase;
                 else if (row==1) graphics_.temporal_aa=increase;
+                else if (row==7) graphics_.frame_generation=increase;
+                else if (row==5) graphics_.render_scale=quality_step(graphics_.render_scale,1.f,renderScales,increase);
                 else if (row<7) {
                     float* value=row==2?&graphics_.shadows:row==3?&graphics_.indirect_lighting:
-                                 row==4?&graphics_.exposure:row==5?&graphics_.render_scale:&graphics_.roughness;
-                    const float minimum=row==4?.1f:row==5?.5f:row==6?.05f:0.f;
+                                 row==4?&graphics_.exposure:&graphics_.roughness;
+                    const float minimum=row==4?.1f:row==6?.05f:0.f;
                     *value=std::clamp(*value+(increase?.05f:-.05f),minimum,row==4?4.f:1.f);
                 }
                 continue;
             }
-            if (row==4 && graphics_.backend==GraphicsBackend::Vulkan) continue;
             if (row==0) graphics_.enhanced=increase;
             else if (row==7) graphics_.fullscreen=increase;
             else if (row==5)
@@ -904,12 +909,15 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
             const auto& label=page.labels[row];
             std::string_view value;
             if (advancedGraphics_) {
-                if (row==7) value=!activeVulkan_?
-                    (graphics_.backend==GraphicsBackend::Vulkan?"Oyunda kontrol":"GL: karakter gölgesi"):
-                    rayTracingAvailable_?"RT destekli GPU":"RT yok: raster";
+                // Row 7 was the read-only device row; its RT capability now shows on row 0.
+                if (row==7 && !activeVulkan_ && graphics_.backend==GraphicsBackend::Vulkan) value="Oyunda kontrol";
                 else if (!activeVulkan_ && row!=2) value="Vulkan için";
-                else if (row==0) value=graphics_.ray_tracing?"Açık":"Kapalı";
+                else if (row==0) value=!rayTracingAvailable_?"RT yok: raster":graphics_.ray_tracing?"Açık":"Kapalı";
+                else if (row==7) value=graphics_.frame_generation?"Açık":"Kapalı";
                 else if (row==1) value=graphics_.temporal_aa?"Açık":"Kapalı";
+                else if (const auto preset=std::find(renderScales.begin(),renderScales.end(),graphics_.render_scale);
+                         row==5 && preset!=renderScales.end())
+                    value=renderScaleNames[std::size_t(preset-renderScales.begin())];
                 else {
                     const float setting=row==2?graphics_.shadows:row==3?graphics_.indirect_lighting:
                                         row==4?graphics_.exposure:row==5?graphics_.render_scale:graphics_.roughness;
@@ -921,7 +929,6 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
                 }
             } else if (row==0) value=graphics_.enhanced?"Geliştirilmiş":"Klasik";
             else if (row==7) value=graphics_.fullscreen?"Açık":"Kapalı";
-            else if (row==4 && graphics_.backend==GraphicsBackend::Vulkan) value="OpenGL/GLES için";
             else {
                 auto& buffer=graphicsText_[row];
                 char* end=buffer.data()+buffer.size();

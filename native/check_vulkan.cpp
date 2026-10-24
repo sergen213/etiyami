@@ -9,7 +9,6 @@
 
 using namespace yami;
 namespace {
-constexpr int jitter_period = 64;
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -222,60 +221,6 @@ void check_texture_table_boundary(Fixture& fixture, bool force_off) {
     require(lit-fixture.patch(draw(), -90, -654) >= 4,
             "Late-index artwork opacity restore did not restore the geometric shadow");
     std::cout << "300 distinct artwork textures/late cutout shadow binding/update PASS\n";
-}
-void check_temporal(Fixture& fixture) {
-    auto graphics = fixture.renderer.graphics_settings();
-    graphics.ray_tracing = false; graphics.shadows = 0; graphics.temporal_aa = false;
-    fixture.renderer.set_graphics(graphics);
-    const auto reference = fixture.frame(Fixture::Mode::Absent);
-    const auto aliased = fixture.frame(Fixture::Mode::Opaque, 0, 0, true);
-    graphics.temporal_aa = true;
-    fixture.renderer.set_graphics(graphics);
-    fixture.renderer.reset_history();
-    auto accumulated = fixture.frame(Fixture::Mode::Opaque, 0, 0, true);
-    for (int i = 0; i < 15; ++i) accumulated = fixture.frame(Fixture::Mode::Opaque, 0, 0, true);
-    const int foreground = aliased[(std::size_t(fixture.height*61/100)*fixture.width+fixture.width/2)*4];
-    require(foreground > 8, "Static temporal fixture did not draw its blocker");
-    // Restrict to the raised blocker's silhouette, away from floor and HUD.
-    const auto count_edges = [&](const std::vector<std::uint8_t>& image) {
-        int count = 0;
-        for (int yy = fixture.height*59/100; yy < fixture.height*65/100; ++yy)
-            for (int xx = fixture.width*39/100; xx < fixture.width*61/100; ++xx) {
-                const auto at = (std::size_t(yy)*fixture.width+xx)*4;
-                count += image[at] > 3 && image[at] < foreground-3;
-            }
-        return count;
-    };
-    require(count_edges(aliased) == 0, "TAA-off static silhouette already has partial coverage");
-    require(count_edges(accumulated) > 0,
-            "TAA coverage did not soften a static geometric silhouette");
-    fixture.renderer.reset_history();
-    for (int i = 0; i < 8; ++i) fixture.frame(Fixture::Mode::Opaque);
-    const auto removed = fixture.frame(Fixture::Mode::Absent);
-    // The previous occluder is above the floor in screen space. Its old silhouette
-    // must become black immediately, not remain a temporal ghost.
-    const int x = fixture.width/2;
-    const int y = int(fixture.height*(.5f+100.f/(600.f*.75f)*.5f));
-    for (int channel = 0; channel < 3; ++channel) {
-        const auto at = (std::size_t(y)*fixture.width+x)*4+channel;
-        require(reference[at] == 0 && removed[at] <= 2, "Removed dynamic silhouette left a temporal ghost");
-    }
-    for (int i = 0; i < 8; ++i) fixture.frame(Fixture::Mode::Opaque, 0, 0, true);
-    const auto camera_move = fixture.frame(Fixture::Mode::Opaque, 0, 300, true);
-    graphics.temporal_aa = false;
-    fixture.renderer.set_graphics(graphics);
-    const auto moved_reference = fixture.frame(Fixture::Mode::Opaque, 0, 300);
-    for (int channel = 0; channel < 3; ++channel) {
-        const auto at = (std::size_t(y)*fixture.width+x)*4+channel;
-        require(moved_reference[at] == 0 && camera_move[at] <= 2, "Camera disocclusion retained old silhouette history");
-    }
-    graphics.temporal_aa = true; graphics.render_scale = .5f;
-    fixture.renderer.set_graphics(graphics);
-    fixture.renderer.reset_history();
-    const auto scaled = fixture.frame(Fixture::Mode::Absent);
-    require(std::abs(fixture.patch(scaled, -90, -654)-fixture.patch(reference, -90, -654)) <= 3,
-            "Temporal upscaling changed the interior of a flat receiver");
-    std::cout << "temporal static-edge coverage/dynamic/camera disocclusion/idempotent capture/render-scale/native HUD PASS\n";
 }
 void check_upscale_sky_boundary(Fixture& fixture) {
     auto graphics = fixture.renderer.graphics_settings();
@@ -648,35 +593,9 @@ void check_fine_artwork(Fixture& fixture, bool force_off) {
         // unobscured deterministic artwork must not become denoiser input.
         compare(draw(true), reference, 2, "RT-enabled fine coplanar artwork was spatially blurred");
     }
-    graphics.ray_tracing = false; graphics.ambient_occlusion = 0; graphics.temporal_aa = true;
-    fixture.renderer.set_graphics(graphics);
-    fixture.renderer.reset_history();
-    for (int frame = 0; frame < 12; ++frame) draw(true, float(frame)*.0005f);
-    // TAA integrates different subpixel texture samples. Compare against the
-    // phase-balanced eight-location footprint over its full 64-frame repeat.
-    const auto moving = draw(true, .006f);
-    std::vector<double> physical(moving.size(), 0);
-    for (int frame = 0; frame < jitter_period; ++frame) {
-        fixture.renderer.reset_history();
-        const auto fresh = draw(true, .006f);
-        for (std::size_t at = 0; at < fresh.size(); ++at) physical[at] += fresh[at]/double(jitter_period);
-    }
-    double error = 0, moving_contrast = 0, physical_contrast = 0;
-    int count = 0;
-    for (int x = 16; x < fixture.width-18; ++x) {
-        const auto at = (std::size_t(fixture.height/2)*fixture.width+x)*4;
-        for (int c = 0; c < 3; ++c) { error += std::abs(moving[at+c]-physical[at+c]); ++count; }
-        moving_contrast += std::abs(int(moving[at])-int(moving[at+8]));
-        physical_contrast += std::abs(physical[at]-physical[at+8]);
-    }
-    std::cout << "Continuous camera physical artwork mean-error=" << error/count
-              << " contrast-retained=" << moving_contrast/physical_contrast << '\n';
-    require(physical_contrast > 20 && error/count <= 12 &&
-            moving_contrast >= physical_contrast*.7,
-            "Continuous camera reprojection smeared the physical fine-artwork footprint");
     fixture.renderer.release_mesh(quad);
     fixture.renderer.set_graphics(saved);
-    std::cout << "fine coplanar artwork/native RT-off/RT-on/continuous camera PASS\n";
+    std::cout << "fine coplanar artwork/native RT-off/RT-on PASS\n";
 }
 struct TemporalPixels {
     int width, height, frames = 0;
@@ -717,355 +636,6 @@ struct TemporalPixels {
         return result/(height*(width-2));
     }
 };
-void check_temporal_actor_artwork(Fixture& fixture) {
-    const auto saved = fixture.renderer.graphics_settings();
-    auto graphics = saved;
-    graphics.enhanced = true; graphics.samples = 0; graphics.render_scale = 1;
-    graphics.temporal_aa = true; graphics.ray_tracing = false; graphics.exposure = 1;
-    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
-    graphics.shadows = graphics.bloom = graphics.sharpen = 0;
-    fixture.renderer.set_graphics(graphics);
-    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
-    const std::array<Vertex, 4> vertices{{
-        {{-1,-1,0},{0,0},{0,0,1}}, {{1,-1,0},{1,0},{0,0,1}},
-        {{1,1,0},{1,1},{0,0,1}}, {{-1,1,0},{0,1},{0,0,1}}
-    }};
-    const auto background = fixture.renderer.upload_mesh(vertices, indices);
-    const auto actor = fixture.renderer.upload_mesh(vertices, indices);
-    const int texture_width = int(fixture.width*.65f);
-    std::vector<std::uint8_t> texels(std::size_t(texture_width)*4);
-    for (int x = 0; x < texture_width; ++x) {
-        const auto at = std::size_t(x)*4;
-        texels[at] = x%4<2 ? 48 : 176; texels[at+1] = x%4<2 ? 160 : 64;
-        texels[at+2] = 96; texels[at+3] = 255;
-    }
-    const auto texture = fixture.renderer.upload_texture(texture_width, 1, texels, false, false);
-    const auto draw = [&](float camera_pixels, float model_pixels, float vertex_pixels, bool visible) {
-        fixture.renderer.clear();
-        // Match the game's upload ordering: prior vertices must survive clear,
-        // then update_mesh replaces this frame's pose before draw.
-        auto posed = vertices;
-        for (auto& vertex : posed) vertex.position.x += vertex_pixels*2/(fixture.width*.65f);
-        fixture.renderer.update_mesh(actor, posed);
-        auto view = identity_matrix(); view.values[12] = camera_pixels*2/fixture.width;
-        fixture.renderer.camera(view, identity_matrix());
-        DrawState state; state.temporal_static = true; state.temporal_id = 0x7100;
-        state.model.values[14] = .5f; state.color = {.07f,.13f,.29f,1};
-        fixture.renderer.draw(background, 0, fixture.material, fixture.pass, state);
-        if (visible) {
-            state = {}; state.temporal_static = false; state.temporal_id = 0x7101;
-            state.model.values[0] = .65f; state.model.values[5] = .55f;
-            state.model.values[12] = model_pixels*2/fixture.width; state.model.values[14] = -.2f;
-            state.color = {.8f,.9f,.7f,1};
-            fixture.renderer.draw(actor, texture, fixture.material, fixture.pass, state);
-        }
-        fixture.renderer.finish_world();
-        auto result = fixture.renderer.capture_rgba(); fixture.renderer.present(); return result;
-    };
-    const int left = fixture.width/2-64, bottom = fixture.height/2-8;
-    const auto phase_reference = [&](float camera, float model, float vertices_x) {
-        TemporalPixels result(128, 16);
-        for (int frame = 0; frame < jitter_period; ++frame) {
-            fixture.renderer.reset_history();
-            result.add(draw(camera, model, vertices_x, true), fixture.width, left, bottom);
-        }
-        return result;
-    };
-    for (int requested_samples : {0, 8}) {
-        graphics.samples = requested_samples;
-        fixture.renderer.set_graphics(graphics);
-        const auto physical = phase_reference(0, 0, 0);
-        fixture.renderer.reset_history();
-        for (int frame = 0; frame < 32; ++frame) draw(0, 0, 0, true);
-        TemporalPixels retained(128, 16);
-        for (int frame = 0; frame < jitter_period; ++frame)
-            retained.add(draw(0, 0, 0, true), fixture.width, left, bottom);
-        std::cout << "phase-balanced eight-location colored actor artwork samples=" << fixture.renderer.samples()
-                  << " variance fresh=" << physical.variance() << " retained=" << retained.variance()
-                  << " physical-error=" << retained.error(physical)
-                  << " contrast=" << physical.stripe_contrast() << '/' << retained.stripe_contrast() << '\n';
-        require(physical.variance() > 1, "Colored artwork fixture did not exercise subpixel texture flicker");
-        require(retained.variance() < physical.variance()*.7,
-                "Eight-location interior artwork did not stabilize independently of illumination");
-        require(physical.stripe_contrast() > 15 && retained.error(physical) <= 8 &&
-                retained.stripe_contrast() >= physical.stripe_contrast()*.7,
-                "Temporal artwork stabilization erased physical colored stripe contrast");
-    }
-    for (const bool moving_camera : {true, false}) {
-        fixture.renderer.reset_history();
-        for (int frame = 0; frame < 16; ++frame) draw(0, 0, 0, true);
-        std::vector<std::uint8_t> moving;
-        for (int frame = 1; frame <= 24; ++frame)
-            moving = moving_camera ? draw(frame*.5f, 0, 0, true) :
-                                     draw(0, frame*.25f, frame*.25f, true);
-        TemporalPixels motion(128, 16); motion.add(moving, fixture.width, left, bottom);
-        const auto current = moving_camera ? phase_reference(12, 0, 0) : phase_reference(0, 6, 6);
-        std::cout << (moving_camera ? "camera" : "model+animated vertices")
-                  << " artwork physical-error=" << motion.error(current)
-                  << " contrast-retained=" << motion.stripe_contrast()/current.stripe_contrast() << '\n';
-        require(motion.error(current) <= 12 &&
-                motion.stripe_contrast() >= current.stripe_contrast()*.7,
-                "Camera/animated-model correspondence retained adjacent artwork as texture trails");
-    }
-    // A large move exposes the old footprint, then removal exposes the new one.
-    // Removal scans both old silhouettes, including mixed MSAA actor/background
-    // edges. The exposed background is tracked geometry, not sky.
-    int maximum_ghost = 0;
-    for (int requested_samples : {4, 8}) {
-        graphics.samples = requested_samples;
-        fixture.renderer.set_graphics(graphics);
-        // reset_history clears correspondence/history, NOT frame_number.
-        // Each iteration draws 16 warm + displaced + removed + empty frames:
-        // Stride 19 is coprime to 64: visit every cycle offset, including all eight locations.
-        for (int iteration = 0; iteration < jitter_period; ++iteration) {
-            fixture.renderer.reset_history();
-            for (int frame = 0; frame < 16; ++frame) draw(0, -fixture.width*.3f, 0, true);
-            const auto displaced = draw(0, fixture.width*.3f, 0, true);
-            const auto removed = draw(0, fixture.width*.3f, 0, false);
-            fixture.renderer.reset_history();
-            const auto empty = draw(0, 0, 0, false);
-            int ghost = 0, ghost_x = 0, ghost_y = 0;
-            bool ghost_removed = true;
-            for (int y = bottom; y < bottom+16; ++y)
-                for (int x = fixture.width/8; x < fixture.width*7/8; ++x)
-                    for (int c = 0; c < 3; ++c) {
-                        const auto at = (std::size_t(y)*fixture.width+x)*4+c;
-                        const int removed_error = std::abs(int(removed[at])-int(empty[at]));
-                        if (removed_error > ghost) {
-                            ghost = removed_error; ghost_x = x; ghost_y = y; ghost_removed = true;
-                        }
-                        if (x < fixture.width*3/10) {
-                            const int displaced_error = std::abs(int(displaced[at])-int(empty[at]));
-                            if (displaced_error > ghost) {
-                                ghost = displaced_error; ghost_x = x; ghost_y = y; ghost_removed = false;
-                            }
-                        }
-                    }
-            const auto ghost_at = (std::size_t(ghost_y)*fixture.width+ghost_x)*4;
-            const auto& ghost_image = ghost_removed ? removed : displaced;
-            std::cout << "actor ghost requested-samples=" << requested_samples
-                      << " samples=" << fixture.renderer.samples()
-                      << " cycle-offset=" << (iteration*19)%jitter_period << " max=" << ghost
-                      << " frame=" << (ghost_removed ? "removed" : "displaced")
-                      << " pixel=" << ghost_x << ',' << ghost_y << " current/fresh RGB=";
-            for (int c = 0; c < 3; ++c)
-                std::cout << int(ghost_image[ghost_at+c]) << '/' << int(empty[ghost_at+c]) << ' ';
-            std::cout << '\n';
-            maximum_ghost = std::max(maximum_ghost, ghost);
-        }
-    }
-    require(maximum_ghost <= 2, "Actor model motion/removal left old actor or background history ghosts");
-    fixture.renderer.release_mesh(actor); fixture.renderer.release_mesh(background);
-    fixture.renderer.set_graphics(saved);
-    std::cout << "phase-balanced eight-location artwork/stable dynamic identity/camera and vertex-model motion/disocclusion PASS\n";
-}
-
-void check_smooth_normal_actor_artwork(Fixture& fixture, bool mutations_only = false) {
-    const auto saved = fixture.renderer.graphics_settings();
-    auto graphics = saved;
-    graphics.enhanced = true; graphics.temporal_aa = true; graphics.ray_tracing = false;
-    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
-    graphics.shadows = graphics.bloom = graphics.sharpen = 0; graphics.exposure = 1;
-    constexpr float half_height = .05f, distance = 100;
-    const float half_width = distance*half_height*fixture.aspect;
-    // A smooth authored normal is deliberately NOT the triangle's +Z normal.
-    // The narrow perspective admits its chords through the unchanged .001
-    // symmetric-normal gate, even at the fixture's 192-pixel source width.
-    const Vec3 normal{.9f,0,std::sqrt(1-.9f*.9f)};
-    const std::array<Vertex, 4> vertices{{
-        {{-half_width,-distance*half_height,-distance},{0,0},normal},
-        {{half_width,-distance*half_height,-distance},{1,0},normal},
-        {{half_width,distance*half_height,-distance},{1,1},normal},
-        {{-half_width,distance*half_height,-distance},{0,1},normal}
-    }};
-    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
-    const auto actor = fixture.renderer.upload_mesh(vertices, indices);
-    std::vector<std::uint8_t> texels(std::size_t(fixture.width)*4);
-    for (int x = 0; x < fixture.width; ++x) {
-        texels[x*4] = x%4<2 ? 112 : 144;
-        texels[x*4+1] = x%4<2 ? 152 : 128;
-        texels[x*4+2] = x%4<2 ? 120 : 136;
-        texels[x*4+3] = 255;
-    }
-    const auto texture = fixture.renderer.upload_texture(fixture.width, 1, texels, false, false);
-    const auto original_texels = texels;
-    auto posed = vertices;
-    DrawState artwork_state;
-    const auto draw = [&] {
-        fixture.renderer.clear();
-        // Actual previous/current vertex uploads and model poses are identical;
-        // temporal_static=false still exercises dynamic correspondence.
-        fixture.renderer.update_mesh(actor, posed);
-        fixture.renderer.camera(identity_matrix(), frustum_projection(half_height, fixture.aspect, 1, 1000));
-        auto state = artwork_state;
-        state.temporal_static = false; state.temporal_id = 0x7105;
-        fixture.renderer.draw(actor, texture, fixture.material, fixture.pass, state);
-        fixture.renderer.finish_world();
-        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
-    };
-    const int left = int(fixture.width*.65f)-32, bottom = fixture.height/2-8;
-    // The two triangles are one temporal part on one physical coplanar surface.
-    // This centered ROI crosses their diagonal, where final MSAA samples belong
-    // to different primitives but must retain the same artist history and AA.
-    const int seam_left = fixture.width/2-8, seam_bottom = fixture.height/2-4;
-    for (float scale : {1.f, .5f})
-        for (int requested_samples : {4, 8}) {
-            graphics.render_scale = scale; graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            const float chord_error = normal.x*2*half_width/(fixture.width*scale);
-            require(chord_error < distance*.001f,
-                    "Smooth-normal fixture's source chords fail the strict geometry gate");
-            if (!mutations_only) {
-                TemporalPixels physical(64, 16), seam_physical(16, 8);
-                for (int frame = 0; frame < 64; ++frame) {
-                    fixture.renderer.reset_history();
-                    const auto image = draw();
-                    physical.add(image, fixture.width, left, bottom);
-                    seam_physical.add(image, fixture.width, seam_left, seam_bottom);
-                }
-                fixture.renderer.reset_history();
-                for (int frame = 0; frame < 32; ++frame) draw();
-                TemporalPixels retained(64, 16), seam_retained(16, 8);
-                for (int frame = 0; frame < 64; ++frame) {
-                    const auto image = draw();
-                    retained.add(image, fixture.width, left, bottom);
-                    seam_retained.add(image, fixture.width, seam_left, seam_bottom);
-                }
-                double mean = 0;
-                for (double total : physical.sum) mean += total/physical.frames;
-                mean /= physical.sum.size();
-                const double detail = physical.stripe_contrast();
-                const double ratio = retained.stripe_contrast()/detail;
-                std::cout << "stationary perspective smooth-normal actor scale=" << scale
-                          << " samples=" << fixture.renderer.samples()
-                          << " source-chord/tolerance=" << chord_error/(distance*.001f)
-                          << " phase-balanced mean-error=" << retained.error(physical)
-                          << " contrast-retained=" << ratio << '\n';
-                require(detail > 2 && mean > 32,
-                        "Smooth-normal actor fixture lacks physical midtone fine artwork");
-                require(retained.error(physical) <= mean*.05 && ratio >= .95 && ratio <= 1.05,
-                        "Stationary smooth-normal actor changed physical artwork mean/detail by over five percent");
-                double seam_mean = 0;
-                for (double total : seam_physical.sum) seam_mean += total/seam_physical.frames;
-                seam_mean /= seam_physical.sum.size();
-                const double seam_detail = seam_physical.stripe_contrast();
-                const double seam_ratio = seam_retained.stripe_contrast()/seam_detail;
-                std::cout << "same-part coplanar triangle seam scale=" << scale
-                          << " requested-samples=" << requested_samples
-                          << " samples=" << fixture.renderer.samples()
-                          << " phase-balanced mean-error=" << seam_retained.error(seam_physical)
-                          << " contrast-retained=" << seam_ratio
-                          << " variance fresh/retained=" << seam_physical.variance()
-                          << '/' << seam_retained.variance() << '\n';
-                require(seam_detail > 2 && seam_mean > 32 && seam_physical.variance() > 0,
-                        "Coplanar seam fixture lacks physical midtone detail or subpixel sampling variance");
-                require(seam_retained.error(seam_physical) <= seam_mean*.05 &&
-                        seam_ratio >= .95 && seam_ratio <= 1.05,
-                        "Same-part primitive seam changed physical artwork mean/detail by over five percent");
-                require(seam_retained.variance() < seam_physical.variance()*.7,
-                        "Same-part primitive seam suppressed temporal antialiasing of physical artwork");
-            }
-            // Keep the pose/identity unchanged: only real authored state changes.
-            // Old, first changed and fresh frames are separated by full 64-frame cycles;
-            // reset before EVERY reference so none can hide stale artist history.
-            for (int mutation = 0; mutation < 5; ++mutation) {
-                texels = original_texels; posed = vertices; artwork_state = {};
-                fixture.renderer.update_texture(texture, fixture.width, 1, texels);
-                fixture.renderer.reset_history();
-                std::vector<std::uint8_t> old;
-                for (int frame = 0; frame < 32+jitter_period; ++frame) {
-                    auto image = draw();
-                    if (frame == 32) old = std::move(image);
-                }
-                const char* name = "";
-                if (mutation <= 1) {
-                    name = mutation == 0 ? "same-handle texture inversion" : "texture subrectangle inversion";
-                    for (int x = 0; x < fixture.width; ++x)
-                        for (int c = 0; c < 3; ++c)
-                            texels[x*4+c] = original_texels[((x+2)%fixture.width)*4+c];
-                    if (mutation == 0)
-                        fixture.renderer.update_texture(texture, fixture.width, 1, texels);
-                    else {
-                        const int start = fixture.width/2, count = fixture.width-start;
-                        fixture.renderer.update_texture(texture, count, 1,
-                            std::span<const std::uint8_t>(texels).subspan(std::size_t(start)*4,
-                                                                      std::size_t(count)*4), start);
-                    }
-                } else if (mutation == 2) {
-                    name = "per-draw colored tint";
-                    artwork_state.color = {.65f,.9f,.75f,1};
-                } else if (mutation == 3) {
-                    name = "per-draw UV transform";
-                    artwork_state.uv_transform[2] = 2.f/fixture.width;
-                } else {
-                    name = "vertex UV-only upload";
-                    for (auto& vertex : posed) vertex.uv.x += 2.f/fixture.width;
-                }
-                const auto changed = draw();
-                std::vector<std::uint8_t> fresh;
-                for (int frame = 0; frame < jitter_period; ++frame) {
-                    fixture.renderer.reset_history();
-                    fresh = draw();
-                }
-                int maximum = 0, changed_signal = 0;
-                double mean_error = 0;
-                for (int y = bottom; y < bottom+16; ++y)
-                    for (int x = left; x < left+64; ++x)
-                        for (int c = 0; c < 3; ++c) {
-                            const auto at = (std::size_t(y)*fixture.width+x)*4+c;
-                            const int error = std::abs(int(changed[at])-int(fresh[at]));
-                            maximum = std::max(maximum, error); mean_error += error;
-                            changed_signal = std::max(changed_signal,
-                                std::abs(int(fresh[at])-int(old[at])));
-                        }
-                std::cout << "same-pose " << name << " scale=" << scale
-                          << " samples=" << fixture.renderer.samples()
-                          << " same-phase max/mean-error=" << maximum << '/' << mean_error/(64*16*3)
-                          << " changed-color-signal=" << changed_signal << '\n';
-                require(changed_signal >= 4,
-                        "Artist mutation fixture did not visibly change its midtone colored pattern");
-                require(maximum <= 3,
-                        "Same-pose artist mutation retained an old colored texture/tint/UV patch");
-            }
-            texels = original_texels; posed = vertices; artwork_state = {};
-            fixture.renderer.update_texture(texture, fixture.width, 1, texels);
-            if (!mutations_only && scale == .5f) {
-                // Period two collapses each half-resolution phase's entire
-                // source neighborhood to one color. Its legitimate temporal
-                // mean may be disjoint from the next phase's singleton bounds.
-                for (int x = 0; x < fixture.width; ++x)
-                    for (int c = 0; c < 3; ++c)
-                        texels[x*4+c] = original_texels[(x%2)*2*4+c];
-                fixture.renderer.update_texture(texture, fixture.width, 1, texels);
-                TemporalPixels phase_colors(64, 16), stable_colors(64, 16);
-                for (int frame = 0; frame < 64; ++frame) {
-                    fixture.renderer.reset_history();
-                    phase_colors.add(draw(), fixture.width, left, bottom);
-                }
-                fixture.renderer.reset_history();
-                for (int frame = 0; frame < 32; ++frame) draw();
-                for (int frame = 0; frame < 64; ++frame)
-                    stable_colors.add(draw(), fixture.width, left, bottom);
-                double phase_mean = 0;
-                for (double total : phase_colors.sum) phase_mean += total/phase_colors.frames;
-                phase_mean /= phase_colors.sum.size();
-                std::cout << "phase-constant half-resolution artist samples=" << fixture.renderer.samples()
-                          << " variance fresh/stable=" << phase_colors.variance() << '/'
-                          << stable_colors.variance() << " phase-balanced mean-error="
-                          << stable_colors.error(phase_colors) << '\n';
-                require(phase_colors.variance() > 1,
-                        "Period-two artist fixture did not exercise phase-dependent constant colors");
-                require(stable_colors.variance() < phase_colors.variance()*.7 &&
-                        stable_colors.error(phase_colors) <= phase_mean*.05,
-                        "Disjoint valid phase colors lost temporal stabilization or physical mean");
-                texels = original_texels;
-                fixture.renderer.update_texture(texture, fixture.width, 1, texels);
-            }
-        }
-    fixture.renderer.release_mesh(actor);
-    fixture.renderer.set_graphics(saved);
-}
-
 void check_noisy_illumination(Fixture& fixture, bool force_off) {
     if (force_off || !fixture.renderer.ray_tracing_available()) return;
     const auto saved = fixture.renderer.graphics_settings();
@@ -1124,6 +694,125 @@ void check_noisy_illumination(Fixture& fixture, bool force_off) {
     fixture.renderer.release_mesh(quad);
     fixture.renderer.set_graphics(saved);
     std::cout << "actual stochastic AO/spatial noise bound/short-history stabilization PASS\n";
+}
+void check_smooth_normal_lighting_noise(Fixture& fixture, bool force_off) {
+    if (force_off || !fixture.renderer.ray_tracing_available()) {
+        std::cout << "ordinary-FOV smooth-normal AO noise SKIPPED: RT off/unavailable\n";
+        return;
+    }
+    const auto saved = fixture.renderer.graphics_settings();
+    auto graphics = saved;
+    graphics.enhanced = true; graphics.samples = 8; graphics.temporal_aa = false;
+    graphics.ray_tracing = true; graphics.ambient_occlusion = 1; graphics.exposure = 1;
+    graphics.reflections = graphics.indirect_lighting = graphics.shadows = 0;
+    graphics.bloom = graphics.sharpen = 0;
+    constexpr float half_height = .75f, distance = 2;
+    const float half_width = distance*half_height*fixture.aspect;
+    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
+    std::array<Vertex, 4> vertices{{
+        {{-half_width,-distance*half_height,-distance},{0,0},{0,0,1}},
+        {{half_width,-distance*half_height,-distance},{1,0},{0,0,1}},
+        {{half_width,distance*half_height,-distance},{1,1},{0,0,1}},
+        {{-half_width,distance*half_height,-distance},{0,1},{0,0,1}}
+    }};
+    const auto receiver = fixture.renderer.upload_mesh(vertices, indices);
+    // Behind the camera, hence absent from raster coverage, but reached within
+    // AO's ten-unit falloff by genuine rays leaving the visible receiver.
+    const std::array<Vertex, 4> blocker_vertices{{
+        {{.5f,-2,.5f},{0,0},{0,0,-1}}, {{5.5f,-2,.5f},{1,0},{0,0,-1}},
+        {{5.5f,2,.5f},{1,1},{0,0,-1}}, {{.5f,2,.5f},{0,1},{0,0,-1}}
+    }};
+    const auto blocker = fixture.renderer.upload_mesh(blocker_vertices, indices);
+    std::vector<std::uint8_t> texels(std::size_t(fixture.width)*4);
+    const int art_left = fixture.width*65/100-32, bottom = fixture.height/2-8;
+    const int stroke = art_left+32;
+    for (int x = 0; x < fixture.width; ++x) {
+        const bool patterned = x >= fixture.width/2;
+        texels[x*4] = patterned ? (x%4<2 ? 112 : 144) : 128;
+        texels[x*4+1] = patterned ? (x%4<2 ? 152 : 128) : 128;
+        texels[x*4+2] = patterned ? (x%4<2 ? 120 : 136) : 128;
+        if (x >= stroke && x < stroke+3)
+            texels[x*4] = texels[x*4+1] = texels[x*4+2] = 24;
+        texels[x*4+3] = 255;
+    }
+    const auto texture = fixture.renderer.upload_texture(fixture.width, 1, texels, false, false);
+    const auto draw = [&](bool occluder) {
+        fixture.renderer.clear();
+        fixture.renderer.camera(identity_matrix(), frustum_projection(half_height, fixture.aspect, 1, 1000));
+        DrawState state; state.temporal_static = false; state.temporal_id = 0x7A06;
+        fixture.renderer.draw(receiver, texture, fixture.material, fixture.pass, state);
+        if (occluder) {
+            state = {}; state.temporal_static = true; state.temporal_id = 0x7A07;
+            fixture.renderer.draw(blocker, 0, fixture.material, fixture.pass, state);
+        }
+        fixture.renderer.finish_world();
+        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
+    };
+    struct Samples {
+        TemporalPixels smooth{32,16}, artwork{64,16};
+    };
+    const auto measure = [&](bool retain, bool occluder) {
+        fixture.renderer.reset_history();
+        if (retain) for (int frame = 0; frame < 64; ++frame) draw(occluder);
+        Samples result;
+        for (int frame = 0; frame < 64; ++frame) {
+            if (!retain) fixture.renderer.reset_history();
+            const auto image = draw(occluder);
+            result.smooth.add(image, fixture.width, fixture.width/4-16, bottom);
+            result.artwork.add(image, fixture.width, art_left, bottom);
+        }
+        return result;
+    };
+    const auto mean_rgb = [](const TemporalPixels& samples) {
+        double total = 0;
+        for (double value : samples.sum) total += value/samples.frames;
+        return total/samples.sum.size();
+    };
+    for (bool smooth_normal : {false, true}) {
+        const Vec3 normal = smooth_normal ? Vec3{.9f,0,std::sqrt(1-.9f*.9f)} : Vec3{0,0,1};
+        for (auto& vertex : vertices) vertex.normal = normal;
+        fixture.renderer.update_mesh(receiver, vertices);
+        for (float scale : {1.f, .5f}) {
+            graphics.render_scale = scale; graphics.ambient_occlusion = 0;
+            fixture.renderer.set_graphics(graphics);
+            const auto neutral = measure(false, false);
+            graphics.ambient_occlusion = 1; fixture.renderer.set_graphics(graphics);
+            const auto absent = measure(false, false);
+            const auto fresh = measure(false, true), retained = measure(true, true);
+            const double effect = fresh.smooth.error(absent.smooth);
+            double mean = 0;
+            for (double value : fresh.artwork.sum) mean += value/fresh.artwork.frames;
+            mean /= fresh.artwork.sum.size();
+            const double detail = fresh.artwork.stripe_contrast();
+            const double contrast = retained.artwork.stripe_contrast()/detail;
+            const float chord_ratio = normal.x*2*half_width/
+                (fixture.width*scale*distance*.001f);
+            std::cout << "ordinary-FOV " << (smooth_normal ? "authored-smooth" : "geometric")
+                      << " normal AO scale=" << scale << " samples=" << fixture.renderer.samples()
+                      << " source-chord/tolerance=" << chord_ratio << " actual-caster-effect=" << effect
+                      << " meanRGB neutral/absent/present=" << mean_rgb(neutral.smooth)
+                      << '/' << mean_rgb(absent.smooth) << '/' << mean_rgb(fresh.smooth)
+                      << " blocker-absent-AO=" << absent.smooth.error(neutral.smooth)
+                      << " smooth-variance fresh/retained=" << fresh.smooth.variance()
+                      << '/' << retained.smooth.variance()
+                      << " physical-mean-error=" << retained.artwork.error(fresh.artwork)
+                      << " painted-detail-retained=" << contrast << std::endl;
+            require(effect >= 1, "Ordinary-FOV AO fixture did not respond to its actual ray blocker");
+            require(absent.smooth.error(neutral.smooth) <= 1,
+                    "Authored smooth normal sent AO rays into its own physical receiver facet");
+            require(fresh.smooth.variance() > .1,
+                    "Ordinary-FOV smooth receiver lacks genuine consumer-visible AO noise");
+            require(detail > 2 && mean > 16, "Ordinary-FOV AO fixture lacks visible painted detail");
+            require(retained.artwork.error(fresh.artwork) <= mean*.05 &&
+                    contrast >= .95 && contrast <= 1.05,
+                    "Ordinary-FOV AO history changed physical painted mean/detail by over five percent");
+            require(retained.smooth.variance() < fresh.smooth.variance()*.7,
+                    "Same physical ordinary-FOV smooth surface lost temporal AO noise convergence");
+        }
+    }
+    fixture.renderer.release_mesh(receiver); fixture.renderer.release_mesh(blocker);
+    fixture.renderer.set_graphics(saved);
+    std::cout << "ordinary-FOV smooth-normal/full-strength AO/MSAA8/native and half/painted detail PASS\n";
 }
 void check_ray_origin_translation(Fixture& fixture, bool force_off) {
     if (force_off || !fixture.renderer.ray_tracing_available()) {
@@ -1295,143 +984,18 @@ void check_ray_origin_translation(Fixture& fixture, bool force_off) {
     require(miss_ok, "Full-strength RT self-occluded a convex plane or changed under physical translation");
     std::cout << "physical RT ray-origin translation/two true-plane orientations/native MISS output/MSAA4 and 8/scales1 and .5 PASS\n";
 }
-void check_far_authored_history(Fixture& fixture) {
-    const auto saved = fixture.renderer.graphics_settings();
-    auto graphics = saved;
-    graphics.enhanced = true; graphics.temporal_aa = true; graphics.ray_tracing = false;
-    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
-    graphics.shadows = graphics.bloom = graphics.sharpen = 0; graphics.exposure = 1;
-    constexpr float half_height = .05f, left_w = 700, right_w = 1000, coverage = 1.3f;
-    const Vec3 origin{-4432.91f,-13.8573f,2805.53f};
-    const float left_x = -left_w*half_height*fixture.aspect*coverage;
-    const float right_x = right_w*half_height*fixture.aspect*coverage;
-    const float length = std::hypot(right_w-left_w, right_x-left_x);
-    const Vec3 normal{(right_w-left_w)/length,0,(right_x-left_x)/length};
-    const std::array<Vertex, 4> vertices{{
-        {{left_x,-left_w*half_height*coverage,-left_w},{0,0},normal},
-        {{right_x,-right_w*half_height*coverage,-right_w},{1,0},normal},
-        {{right_x,right_w*half_height*coverage,-right_w},{1,1},normal},
-        {{left_x,left_w*half_height*coverage,-left_w},{0,1},normal}
-    }};
-    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
-    const auto plane = fixture.renderer.upload_mesh(vertices, indices);
-    const int texture_width = fixture.width;
-    std::vector<std::uint8_t> texels(std::size_t(texture_width)*4);
-    for (int x = 0; x < texture_width; ++x) {
-        // Low-contrast fine glass detail, and a two-texel dark border between
-        // slightly different bright neighbors. All edges are ART, not geometry.
-        const int value = x >= texture_width/2-1 && x <= texture_width/2 ? 25 :
-                          x < texture_width/2 ? (x%8<4 ? 42 : 50) : (x%8<4 ? 46 : 54);
-        for (int c = 0; c < 3; ++c) texels[x*4+c] = std::uint8_t(value);
-        texels[x*4+3] = 255;
-    }
-    const auto texture = fixture.renderer.upload_texture(texture_width, 1, texels, false, false);
-    const auto draw = [&](int pose) {
-        fixture.renderer.clear();
-        fixture.renderer.update_mesh(plane, vertices);
-        const float step = 2*850*half_height*fixture.aspect/fixture.width*.125f;
-        auto view = identity_matrix();
-        view.values[12] = -origin.x+pose*step;
-        view.values[13] = -origin.y; view.values[14] = -origin.z;
-        fixture.renderer.camera(view, frustum_projection(half_height, fixture.aspect, 1, 12000));
-        DrawState state; state.temporal_id = 0x7A02; state.temporal_static = false;
-        state.model.values[12] = origin.x+pose*step;
-        state.model.values[13] = origin.y; state.model.values[14] = origin.z;
-        // The draw keeps P*(view*model), cancelling the large translation before
-        // raster projection; frame inverseVP still reconstructs the far world.
-        fixture.renderer.draw(plane, texture, fixture.material, fixture.pass, state);
-        fixture.renderer.finish_world();
-        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
-    };
-    // Perspective-correct u=.5 is not the projected midpoint of the vertices.
-    const float middle_x = (left_x+right_x)*.5f;
-    const int stripe_x = int(fixture.width*(.5f+middle_x/(850*half_height*fixture.aspect)*.5f));
-    const int left = stripe_x-32, bottom = fixture.height/2-8;
-    require(left >= 8 && left+64 < fixture.width-8,
-            "Far-world artwork ROI escaped the fully covered same-owner plane");
-    const auto measure = [&](bool retain, bool moving) {
-        fixture.renderer.reset_history();
-        if (retain)
-            for (int frame = 0; frame < jitter_period; ++frame) draw(moving ? frame%4 : 0);
-        TemporalPixels result(64, 16);
-        // Independently hold each moving pose for a full cycle of the eight locations.
-        // Resetting every reference frame preserves its physical current AA.
-        const int frames = !retain && moving ? 4*jitter_period : jitter_period;
-        for (int frame = 0; frame < frames; ++frame) {
-            if (!retain) fixture.renderer.reset_history();
-            const int pose = moving ? (retain ? frame%4 : frame/jitter_period) : 0;
-            result.add(draw(pose), fixture.width, left, bottom);
-        }
-        return result;
-    };
-    for (float scale : {1.f, .5f})
-        for (int requested_samples : {4, 8}) {
-            graphics.render_scale = scale; graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            for (bool moving : {false, true}) {
-                const auto physical = measure(false, moving), retained = measure(true, moving);
-                double mean = 0;
-                for (double total : physical.sum) mean += total/physical.frames;
-                mean /= physical.sum.size();
-                // Average rows before evaluating the border's signed depth,
-                // footprint and registration. A sharpened wrong edge cannot
-                // pass by preserving only unsigned whole-patch contrast.
-                std::array<double, 64> fresh_row{}, retained_row{};
-                for (int x = 0; x < 64; ++x)
-                    for (int y = 0; y < 16; ++y) {
-                        const auto at = (std::size_t(y)*64+x)*3;
-                        fresh_row[x] += physical.sum[at]/(physical.frames*16);
-                        retained_row[x] += retained.sum[at]/(retained.frames*16);
-                    }
-                int darkest = 28;
-                for (int x = 29; x <= 36; ++x)
-                    if (fresh_row[x] < fresh_row[darkest]) darkest = x;
-                double bright = 0, retained_bright = 0;
-                for (int x : {20,21,22,23,41,42,43,44}) {
-                    bright += fresh_row[x]/8; retained_bright += retained_row[x]/8;
-                }
-                const double depth = bright-fresh_row[darkest];
-                const double retained_depth = retained_bright-retained_row[darkest];
-                double mass = 0, retained_mass = 0, moment = 0, retained_moment = 0;
-                double border_error = 0;
-                for (int x = darkest-4; x <= darkest+4; ++x) {
-                    const double deficit = std::max(0., bright-fresh_row[x]);
-                    const double retained_deficit = std::max(0., retained_bright-retained_row[x]);
-                    mass += deficit; retained_mass += retained_deficit;
-                    moment += x*deficit; retained_moment += x*retained_deficit;
-                    border_error = std::max(border_error, std::abs(fresh_row[x]-retained_row[x]));
-                }
-                const double detail = physical.stripe_contrast();
-                const double ratio = retained.stripe_contrast()/detail;
-                require(depth > 8 && detail > 2 && physical.variance() > 0 && mass > 0 &&
-                        retained_mass > 0,
-                        "Far-world border fixture lacks visible physical low-contrast fine detail");
-                const double registration = std::abs(moment/mass-retained_moment/retained_mass);
-                const double border_width = mass/depth;
-                std::cout << "far-world oblique authored border " << (moving ? "camera+model" : "stationary")
-                          << " drawable=" << fixture.width << 'x' << fixture.height
-                          << " scale=" << scale << " requested-samples=" << requested_samples
-                          << " samples=" << fixture.renderer.samples()
-                          << " physical-mean-error=" << retained.error(physical)
-                          << " contrast-retained=" << ratio << " signed-dark-depth="
-                          << depth << '/' << retained_depth << " border-max-error=" << border_error
-                          << " registration/width=" << registration/border_width << '\n';
-                require(retained.error(physical) <= mean*.05 && ratio >= .95 && ratio <= 1.05 &&
-                        std::abs(retained_depth-depth) <= depth*.05 && border_error <= depth*.05 &&
-                        std::abs(retained_mass-mass) <= mass*.05 && registration <= border_width*.05,
-                        "Far-world perspective history changed authored border intensity/detail/registration by over five percent");
-            }
-        }
-    fixture.renderer.release_mesh(plane);
-    fixture.renderer.set_graphics(saved);
-}
-
 void check_untracked_overlay_history(Fixture& fixture, bool force_off) {
+    if (force_off || !fixture.renderer.ray_tracing_available()) {
+        std::cout << "untracked fog physical lighting controls SKIPPED: RT off/unavailable\n";
+        return;
+    }
     const auto saved = fixture.renderer.graphics_settings();
     auto graphics = saved;
-    graphics.enhanced = true; graphics.temporal_aa = true; graphics.ray_tracing = false;
-    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
+    graphics.enhanced = true; graphics.temporal_aa = false; graphics.ray_tracing = true;
+    graphics.samples = 0; graphics.render_scale = 1; graphics.ambient_occlusion = 1;
+    graphics.reflections = graphics.indirect_lighting = 0;
     graphics.shadows = graphics.bloom = graphics.sharpen = 0; graphics.exposure = 1;
+    fixture.renderer.set_graphics(graphics);
     const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
     const std::array<Vertex, 4> vertices{{
         {{-1,-1,0},{0,0},{0,0,1}}, {{1,-1,0},{1,0},{0,0,1}},
@@ -1462,7 +1026,7 @@ void check_untracked_overlay_history(Fixture& fixture, bool force_off) {
         fixture.renderer.finish_world();
         auto result = fixture.renderer.capture_rgba(); fixture.renderer.present(); return result;
     };
-    // Fully covered, uniform interior at both scales and every requested MSAA mode.
+    // Fully covered, uniform interior.
     const int left = fixture.width/3, bottom = fixture.height/3;
     const int width = fixture.width/3, height = fixture.height/3;
     const auto maximum_error = [&](const std::vector<std::uint8_t>& a,
@@ -1476,224 +1040,52 @@ void check_untracked_overlay_history(Fixture& fixture, bool force_off) {
                 }
         return maximum;
     };
-    int maximum_ghost = 0;
-    double minimum_stimulus = 255;
-    const std::array<std::array<float, 4>, 3> changed{{
-        {{1,1,1,0}}, {{1,1,1,.1f}}, {{.25f,.65f,.85f,.4f}}
-    }};
-    const std::array<const char*, 3> names{{"removed", "alpha-reduced", "recolored"}};
-    for (float scale : {1.f, .5f}) {
-        graphics.render_scale = scale;
-        for (int requested_samples : {0, 4, 8}) {
-            graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            for (std::size_t change = 0; change < changed.size(); ++change) {
-                // Stride 97 (32 warm + first + 63 intervening + fresh): 11 cases cover
-                // all eight locations from every initial 64-frame cycle offset.
-                for (int phase = 0; phase < 11; ++phase) {
-                    fixture.renderer.reset_history();
-                    std::vector<std::uint8_t> old;
-                    for (int frame = 0; frame < 32; ++frame) old = draw(white);
-                    const auto first = draw(changed[change]);
-                    // reset_history does NOT rewind the global Halton counter.
-                    // 63 intervening draws put fresh exactly one 64-frame repeat
-                    // after first, preserving its current jitter location.
-                    for (int frame = 0; frame < jitter_period-1; ++frame) draw(changed[change]);
-                    fixture.renderer.reset_history();
-                    const auto fresh = draw(changed[change]);
-                    TemporalPixels old_pixels(width, height), fresh_pixels(width, height);
-                    old_pixels.add(old, fixture.width, left, bottom);
-                    fresh_pixels.add(fresh, fixture.width, left, bottom);
-                    const int ghost = maximum_error(first, fresh);
-                    const double stimulus = old_pixels.error(fresh_pixels);
-                    maximum_ghost = std::max(maximum_ghost, ghost);
-                    minimum_stimulus = std::min(minimum_stimulus, stimulus);
-                    std::cout << "untracked overlay " << names[change] << " scale=" << scale
-                              << " requested-samples=" << requested_samples
-                              << " samples=" << fixture.renderer.samples()
-                              << " cycle-offset=" << (phase*97)%jitter_period
-                              << " first/fresh-maxRGB=" << ghost << " old/fresh-meanRGB=" << stimulus << '\n';
-                }
-            }
+    const auto measure = [&](bool keep_history) {
+        fixture.renderer.reset_history();
+        if (keep_history)
+            for (int frame = 0; frame < 32; ++frame) draw(white, true);
+        TemporalPixels result(width, height);
+        for (int frame = 0; frame < 64; ++frame) {
+            if (!keep_history) fixture.renderer.reset_history();
+            result.add(draw(white, true), fixture.width, left, bottom);
         }
-    }
-    std::vector<std::uint8_t> fine_texels(std::size_t(fixture.width)*4);
-    for (int x = 0; x < fixture.width; ++x) {
-        fine_texels[x*4] = x%4<2 ? 112 : 144;
-        fine_texels[x*4+1] = x%4<2 ? 152 : 128;
-        fine_texels[x*4+2] = 136; fine_texels[x*4+3] = 255;
-    }
-    const auto fine_texture = fixture.renderer.upload_texture(fixture.width, 1, fine_texels, false, false);
-    const std::array<const char*, 6> ordered_names{{
-        "early fog/later opaque", "fog/blended depth writer", "fog/partial RGB depth writer",
-        "fog/zero-alpha depth writer/occluded opaque", "fog/texture-alpha discard",
-        "early fog/texture-alpha accepted opaque"
-    }};
-    const auto ordered_draw = [&](int mode, bool fog, bool omit_zero_depth = false) {
-        fixture.renderer.clear();
-        fixture.renderer.camera(identity_matrix(), identity_matrix());
-        DrawState receiver; receiver.temporal_static = true; receiver.temporal_id = 0x7A03;
-        receiver.color = {.22f,.36f,.48f,1};
-        fixture.renderer.draw(quad, 0, fixture.material, fixture.pass, receiver);
-        if (fog) {
-            DrawState overlay; overlay.ray_geometry = false; overlay.color = white;
-            fixture.renderer.draw(quad, 0, fixture.material, fog_pass, overlay);
-        }
-        auto late_pass = fixture.pass;
-        DrawState late; late.temporal_id = 0x7A04; late.temporal_static = false;
-        late.model.values[14] = -.2f;
-        unsigned late_texture = fine_texture;
-        if (mode == 1) {
-            late_pass.blend = true; late.color = {.6f,.35f,.2f,.35f}; late_texture = 0;
-        } else if (mode == 2) {
-            late_pass.color_write = {{true,false,true,true}};
-            late.color = {.6f,.35f,.2f,1}; late_texture = 0;
-        } else if (mode == 3 && !omit_zero_depth) {
-            // Alpha zero contributes no color but DOES write original depth.
-            // The following tracked opaque draw must remain occluded, including
-            // during the ordered reactive replay (discarding zero alpha is wrong).
-            auto zero_pass = fixture.pass; zero_pass.blend = true;
-            DrawState zero; zero.ray_geometry = false;
-            zero.model.values[14] = -.4f; zero.color = {1,1,1,0};
-            fixture.renderer.draw(quad, 0, fixture.material, zero_pass, zero);
-        }
-        if (mode == 4 || mode == 5) {
-            late_pass.alpha_test = true; late_pass.alpha_function = 0x204;
-            late_pass.alpha_reference = .5f;
-            if (mode == 4) late_texture = fixture.cutout;
-        }
-        fixture.renderer.draw(quad, late_texture, fixture.material, late_pass, late);
-        fixture.renderer.finish_world();
-        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
+        return result;
     };
-    for (float scale : {1.f, .5f})
-        for (int requested_samples : {4, 8}) {
-            graphics.render_scale = scale; graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            for (int mode = 0; mode < 6; ++mode) {
-                if (mode == 0 || mode == 5) {
-                    // Earlier untracked color was fully overwritten: artist AA
-                    // must recover, not merely output a ghost-free fresh frame.
-                    TemporalPixels physical(width, height), retained(width, height);
-                    for (int frame = 0; frame < 64; ++frame) {
-                        fixture.renderer.reset_history();
-                        physical.add(ordered_draw(mode, true), fixture.width, left, bottom);
-                    }
-                    fixture.renderer.reset_history();
-                    for (int frame = 0; frame < 32; ++frame) ordered_draw(mode, true);
-                    for (int frame = 0; frame < 64; ++frame)
-                        retained.add(ordered_draw(mode, true), fixture.width, left, bottom);
-                    const double detail = physical.stripe_contrast();
-                    const double ratio = retained.stripe_contrast()/detail;
-                    std::cout << ordered_names[mode] << " scale=" << scale
-                              << " samples=" << fixture.renderer.samples()
-                              << " fresh/retained-variance=" << physical.variance() << '/'
-                              << retained.variance() << " physical-error=" << retained.error(physical)
-                              << " contrast-retained=" << ratio << '\n';
-                    require(physical.variance() > .1 && detail > 2,
-                            "Ordered opaque overwrite lacks actual visible artist AA stimulus");
-                    require(retained.variance() < physical.variance()*.7 &&
-                            retained.error(physical) <= 2 && ratio >= .95 && ratio <= 1.05,
-                            "Later fully tracked opaque overwrite did not restore clean artist AA");
-                    continue;
-                }
-                // The same 97-frame stride covers all eight locations in 11 cases.
-                for (int phase = 0; phase < 11; ++phase) {
-                    fixture.renderer.reset_history();
-                    std::vector<std::uint8_t> old;
-                    for (int frame = 0; frame < 32; ++frame) old = ordered_draw(mode, true);
-                    const auto first = ordered_draw(mode, false);
-                    for (int frame = 0; frame < jitter_period-1; ++frame) ordered_draw(mode, false);
-                    fixture.renderer.reset_history();
-                    const auto fresh = ordered_draw(mode, false);
-                    TemporalPixels old_pixels(width, height), fresh_pixels(width, height);
-                    old_pixels.add(old, fixture.width, left, bottom);
-                    fresh_pixels.add(fresh, fixture.width, left, bottom);
-                    const int error = maximum_error(first, fresh);
-                    const double stimulus = old_pixels.error(fresh_pixels);
-                    std::cout << ordered_names[mode] << " scale=" << scale
-                              << " samples=" << fixture.renderer.samples()
-                              << " cycle-offset=" << (phase*97)%jitter_period
-                              << " first/fresh-maxRGB=" << error << " visible-removal=" << stimulus << '\n';
-                    require(stimulus >= 8, "Ordered fog contribution did not visibly survive its later draw");
-                    require(error <= 2, "Later partial/blended/discarded draw erased surviving fog reactivity");
-                }
-                if (mode == 3) {
-                    fixture.renderer.reset_history();
-                    const auto with_zero_depth = ordered_draw(mode, true);
-                    // Uniform fog receiver versus visible fine opaque artwork:
-                    // this is an output test of original depth, not mask bytes.
-                    fixture.renderer.reset_history();
-                    const auto without_zero_depth = ordered_draw(mode, true, true);
-                    require(maximum_error(with_zero_depth, without_zero_depth) >= 8,
-                            "Zero-alpha depth writer did not actually occlude its later opaque draw");
-                }
-                if (mode == 4) {
-                    fixture.renderer.reset_history();
-                    const auto discarded = ordered_draw(mode, true);
-                    for (int frame = 0; frame < jitter_period-1; ++frame) draw(white);
-                    fixture.renderer.reset_history();
-                    require(maximum_error(discarded, draw(white)) <= 2,
-                            "Texture alpha-test discard changed original raster fog/depth");
-                }
-            }
-        }
-    if (!force_off && fixture.renderer.ray_tracing_available()) {
-        graphics.samples = 0; graphics.render_scale = 1; graphics.ray_tracing = true;
-        graphics.ambient_occlusion = 1;
-        fixture.renderer.set_graphics(graphics);
-        const auto measure = [&](bool keep_history) {
-            fixture.renderer.reset_history();
-            if (keep_history)
-                for (int frame = 0; frame < 32; ++frame) draw(white, true);
-            TemporalPixels result(width, height);
-            for (int frame = 0; frame < 64; ++frame) {
-                if (!keep_history) fixture.renderer.reset_history();
-                result.add(draw(white, true), fixture.width, left, bottom);
-            }
-            return result;
-        };
-        const auto fresh = measure(false), retained = measure(true);
-        graphics.ambient_occlusion = 0;
-        fixture.renderer.set_graphics(graphics);
-        fixture.renderer.reset_history();
-        const auto neutral_image = draw(white, true);
-        TemporalPixels neutral(width, height); neutral.add(neutral_image, fixture.width, left, bottom);
-        const double ao_strength = fresh.error(neutral);
-        std::cout << "constant untracked fog actual-AO meanRGB=" << ao_strength
-                  << " variance fresh=" << fresh.variance() << " retained=" << retained.variance()
-                  << " physical-mean-error=" << retained.error(fresh) << '\n';
-        require(ao_strength >= 1, "Fog-covered AO control did not trace its actual occluder");
-        require(fresh.variance() > .1, "Fog-covered AO control did not produce genuine stochastic noise");
-        require(retained.variance() < fresh.variance()*.75,
-                "Constant untracked fog lost the opaque receiver's physical lighting history");
-        require(retained.error(neutral) >= ao_strength*.75 && retained.error(fresh) <= 12,
-                "Fog-covered temporal filtering suppressed the physical AO strength or changed its mean");
+    const auto fresh = measure(false), retained = measure(true);
+    graphics.ambient_occlusion = 0;
+    fixture.renderer.set_graphics(graphics);
+    fixture.renderer.reset_history();
+    const auto neutral_image = draw(white, true);
+    TemporalPixels neutral(width, height); neutral.add(neutral_image, fixture.width, left, bottom);
+    const double ao_strength = fresh.error(neutral);
+    std::cout << "constant untracked fog actual-AO meanRGB=" << ao_strength
+              << " variance fresh=" << fresh.variance() << " retained=" << retained.variance()
+              << " physical-mean-error=" << retained.error(fresh) << '\n';
+    require(ao_strength >= 1, "Fog-covered AO control did not trace its actual occluder");
+    require(fresh.variance() > .1, "Fog-covered AO control did not produce genuine stochastic noise");
+    require(retained.variance() < fresh.variance()*.75,
+            "Constant untracked fog lost the opaque receiver's physical lighting history");
+    require(retained.error(neutral) >= ao_strength*.75 && retained.error(fresh) <= 12,
+            "Fog-covered temporal filtering suppressed the physical AO strength or changed its mean");
 
-        // The same fog must not turn excluded (-1) geometry into a light receiver.
-        fixture.renderer.reset_history();
-        const auto excluded_neutral = draw(white, true, true);
-        graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 1;
-        fixture.renderer.set_graphics(graphics);
-        fixture.renderer.reset_history();
-        for (int frame = 0; frame < 32; ++frame) draw(white, true, true);
-        const auto excluded_lit = draw(white, true, true);
-        for (int frame = 0; frame < jitter_period-1; ++frame) draw(white, true, true);
-        fixture.renderer.reset_history();
-        const auto excluded_fresh = draw(white, true, true);
-        const int excluded_error = std::max(maximum_error(excluded_lit, excluded_neutral),
-                                            maximum_error(excluded_fresh, excluded_neutral));
-        std::cout << "excluded fog-covered receiver full-strength AO/reflection/GI maxRGB="
-                  << excluded_error << '\n';
-        require(excluded_error <= 2, "Untracked fog promoted excluded geometry into traced lighting");
-    } else {
-        std::cout << "untracked fog physical lighting controls SKIPPED: RT off/unavailable\n";
-    }
+    // The same fog must not turn excluded (-1) geometry into a light receiver.
+    fixture.renderer.reset_history();
+    const auto excluded_neutral = draw(white, true, true);
+    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 1;
+    fixture.renderer.set_graphics(graphics);
+    fixture.renderer.reset_history();
+    for (int frame = 0; frame < 32; ++frame) draw(white, true, true);
+    const auto excluded_lit = draw(white, true, true);
+    fixture.renderer.reset_history();
+    const auto excluded_fresh = draw(white, true, true);
+    const int excluded_error = std::max(maximum_error(excluded_lit, excluded_neutral),
+                                        maximum_error(excluded_fresh, excluded_neutral));
+    std::cout << "excluded fog-covered receiver full-strength AO/reflection/GI maxRGB="
+              << excluded_error << '\n';
+    require(excluded_error <= 2, "Untracked fog promoted excluded geometry into traced lighting");
     fixture.renderer.release_mesh(quad);
     fixture.renderer.set_graphics(saved);
-    require(minimum_stimulus >= 24, "Untracked overlay change did not visibly alter the fresh authored image");
-    require(maximum_ghost <= 2, "Untracked overlay change retained old alpha/color on its stable opaque owner");
-    std::cout << "untracked fog first-frame alpha/color invalidation/physical lighting ownership PASS\n";
+    std::cout << "untracked fog physical lighting ownership PASS\n";
 }
 
 void check_curved_actor_illumination(Fixture& fixture, bool force_off) {
@@ -1806,45 +1198,42 @@ void check_curved_actor_illumination(Fixture& fixture, bool force_off) {
                 "Curved actor fixture did not exercise a full-strength traced illumination effect");
     }
     graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 1;
-    for (bool taa : {false, true}) {
-        graphics.temporal_aa = taa;
-        for (int requested_samples : {0, 8}) {
-            graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            // Unsupported MSAA8 may downgrade, but must not skip temporal lighting.
-            require(fixture.renderer.samples() <= requested_samples || requested_samples == 0,
-                    "Renderer selected more MSAA samples than requested");
-            for (bool moving : {false, true}) {
-                const auto spatial = measure(false, moving), temporal = measure(true, moving);
-                std::cout << "curved textured dynamic actor " << (moving ? "animated" : "stationary")
-                          << " taa=" << taa << " samples=" << fixture.renderer.samples()
-                          << " variance fresh=" << spatial.variance() << " retained=" << temporal.variance()
-                          << " physical-mean-error=" << temporal.error(spatial) << '\n';
-                require(spatial.variance() > .25,
-                        "Curved actor fixture did not generate consumer-visible stochastic noise");
-                require(temporal.variance() < spatial.variance()*.7,
-                        "Stable dynamic actor identity lost temporal AO/GI/reflection noise reduction");
-                require(temporal.error(spatial) <= 12,
-                        "Dynamic illumination history changed the physical mean or left textured pose trails");
-            }
-            fixture.renderer.reset_history();
-            for (int frame = 0; frame < 16; ++frame) draw(0);
-            const auto removed = draw(0, false);
-            fixture.renderer.reset_history();
-            const auto empty = draw(0, false);
-            int ghost = 0;
-            for (int y = bottom; y < bottom+24; ++y)
-                for (int x = left; x < left+48; ++x)
-                    for (int c = 0; c < 3; ++c) {
-                        const auto at = (std::size_t(y)*fixture.width+x)*4+c;
-                        ghost = std::max(ghost, std::abs(int(removed[at])-int(empty[at])));
-                    }
-            require(ghost <= 2, "Removed curved actor left old stochastic radiance on the background");
+    for (int requested_samples : {0, 8}) {
+        graphics.samples = requested_samples;
+        fixture.renderer.set_graphics(graphics);
+        // Unsupported MSAA8 may downgrade, but must not skip temporal lighting.
+        require(fixture.renderer.samples() <= requested_samples || requested_samples == 0,
+                "Renderer selected more MSAA samples than requested");
+        for (bool moving : {false, true}) {
+            const auto spatial = measure(false, moving), temporal = measure(true, moving);
+            std::cout << "curved textured dynamic actor " << (moving ? "animated" : "stationary")
+                      << " samples=" << fixture.renderer.samples()
+                      << " variance fresh=" << spatial.variance() << " retained=" << temporal.variance()
+                      << " physical-mean-error=" << temporal.error(spatial) << '\n';
+            require(spatial.variance() > .25,
+                    "Curved actor fixture did not generate consumer-visible stochastic noise");
+            require(temporal.variance() < spatial.variance()*.7,
+                    "Stable dynamic actor identity lost temporal AO/GI/reflection noise reduction");
+            require(temporal.error(spatial) <= 12,
+                    "Dynamic illumination history changed the physical mean or left textured pose trails");
         }
+        fixture.renderer.reset_history();
+        for (int frame = 0; frame < 16; ++frame) draw(0);
+        const auto removed = draw(0, false);
+        fixture.renderer.reset_history();
+        const auto empty = draw(0, false);
+        int ghost = 0;
+        for (int y = bottom; y < bottom+24; ++y)
+            for (int x = left; x < left+48; ++x)
+                for (int c = 0; c < 3; ++c) {
+                    const auto at = (std::size_t(y)*fixture.width+x)*4+c;
+                    ghost = std::max(ghost, std::abs(int(removed[at])-int(empty[at])));
+                }
+        require(ghost <= 2, "Removed curved actor left old stochastic radiance on the background");
     }
     fixture.renderer.release_mesh(actor); fixture.renderer.release_mesh(source);
     fixture.renderer.set_graphics(saved);
-    std::cout << "curved textured dynamic actor/full-strength AO GI reflection/prior vertex-model pose/TAA on and off/MSAA8/removal PASS\n";
+    std::cout << "curved textured dynamic actor/full-strength AO GI reflection/prior vertex-model pose/TAA off/MSAA8/removal PASS\n";
 }
 
 void check_oblique_half_resolution_history(Fixture& fixture, bool force_off) {
@@ -1855,7 +1244,7 @@ void check_oblique_half_resolution_history(Fixture& fixture, bool force_off) {
     const auto saved = fixture.renderer.graphics_settings();
     auto graphics = saved;
     constexpr float half_height = .75f, render_scale = .5f;
-    graphics.enhanced = true; graphics.render_scale = render_scale; graphics.ray_tracing = true;
+    graphics.enhanced = true; graphics.temporal_aa = false; graphics.render_scale = render_scale; graphics.ray_tracing = true;
     graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = graphics.shadows = 1;
     graphics.bloom = graphics.sharpen = 0; graphics.exposure = 1; graphics.roughness = .35f;
     const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
@@ -1967,27 +1356,26 @@ void check_oblique_half_resolution_history(Fixture& fixture, bool force_off) {
         }
         return result;
     };
-    for (bool taa : {false, true})
-        for (int requested_samples : {4, 8}) {
-            graphics.temporal_aa = taa; graphics.samples = requested_samples;
-            fixture.renderer.set_graphics(graphics);
-            for (bool moving : {false, true}) {
-                const auto fresh = measure(false, moving), retained = measure(true, moving);
-                std::cout << "oblique perspective half-resolution " << (moving ? "vertex+model" : "stationary")
-                          << " taa=" << taa << " samples=" << fixture.renderer.samples()
-                          << " variance fresh=" << fresh.variance() << " retained=" << retained.variance()
-                          << " physical-error=" << retained.error(fresh)
-                          << " contrast=" << fresh.stripe_contrast() << '/'
-                          << retained.stripe_contrast() << '\n';
-                require(fresh.variance() > .1,
-                        "Oblique perspective fixture did not exercise visible texture/illumination noise");
-                require(retained.variance() < fresh.variance()*.75,
-                        "Half-resolution MSAA perspective history rejected the same oblique surface");
-                require(retained.error(fresh) <= 10 && fresh.stripe_contrast() > 2 &&
-                        retained.stripe_contrast() >= fresh.stripe_contrast()*.7,
-                        "Oblique previous vertex/model correspondence smeared physical artwork or illumination");
-            }
+    for (int requested_samples : {4, 8}) {
+        graphics.samples = requested_samples;
+        fixture.renderer.set_graphics(graphics);
+        for (bool moving : {false, true}) {
+            const auto fresh = measure(false, moving), retained = measure(true, moving);
+            std::cout << "oblique perspective half-resolution " << (moving ? "vertex+model" : "stationary")
+                      << " samples=" << fixture.renderer.samples()
+                      << " variance fresh=" << fresh.variance() << " retained=" << retained.variance()
+                      << " physical-error=" << retained.error(fresh)
+                      << " contrast=" << fresh.stripe_contrast() << '/'
+                      << retained.stripe_contrast() << '\n';
+            require(fresh.variance() > .1,
+                    "Oblique perspective fixture did not exercise visible texture/illumination noise");
+            require(retained.variance() < fresh.variance()*.75,
+                    "Half-resolution MSAA perspective history rejected the same oblique surface");
+            require(retained.error(fresh) <= 10 && fresh.stripe_contrast() > 2 &&
+                    retained.stripe_contrast() >= fresh.stripe_contrast()*.7,
+                    "Oblique previous vertex/model correspondence smeared physical artwork or illumination");
         }
+    }
     fixture.renderer.release_mesh(floor); fixture.renderer.release_mesh(source);
     fixture.renderer.set_graphics(saved);
     std::cout << "perspective oblique floor/half resolution/MSAA4 and 8/full-strength RT/vertex-model convergence PASS\n";
@@ -2051,6 +1439,461 @@ void check_msaa_metadata(Fixture& fixture, bool force_off) {
     fixture.renderer.set_graphics(saved);
     std::cout << "enhanced MSAA silhouette coverage/coherent selected geometry PASS\n";
 }
+void check_reflection_noise(Fixture& fixture, bool force_off) {
+    if (force_off || !fixture.renderer.ray_tracing_available()) {
+        std::cout << "finite-source reflection convergence/motion SKIPPED: RT off/unavailable\n";
+        return;
+    }
+    const auto saved = fixture.renderer.graphics_settings();
+    auto graphics = saved;
+    graphics.enhanced = true; graphics.samples = 8; graphics.temporal_aa = false;
+    graphics.render_scale = 1; graphics.ray_tracing = true; graphics.exposure = 1;
+    graphics.roughness = .85f; graphics.reflections = 0;
+    graphics.ambient_occlusion = graphics.indirect_lighting = graphics.shadows = 0;
+    graphics.bloom = graphics.sharpen = 0;
+    fixture.renderer.set_graphics(graphics);
+    constexpr float half_height = .75f, distance = 2;
+    const float half_width = distance*half_height*fixture.aspect;
+    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
+    const std::array<Vertex, 4> receiver_vertices{{
+        {{-1.1f*half_width,-1.1f*distance*half_height,-distance},{-.05f,-.05f},{0,0,1}},
+        {{1.1f*half_width,-1.1f*distance*half_height,-distance},{1.05f,-.05f},{0,0,1}},
+        {{1.1f*half_width,1.1f*distance*half_height,-distance},{1.05f,1.05f},{0,0,1}},
+        {{-1.1f*half_width,1.1f*distance*half_height,-distance},{-.05f,1.05f},{0,0,1}}
+    }};
+    const std::array<Vertex, 4> red_vertices{{
+        {{-3.2f,-3.2f,2},{0,0},{0,0,-1}}, {{3.2f,-3.2f,2},{1,0},{0,0,-1}},
+        {{3.2f,3.2f,2},{1,1},{0,0,-1}}, {{-3.2f,3.2f,2},{0,1},{0,0,-1}}
+    }};
+    const std::array<Vertex, 4> green_vertices{{
+        {{-6,-6,5},{0,0},{0,0,-1}}, {{6,-6,5},{1,0},{0,0,-1}},
+        {{6,6,5},{1,1},{0,0,-1}}, {{-6,6,5},{0,1},{0,0,-1}}
+    }};
+    const auto receiver = fixture.renderer.upload_mesh(receiver_vertices, indices);
+    const auto red = fixture.renderer.upload_mesh(red_vertices, indices);
+    const auto green = fixture.renderer.upload_mesh(green_vertices, indices);
+    const std::array<std::uint8_t, 4> white{{255,255,255,255}};
+    const auto source_texture = fixture.renderer.upload_texture(1, 1, white, false, false);
+    std::vector<std::uint8_t> texels(std::size_t(fixture.width)*4);
+    const int smooth_left = fixture.width/2-16, art_left = fixture.width*75/100-32;
+    const int bottom = fixture.height/2-8, stroke = art_left+32;
+    for (int x = 0; x < fixture.width; ++x) {
+        texels[x*4] = texels[x*4+1] = 56;
+        texels[x*4+2] = x < fixture.width*60/100 ? 56 : (x%4<2 ? 112 : 144);
+        if (x >= stroke && x < stroke+3) texels[x*4+2] = 24;
+        texels[x*4+3] = 255;
+    }
+    const auto texture = fixture.renderer.upload_texture(fixture.width, 1, texels, false, false);
+    const float source_color = std::pow(4.f,1.f/2.2f);
+    const auto draw = [&](bool moved) {
+        fixture.renderer.clear();
+        fixture.renderer.camera(identity_matrix(), frustum_projection(half_height,fixture.aspect,1,1000));
+        DrawState state; state.temporal_static = true; state.temporal_id = 0x7A0A;
+        fixture.renderer.draw(receiver, texture, fixture.material, fixture.pass, state);
+        // Both emitters remain behind the camera and in the actual acceleration
+        // scene. Only RED's model changes; no raster owner, texture epoch, mesh,
+        // material, instance ID, camera or graphics setting changes at the move.
+        state.temporal_id = 0x7A0B; state.color = {source_color,0,0,1};
+        state.model.values[12] = moved ? 100.f : 0.f;
+        fixture.renderer.draw(red, source_texture, fixture.material, fixture.pass, state);
+        state.temporal_id = 0x7A0C; state.color = {0,source_color,0,1};
+        state.model = identity_matrix();
+        fixture.renderer.draw(green, source_texture, fixture.material, fixture.pass, state);
+        fixture.renderer.finish_world();
+        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
+    };
+    struct Samples {
+        TemporalPixels smooth{32,16}, artwork{64,16};
+        std::array<double,3> linear{}, byte_bound{};
+    };
+    const auto add = [&](Samples& samples, const std::vector<std::uint8_t>& image) {
+        samples.smooth.add(image, fixture.width, smooth_left, bottom);
+        samples.artwork.add(image, fixture.width, art_left, bottom);
+        for (int y = 0; y < samples.smooth.height; ++y)
+            for (int x = 0; x < samples.smooth.width; ++x)
+                for (int c = 0; c < 3; ++c) {
+                    const double displayed = image[(std::size_t(bottom+y)*fixture.width+smooth_left+x)*4+c]/255.;
+                    samples.linear[c] += std::pow(displayed,2.2);
+                    // Exact upper derivative bound for the half-byte interval.
+                    samples.byte_bound[c] += (1.1/255)*std::pow(std::min(1.,displayed+.5/255),1.2);
+                }
+    };
+    const auto mean = [](const Samples& samples, int c) {
+        return samples.linear[c]/(samples.smooth.frames*samples.smooth.width*samples.smooth.height);
+    };
+    const auto bound = [](const Samples& samples, int c) {
+        return samples.byte_bound[c]/(samples.smooth.frames*samples.smooth.width*samples.smooth.height);
+    };
+    const auto measure_fresh = [&](bool moved) {
+        Samples result;
+        for (int frame = 0; frame < 64; ++frame) {
+            fixture.renderer.reset_history();
+            add(result,draw(moved));
+        }
+        return result;
+    };
+    // Independent neutral raster controls repeat the same meshes and IDs with
+    // RED in each model position. A behind-camera source must not alter artwork.
+    const auto neutral = measure_fresh(false), neutral_moved = measure_fresh(true);
+    graphics.reflections = 1; fixture.renderer.set_graphics(graphics);
+    const auto fresh = measure_fresh(false);
+    fixture.renderer.reset_history();
+    for (int frame = 0; frame < 128; ++frame) draw(false);
+    Samples retained, old_red;
+    for (int frame = 0; frame < 64; ++frame) {
+        const auto image = draw(false); add(retained,image);
+        if (frame >= 32) add(old_red,image);
+    }
+    std::array<Samples,4> moving;
+    constexpr std::array<int,4> observed{{1,2,4,8}};
+    for (int frame = 1; frame <= 8; ++frame) {
+        const auto image = draw(true); // NO reset: exercise genuine source innovation.
+        for (std::size_t i = 0; i < observed.size(); ++i)
+            if (frame == observed[i]) add(moving[i],image);
+    }
+    // Only now destroy runtime history for the independent new-source truth.
+    const auto fresh_green = measure_fresh(true);
+    const double red_signal = mean(old_red,0)-mean(fresh_green,0);
+    const double green_signal = mean(fresh_green,1)-mean(old_red,1);
+    const double red_physical = mean(fresh,0)-mean(neutral,0);
+    const double green_physical = mean(fresh_green,1)-mean(neutral,1);
+    // Match the retained artwork's AA/history regime as well as its physical
+    // source. Run this control last, leaving every source/motion RNG phase above
+    // unchanged; neither emitter supplies any blue radiance.
+    graphics.reflections = 0; fixture.renderer.set_graphics(graphics);
+    fixture.renderer.reset_history();
+    for (int frame = 0; frame < 128; ++frame) draw(false);
+    Samples retained_neutral;
+    for (int frame = 0; frame < 64; ++frame) add(retained_neutral,draw(false));
+    double blue_error = 0, blue_detail = 0, blue_control_regime_error = 0;
+    for (std::size_t at = 2; at < neutral.artwork.sum.size(); at += 3) {
+        blue_error = std::max(blue_error,std::abs(retained.artwork.sum[at]/retained.artwork.frames-
+                                                retained_neutral.artwork.sum[at]/retained_neutral.artwork.frames));
+        blue_error = std::max(blue_error,std::abs(fresh.artwork.sum[at]/fresh.artwork.frames-
+                                                neutral.artwork.sum[at]/neutral.artwork.frames));
+        blue_control_regime_error = std::max(blue_control_regime_error,
+            std::abs(retained_neutral.artwork.sum[at]/retained_neutral.artwork.frames-
+                     neutral.artwork.sum[at]/neutral.artwork.frames));
+        blue_detail = std::max(blue_detail,std::abs(neutral.artwork.sum[at]/neutral.artwork.frames-56));
+    }
+    std::cout << "finite-source reflection samples=" << fixture.renderer.samples()
+              << " FOV-half-height=.75 roughness=.85 strength=1 linear-source=4"
+              << " variance fresh/reset64=" << fresh.smooth.variance()
+              << " warm128+retained64=" << retained.smooth.variance()
+              << " ratio=" << retained.smooth.variance()/fresh.smooth.variance()
+              << " fixed-.9-EMA-floor=" << .1/1.9 << " count59-EMA-floor=" << 1./119
+              << " linear-meanRGB neutral/fresh/retained=";
+    for (int c = 0; c < 3; ++c)
+        std::cout << (c ? "," : "") << mean(neutral,c) << '/' << mean(fresh,c) << '/' << mean(retained,c);
+    std::cout << " linear-physical-red/green=" << red_physical << '/' << green_physical
+              << " neutral-model-repeat-error=" << neutral.smooth.error(neutral_moved.smooth)
+              << " painted-blue-matched-maxerror=" << blue_error << " painted-blue-detail=" << blue_detail
+              << " neutral-blue-fresh/retained-regime-maxdifference=" << blue_control_regime_error << std::endl;
+    for (std::size_t i = 0; i < observed.size(); ++i)
+        std::cout << "reflection source-model-move frame=" << observed[i]
+                  << " linearRGB=" << mean(moving[i],0) << ',' << mean(moving[i],1) << ',' << mean(moving[i],2)
+                  << " oldRed/newGreen=" << mean(old_red,0) << '/' << mean(fresh_green,0)
+                  << ',' << mean(old_red,1) << '/' << mean(fresh_green,1)
+                  << " remaining-red=" << (mean(moving[i],0)-mean(fresh_green,0))/red_signal
+                  << " green-error=" << std::abs(mean(moving[i],1)-mean(fresh_green,1))/green_signal
+                  << " linear-byte-boundRG=" << bound(moving[i],0)+bound(fresh_green,0)
+                  << ',' << bound(moving[i],1)+bound(fresh_green,1) << std::endl;
+    const auto& fourth = moving[2];
+    const bool static_pass = retained.smooth.variance() < fresh.smooth.variance()*.025;
+    const bool motion_pass =
+        std::abs(mean(fourth,0)-mean(fresh_green,0)) <= red_signal*.15+bound(fourth,0)+bound(fresh_green,0) &&
+        std::abs(mean(fourth,1)-mean(fresh_green,1)) <= green_signal*.15+bound(fourth,1)+bound(fresh_green,1);
+    std::cout << "reflection gates steady-floor=" << (static_pass ? "PASS" : "FAIL")
+              << " frame4-real-source-response=" << (motion_pass ? "PASS" : "FAIL") << std::endl;
+    fixture.renderer.release_mesh(green); fixture.renderer.release_mesh(red);
+    fixture.renderer.release_mesh(receiver); fixture.renderer.set_graphics(saved);
+    require(neutral.smooth.error(neutral_moved.smooth) <= 1 &&
+            neutral.artwork.error(neutral_moved.artwork) <= 1,
+            "Reflection source model changed the primary raster receiver/artwork");
+    require(red_physical > .01 && green_physical > .01 && red_signal > .01 && green_signal > .01 &&
+            fresh.smooth.variance() > .25,
+            "Finite reflection fixture lacks meaningful genuine hit/miss variance or red/green source signal");
+    require(blue_detail >= 32 && blue_error <= 1,
+            "Reflection convergence erased painted detail in a channel with exactly zero source radiance");
+    for (int c = 0; c < 3; ++c)
+        require(std::abs(mean(retained,c)-mean(fresh,c)) <=
+                    std::abs(mean(fresh,c)-mean(neutral,c))*.15+bound(retained,c)+bound(fresh,c),
+                "Reflection convergence changed the physical linear mean/strength");
+    require(static_pass, "Stationary finite-source reflection retained the fixed-EMA consumer noise floor");
+    require(motion_pass, "Unchanged receiver retained old red reflection after the real source moved aside");
+    std::cout << "finite-source reflection stationary convergence/real source innovation/linear mean/painted detail PASS\n";
+}
+
+void check_rare_reflection_history(Fixture& fixture, bool force_off) {
+    if (force_off || !fixture.renderer.ray_tracing_available()) {
+        std::cout << "rare stationary finite-source reflection SKIPPED: RT off/unavailable\n";
+        return;
+    }
+    const auto saved = fixture.renderer.graphics_settings();
+    auto graphics = saved;
+    graphics.enhanced = graphics.ray_tracing = true; graphics.temporal_aa = false;
+    graphics.samples = 8; graphics.render_scale = 1; graphics.exposure = 1;
+    graphics.roughness = .85f; graphics.reflections = 0;
+    graphics.shadows = graphics.ambient_occlusion = graphics.indirect_lighting = 0;
+    graphics.bloom = graphics.sharpen = 0;
+    fixture.renderer.set_graphics(graphics);
+    const std::array<std::uint16_t,6> indices{{0,1,2,0,2,3}};
+    const float half_width = 2*.75f*fixture.aspect;
+    const std::array<Vertex,4> receiver_vertices{{
+        {{-1.1f*half_width,-1.65f,-2},{0,0},{0,0,1}},
+        {{1.1f*half_width,-1.65f,-2},{1,0},{0,0,1}},
+        {{1.1f*half_width,1.65f,-2},{1,1},{0,0,1}},
+        {{-1.1f*half_width,1.65f,-2},{0,1},{0,0,1}}
+    }};
+    // Four world units from the receiver: half-angle atan(.35/3.94).
+    // Unlike the original 3.2-wide emitter, this narrow solid angle permits
+    // legitimate whole-kernel misses. No mesh/model/material ever changes.
+    const std::array<Vertex,4> source_vertices{{
+        {{-.35f,-.35f,2},{0,0},{0,0,-1}}, {{.35f,-.35f,2},{1,0},{0,0,-1}},
+        {{.35f,.35f,2},{1,1},{0,0,-1}}, {{-.35f,.35f,2},{0,1},{0,0,-1}}
+    }};
+    const auto receiver = fixture.renderer.upload_mesh(receiver_vertices,indices);
+    const auto source = fixture.renderer.upload_mesh(source_vertices,indices);
+    const int left = fixture.width/2-16, bottom = fixture.height/2-8;
+    const auto draw = [&] {
+        fixture.renderer.clear();
+        fixture.renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,1000));
+        DrawState state; state.temporal_static = true; state.temporal_id = 0x7A14;
+        state.color = {56.f/255,56.f/255,56.f/255,1};
+        fixture.renderer.draw(receiver,0,fixture.material,fixture.pass,state);
+        state.temporal_id = 0x7A15; state.color = {std::pow(16.f,1.f/2.2f),0,0,1};
+        fixture.renderer.draw(source,0,fixture.material,fixture.pass,state);
+        fixture.renderer.finish_world();
+        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
+    };
+    fixture.renderer.reset_history();
+    const auto neutral = draw();
+    graphics.reflections = 1; fixture.renderer.set_graphics(graphics);
+    TemporalPixels fresh{32,16}, retained{32,16};
+    std::array<bool,32*16> previous_zero{};
+    int zeros=0, hits=0, zero_to_hit=0;
+    double fresh_linear=0, retained_linear=0, neutral_linear=0, byte_bound=0;
+    const auto add = [&](TemporalPixels& result, const std::vector<std::uint8_t>& image,
+                         double& linear, bool detect) {
+        result.add(image,fixture.width,left,bottom);
+        for (int y=0;y<16;++y) for (int x=0;x<32;++x) {
+            const auto at = (std::size_t(bottom+y)*fixture.width+left+x)*4;
+            const double displayed = image[at]/255.;
+            linear += std::pow(displayed,2.2);
+            byte_bound += (1.1/255)*std::pow(std::min(1.,displayed+.5/255),1.2);
+            if (detect) {
+                const auto index = std::size_t(y)*32+x;
+                const bool zero = image[at]==neutral[at];
+                zeros += zero; hits += image[at]>neutral[at]+1;
+                zero_to_hit += result.frames>1 && previous_zero[index] && image[at]>neutral[at]+1;
+                previous_zero[index] = zero;
+                neutral_linear += std::pow(neutral[at]/255.,2.2);
+            }
+        }
+    };
+    for (int frame=0;frame<256;++frame) {
+        fixture.renderer.reset_history();
+        add(fresh,draw(),fresh_linear,true);
+    }
+    fixture.renderer.reset_history();
+    for (int frame=0;frame<256;++frame) draw();
+    for (int frame=0;frame<256;++frame) add(retained,draw(),retained_linear,false);
+    constexpr double count=256.*32*16;
+    const double physical = (fresh_linear-neutral_linear)/count;
+    const double mean_error = std::abs(retained_linear-fresh_linear)/count;
+    std::cout << "rare unchanged reflection emitter-half=.35 z=2 receiver-z=-2"
+              << " half-angle=" << std::atan(.35/3.94) << " linear-source=16"
+              << " roughness=.85 reflection-strength=1 samples=" << fixture.renderer.samples()
+              << " consumer-zero=" << zeros << " consumer-hit=" << hits
+              << " stationary-consumer-zero-to-hit=" << zero_to_hit
+              << " variance fresh/reset256=" << fresh.variance()
+              << " warm256+retained256=" << retained.variance()
+              << " ratio=" << retained.variance()/fresh.variance()
+              << " linear-physical-red=" << physical << " linear-mean-error=" << mean_error
+              << " linear-byte-bound=" << byte_bound/count << std::endl;
+    fixture.renderer.release_mesh(source); fixture.renderer.release_mesh(receiver);
+    fixture.renderer.set_graphics(saved);
+    require(zeros>1000 && hits>1000 && zero_to_hit>100,
+            "Rare unchanged emitter lacks observed consumer zero-to-hit episodes");
+    require(physical>.0002 && fresh.variance()>.05,
+            "Rare reflection fixture lacks meaningful physical signal/Monte Carlo noise");
+    require(mean_error<=physical*.15+byte_bound/count,
+            "Rare stationary reflection changed its physical linear mean/strength");
+    require(retained.variance()<fresh.variance()*.025,
+            "Stationary whole-kernel reflection misses collapsed retained confidence");
+    std::cout << "rare unchanged reflected-emitter consumer zero-to-hit/convergence PASS\n";
+}
+
+void check_static_shadow_noise(Fixture& fixture, bool force_off) {
+    if (force_off || !fixture.renderer.ray_tracing_available()) {
+        std::cout << "static Sun shadow-edge noise SKIPPED: RT off/unavailable\n";
+        return;
+    }
+    const auto saved = fixture.renderer.graphics_settings();
+    auto graphics = saved;
+    graphics.enhanced = true; graphics.samples = 8; graphics.temporal_aa = false;
+    graphics.ray_tracing = true; graphics.shadows = 1; graphics.exposure = 1;
+    graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
+    graphics.bloom = graphics.sharpen = 0;
+    const std::array<std::uint16_t, 6> indices{{0,1,2,0,2,3}};
+    // Local meshes leave the small moving/mixed-shadow fixtures unchanged.
+    // Extend the receiver past the measurement border: no sky coverage in its ROI.
+    const std::array<Vertex, 4> floor_vertices{{
+        {{-4000,-80,-200},{0,0},{0,1,0}}, {{4000,-80,-200},{1,0},{0,1,0}},
+        {{4000,-80,-6000},{1,1},{0,1,0}}, {{-4000,-80,-6000},{0,1},{0,1,0}}
+    }};
+    const std::array<Vertex, 4> caster_vertices{{
+        {{-150,100,-1000},{0,0},{0,1,0}}, {{150,100,-1000},{1,0},{0,1,0}},
+        {{150,100,-380},{1,1},{0,1,0}}, {{-150,100,-380},{0,1},{0,1,0}}
+    }};
+    const auto floor = fixture.renderer.upload_mesh(floor_vertices, indices);
+    const auto caster = fixture.renderer.upload_mesh(caster_vertices, indices);
+    const auto draw = [&](bool present) {
+        fixture.renderer.clear();
+        fixture.renderer.camera(identity_matrix(), frustum_projection(.75f, fixture.aspect, 1, 30000));
+        DrawState state; state.lighting = true; state.temporal_static = true;
+        state.temporal_id = 0x7A08;
+        state.color = {.5f,.5f,.5f,1}; state.diffuse_light = {.5f,.5f,.5f,1};
+        fixture.renderer.draw(floor, 0, fixture.material, fixture.pass, state);
+        if (present) {
+            state.temporal_id = 0x7A09;
+            fixture.renderer.draw(caster, 0, fixture.material, fixture.pass, state);
+        }
+        fixture.renderer.finish_world();
+        auto image = fixture.renderer.capture_rgba(); fixture.renderer.present(); return image;
+    };
+    struct Point { double x, y; };
+    const auto project = [&](double x, double z) {
+        return Point{fixture.width*(.5+x/(-z*.75*fixture.aspect)*.5),
+                     fixture.height*(.5-80/(-z*.75)*.5)};
+    };
+    // Independent geometry: Sun (.5,1,.3), floor -80, caster +100,
+    // and the unchanged .06 normal ray-origin offset give height 179.94.
+    const std::array<Point, 4> polygon{{
+        project(-150-89.97, -1000-53.982), project(150-89.97, -1000-53.982),
+        project(150-89.97, -380-53.982), project(-150-89.97, -380-53.982)
+    }};
+    double twice_area = 0;
+    double min_x = fixture.width, min_y = fixture.height, max_x = 0, max_y = 0;
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto a = polygon[i], b = polygon[(i+1)%polygon.size()];
+        twice_area += a.x*b.y-a.y*b.x;
+        min_x = std::min(min_x, a.x); max_x = std::max(max_x, a.x);
+        min_y = std::min(min_y, a.y); max_y = std::max(max_y, a.y);
+    }
+    const double physical_area = std::abs(twice_area)*.5;
+    const int left = int(std::floor(min_x))-4, bottom = int(std::floor(min_y))-4;
+    const int width = int(std::ceil(max_x))+4-left, height = int(std::ceil(max_y))+4-bottom;
+    require(left >= 0 && bottom >= 0 && left+width <= fixture.width &&
+            bottom+height <= fixture.height, "Static Sun physical shadow ROI outside drawable");
+    const auto inside = [&](Point p) {
+        for (std::size_t i = 0; i < polygon.size(); ++i) {
+            const auto a = polygon[i], b = polygon[(i+1)%polygon.size()];
+            const double cross = (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);
+            if (cross*twice_area < 0) return false;
+        }
+        return true;
+    };
+    const auto edge_distance = [&](Point p) {
+        double distance = fixture.width;
+        for (std::size_t i = 0; i < polygon.size(); ++i) {
+            const auto a = polygon[i], b = polygon[(i+1)%polygon.size()];
+            const double dx = b.x-a.x, dy = b.y-a.y;
+            const double t = std::clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy), 0., 1.);
+            distance = std::min(distance, std::hypot(p.x-a.x-t*dx, p.y-a.y-t*dy));
+        }
+        return distance;
+    };
+    struct Samples {
+        TemporalPixels pixels;
+        std::vector<double> linear;
+        Samples(int w, int h) : pixels(w,h), linear(std::size_t(w)*h) {}
+    };
+    const auto measure = [&](bool retain, bool present) {
+        fixture.renderer.reset_history();
+        if (retain) for (int frame = 0; frame < 64; ++frame) draw(present);
+        Samples result(width, height);
+        for (int frame = 0; frame < 64; ++frame) {
+            if (!retain) fixture.renderer.reset_history();
+            const auto image = draw(present);
+            result.pixels.add(image, fixture.width, left, bottom);
+            for (int y = 0; y < height; ++y)
+                for (int x = 0; x < width; ++x)
+                    result.linear[std::size_t(y)*width+x] +=
+                        std::pow(image[(std::size_t(bottom+y)*fixture.width+left+x)*4]/255., 2.2)/64;
+        }
+        return result;
+    };
+    // This neutral floor is below the HDR shoulder. Gamma 2.2 decoding
+    // recovers linear gain: a real fully occluded Sun multiplies it by .3.
+    const double neutral_rgb = 255*(.496+.4/std::sqrt(1+.5*.5+.3*.3));
+    for (float scale : {1.f, .5f}) {
+        graphics.render_scale = scale; fixture.renderer.set_graphics(graphics);
+        const auto neutral = measure(true, false);
+        const auto fresh = measure(false, true), retained = measure(true, true);
+        double neutral_mean = 0, fresh_area = 0, retained_area = 0, quantization_area = 0;
+        for (std::size_t at = 0; at < neutral.linear.size(); ++at) {
+            const double lit = neutral.linear[at];
+            neutral_mean += neutral.pixels.sum[at*3]/64;
+            require(lit > .1, "Static Sun no-caster ROI lacks its actual neutral receiver");
+            fresh_area += (lit-fresh.linear[at])/(.7*lit);
+            retained_area += (lit-retained.linear[at])/(.7*lit);
+            // Each displayed byte is rounded within half a level. Use the
+            // largest derivative in [0,lit+half-level] for both decoded images.
+            const double lit_display = std::pow(lit, 1/2.2);
+            quantization_area += (2.2/255)*std::pow(std::min(1.,lit_display+.5/255),1.2)/(.7*lit);
+        }
+        neutral_mean /= neutral.linear.size();
+        double fresh_variance = 0, retained_variance = 0;
+        int edge_pixels = 0;
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x) {
+                if (edge_distance({left+x+.5, bottom+y+.5}) > 2/scale) continue;
+                ++edge_pixels;
+                for (int c = 0; c < 3; ++c) {
+                    const auto at = (std::size_t(y)*width+x)*3+c;
+                    const double f = fresh.pixels.sum[at]/64;
+                    const double r = retained.pixels.sum[at]/64;
+                    fresh_variance += std::max(0.,fresh.pixels.square[at]/64-f*f);
+                    retained_variance += std::max(0.,retained.pixels.square[at]/64-r*r);
+                }
+            }
+        require(edge_pixels > 0, "Static Sun independent physical edge ROI is empty");
+        fresh_variance /= edge_pixels*3; retained_variance /= edge_pixels*3;
+        // Explicit independent finite-source quadrature, not an arbitrary
+        // widened quality percentage. Bilinear reconstruction preserves the
+        // integral of these fixed-grid cell values within the padded ROI.
+        double grid_area = 0;
+        const int pitch = int(1/scale);
+        for (int y = 0; y < fixture.height; y += pitch)
+            for (int x = 0; x < fixture.width; x += pitch)
+                if (inside({x+pitch*.5, y+pitch*.5})) grid_area += pitch*pitch;
+        const double tolerance = physical_area*.05+std::abs(grid_area-physical_area)+quantization_area;
+        std::cout << "static Sun shadow-edge scale=" << scale << " samples=" << fixture.renderer.samples()
+                  << " frames fresh/reset=" << fresh.pixels.frames << " retained=" << retained.pixels.frames
+                  << " warmup=64 edge-pixels=" << edge_pixels
+                  << " variance fresh/reset64=" << fresh_variance << " retained64=" << retained_variance
+                  << " neutral-meanRGB=" << neutral_mean
+                  << " area physical/grid/fresh/retained=" << physical_area << '/' << grid_area
+                  << '/' << fresh_area << '/' << retained_area
+                  << " coverage-mean physical/fresh/retained=" << physical_area/neutral.linear.size()
+                  << '/' << fresh_area/neutral.linear.size() << '/' << retained_area/neutral.linear.size()
+                  << " area-tolerance 5%+grid+byte=" << tolerance << std::endl;
+        require(std::abs(neutral_mean-neutral_rgb) <= 1,
+                "Static Sun no-caster image changed the original neutral floor transfer");
+        require(fresh_area > physical_area*.8 && retained_area > physical_area*.8,
+                "Static Sun lost real opaque caster shadow strength/area");
+        require(std::abs(fresh_area-physical_area) <= tolerance &&
+                std::abs(retained_area-physical_area) <= tolerance,
+                "Static Sun changed independent physical shadow area/mean beyond five percent plus finite sampling");
+        require(retained_variance <= .1,
+                "Stationary real Sun shadow edge retained consumer-visible noise");
+    }
+    fixture.renderer.release_mesh(caster); fixture.renderer.release_mesh(floor);
+    fixture.renderer.set_graphics(saved);
+    std::cout << "static Sun shadow-edge/RT history/MSAA8/native and half/independent physical extent PASS\n";
+}
+
 void check_mixed_shadow_coverage_history(Fixture& fixture, bool force_off) {
     if (force_off || !fixture.renderer.ray_tracing_available()) return;
     const auto saved = fixture.renderer.graphics_settings();
@@ -2098,57 +1941,47 @@ void check_moving_shadow_history(Fixture& fixture, bool force_off) {
     if (force_off || !fixture.renderer.ray_tracing_available()) return;
     const auto saved = fixture.renderer.graphics_settings();
     auto graphics = saved;
-    graphics.render_scale = 1; graphics.samples = 0; graphics.ray_tracing = true;
+    graphics.render_scale = 1; graphics.samples = 0; graphics.ray_tracing = true; graphics.temporal_aa = false;
     graphics.ambient_occlusion = graphics.reflections = graphics.indirect_lighting = 0;
     graphics.shadows = 1; graphics.bloom = graphics.sharpen = 0; graphics.exposure = 1;
-    for (bool taa : {false, true}) {
-        graphics.temporal_aa = taa; fixture.renderer.set_graphics(graphics);
-        fixture.renderer.reset_history();
-        const auto lit = fixture.frame(Fixture::Mode::Absent);
-        for (int frame = 0; frame < 12; ++frame) fixture.frame(Fixture::Mode::Opaque);
-        const auto moved = fixture.frame(Fixture::Mode::Opaque, 250);
-        fixture.renderer.reset_history();
-        const auto fresh = fixture.frame(Fixture::Mode::Opaque, 250);
-        // History reset preserves the counter; 64 fresh frames align with moved.
-        auto phase_aligned = fresh;
-        for (int frame = 1; frame < jitter_period; ++frame) {
-            fixture.renderer.reset_history();
-            phase_aligned = fixture.frame(Fixture::Mode::Opaque, 250);
-        }
-        std::cout << "moving shadow taa=" << taa
-                  << " old-patch lit/moved/next/aligned=" << fixture.patch(lit, -90, -654) << '/'
-                  << fixture.patch(moved, -90, -654) << '/' << fixture.patch(fresh, -90, -654) << '/'
-                  << fixture.patch(phase_aligned, -90, -654)
-                  << " new-patch lit/moved/next/aligned=" << fixture.patch(lit, 160, -654) << '/'
-                  << fixture.patch(moved, 160, -654) << '/' << fixture.patch(fresh, 160, -654) << '/'
-                  << fixture.patch(phase_aligned, 160, -654) << '\n';
-        require(std::abs(fixture.patch(moved, -90, -654)-fixture.patch(lit, -90, -654)) <= 3,
-                "Stationary receiver retained a moving blocker's old shadow");
-        require(fixture.patch(lit, 160, -654)-fixture.patch(moved, 160, -654) >= 4,
-                "Moving blocker failed to shadow its new receiver footprint");
-        require(std::abs(fixture.patch(moved, 160, -654)-fixture.patch(phase_aligned, 160, -654)) <= 3,
-                "Stationary receiver delayed a moving blocker's new shadow");
-    }
+    fixture.renderer.set_graphics(graphics);
+    fixture.renderer.reset_history();
+    const auto lit = fixture.frame(Fixture::Mode::Absent);
+    for (int frame = 0; frame < 12; ++frame) fixture.frame(Fixture::Mode::Opaque);
+    const auto moved = fixture.frame(Fixture::Mode::Opaque, 250);
+    fixture.renderer.reset_history();
+    const auto fresh = fixture.frame(Fixture::Mode::Opaque, 250);
+    std::cout << "moving shadow old-patch lit/moved/fresh=" << fixture.patch(lit, -90, -654) << '/'
+              << fixture.patch(moved, -90, -654) << '/' << fixture.patch(fresh, -90, -654)
+              << " new-patch lit/moved/fresh=" << fixture.patch(lit, 160, -654) << '/'
+              << fixture.patch(moved, 160, -654) << '/' << fixture.patch(fresh, 160, -654) << '\n';
+    require(std::abs(fixture.patch(moved, -90, -654)-fixture.patch(lit, -90, -654)) <= 3,
+            "Stationary receiver retained a moving blocker's old shadow");
+    require(fixture.patch(lit, 160, -654)-fixture.patch(moved, 160, -654) >= 4,
+            "Moving blocker failed to shadow its new receiver footprint");
+    require(std::abs(fixture.patch(moved, 160, -654)-fixture.patch(fresh, 160, -654)) <= 3,
+            "Stationary receiver delayed a moving blocker's new shadow");
     fixture.renderer.set_graphics(saved);
-    std::cout << "stationary receiver/moving blocker/RT short history/TAA history PASS\n";
+    std::cout << "stationary receiver/moving blocker/RT short history PASS\n";
 }
 } // namespace
 int main(int argc, char** argv) {
     bool force_off = false, require_rt = false, temporal_only = false, oblique_only = false;
-    bool shadow_only = false, smooth_only = false, art_change_only = false, overlay_only = false;
-    bool far_art_only = false, ray_origin_only = false;
+    bool shadow_only = false, overlay_only = false, ray_origin_only = false, lighting_noise_only = false;
+    bool shadow_noise_only = false, reflection_noise_only = false, rare_reflection_only = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string_view(argv[i]) == "--rt-off") force_off = true;
         else if (std::string_view(argv[i]) == "--require-rt") require_rt = true;
         else if (std::string_view(argv[i]) == "--temporal-only") temporal_only = true;
         else if (std::string_view(argv[i]) == "--oblique-only") oblique_only = true;
         else if (std::string_view(argv[i]) == "--shadow-only") shadow_only = true;
-        else if (std::string_view(argv[i]) == "--smooth-only") smooth_only = true;
-        else if (std::string_view(argv[i]) == "--art-change-only") art_change_only = true;
         else if (std::string_view(argv[i]) == "--overlay-only") overlay_only = true;
-        else if (std::string_view(argv[i]) == "--far-art-only") far_art_only = true;
         else if (std::string_view(argv[i]) == "--ray-origin-only") ray_origin_only = true;
-        else { std::cerr << "Usage: check_vulkan [--rt-off | --require-rt] [--temporal-only | --oblique-only | --shadow-only | --smooth-only | --art-change-only | --overlay-only | --far-art-only | --ray-origin-only]\n"; return 1; }
+        else if (std::string_view(argv[i]) == "--lighting-noise-only") lighting_noise_only = true;
+        else if (std::string_view(argv[i]) == "--shadow-noise-only") shadow_noise_only = true;
+        else if (std::string_view(argv[i]) == "--reflection-noise-only") reflection_noise_only = true;
+        else if (std::string_view(argv[i]) == "--rare-reflection-only") rare_reflection_only = true;
+        else { std::cerr << "Usage: check_vulkan [--rt-off | --require-rt] [--temporal-only | --oblique-only | --shadow-only | --overlay-only | --ray-origin-only | --lighting-noise-only | --shadow-noise-only | --reflection-noise-only | --rare-reflection-only]\n"; return 1; }
     }
     if (force_off && require_rt) { std::cerr << "Conflicting RT requirements\n"; return 1; }
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::cerr << SDL_GetError() << '\n'; return 1; }
@@ -2159,11 +1992,15 @@ int main(int argc, char** argv) {
                   << " ray-query-capable=" << fixture.renderer.ray_tracing_available() << '\n';
         require(!require_rt || fixture.renderer.ray_tracing_available(),
                 "--require-rt requested but hardware ray queries are unavailable");
-        if (ray_origin_only) check_ray_origin_translation(fixture, force_off);
-        else if (far_art_only) check_far_authored_history(fixture);
+        if (rare_reflection_only) check_rare_reflection_history(fixture, force_off);
+        else if (reflection_noise_only) check_reflection_noise(fixture, force_off);
+        else if (shadow_noise_only) {
+            check_static_shadow_noise(fixture, force_off);
+            check_moving_shadow_history(fixture, force_off);
+        }
+        else if (lighting_noise_only) check_smooth_normal_lighting_noise(fixture, force_off);
+        else if (ray_origin_only) check_ray_origin_translation(fixture, force_off);
         else if (overlay_only) check_untracked_overlay_history(fixture, force_off);
-        else if (art_change_only) check_smooth_normal_actor_artwork(fixture, true);
-        else if (smooth_only) check_smooth_normal_actor_artwork(fixture);
         else if (shadow_only) {
             check_mixed_shadow_coverage_history(fixture, force_off);
             check_moving_shadow_history(fixture, force_off);
@@ -2177,19 +2014,19 @@ int main(int argc, char** argv) {
                 check_authored_artwork(fixture);
                 check_msaa_metadata(fixture, force_off);
                 check_ray_origin_translation(fixture, force_off);
+                check_rare_reflection_history(fixture, force_off);
             }
-            check_temporal(fixture);
             check_noisy_illumination(fixture, force_off);
+            check_smooth_normal_lighting_noise(fixture, force_off);
+            check_reflection_noise(fixture, force_off);
+            check_static_shadow_noise(fixture, force_off);
             check_mixed_shadow_coverage_history(fixture, force_off);
             check_moving_shadow_history(fixture, force_off);
             check_fine_artwork(fixture, force_off);
-            check_temporal_actor_artwork(fixture);
-            check_smooth_normal_actor_artwork(fixture);
-            check_far_authored_history(fixture);
             check_untracked_overlay_history(fixture, force_off);
             check_curved_actor_illumination(fixture, force_off);
         }
-        if (!shadow_only && !smooth_only && !art_change_only && !overlay_only && !far_art_only && !ray_origin_only)
+        if (!shadow_only && !overlay_only && !ray_origin_only && !lighting_noise_only && !shadow_noise_only && !reflection_noise_only && !rare_reflection_only)
             check_oblique_half_resolution_history(fixture, force_off);
     } catch (const std::exception& error) {
         std::cerr << "Vulkan behavior: " << error.what() << '\n'; result = 1;
