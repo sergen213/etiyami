@@ -148,13 +148,7 @@ void regular_file(const fs::path& path) {
 }
 void private_directory(const fs::path& path) {
 #ifdef _WIN32
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;OW)",
-            SDDL_REVISION_1, &descriptor, nullptr) != 0, "Cannot construct private update directory permissions");
-    const bool success = SetFileSecurityW(path.c_str(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor) != 0;
-    LocalFree(descriptor);
-    require(success, "Cannot protect update directory: " + text(path));
+    windows_install::secure(path, true);
 #else
     fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace);
 #endif

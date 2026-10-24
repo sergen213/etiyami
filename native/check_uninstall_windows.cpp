@@ -63,11 +63,16 @@ void queue_console(std::string_view value) {
     const auto input = GetStdHandle(STD_INPUT_HANDLE);
     removal::require(input != INVALID_HANDLE_VALUE, "Console input unavailable");
     for (const char c : value) {
-        INPUT_RECORD record{}; record.EventType = KEY_EVENT;
-        record.Event.KeyEvent.bKeyDown = TRUE; record.Event.KeyEvent.wRepeatCount = 1;
-        record.Event.KeyEvent.uChar.AsciiChar = c == '\n' ? '\r' : c;
-        DWORD written = 0;
-        removal::require(WriteConsoleInputW(input, &record, 1, &written) != 0 && written == 1, "Cannot queue console response");
+        for (const bool down : {true, false}) {
+            INPUT_RECORD record{}; record.EventType = KEY_EVENT;
+            record.Event.KeyEvent.bKeyDown = down ? TRUE : FALSE;
+            record.Event.KeyEvent.wRepeatCount = 1;
+            record.Event.KeyEvent.wVirtualKeyCode = c == '\n' ? VK_RETURN : static_cast<WORD>(c);
+            record.Event.KeyEvent.uChar.AsciiChar = c == '\n' ? '\r' : c;
+            DWORD written = 0;
+            removal::require(WriteConsoleInputW(input, &record, 1, &written) != 0 && written == 1,
+                               "Cannot queue console response");
+        }
     }
 }
 void run_detached(const fs::path& root) {
@@ -120,6 +125,7 @@ int main() {
         fs::create_directories(base);
         const auto root = base/L"Türkçe space %"/"etiyami", links = base/"Start Menu";
         fixture(root, links);
+        std::cerr << "stage: direct uninstall\n";
         const auto installed = get(root/yami::ownership::installedName);
         auto claims = yami::ownership::parse_installed(installed); claims.files.push_back("game.ini");
         put(root/yami::ownership::installedName, yami::ownership::serialize_installed(claims));
@@ -136,29 +142,23 @@ int main() {
             rejected(base/"linked-root"); fs::remove(base/"linked-root");
         }
         active_process_guard(root);
+        std::cerr << "stage: active process and direct uninstall\n";
         removal::require(removal::uninstall(root, true) == 0 && !fs::exists(root/"game/data/owned") &&
                          !fs::exists(root/"yami-native.exe") && !fs::exists(links/yami::ownership::uninstallShortcut) &&
                          get(root/"game.ini") == "settings" && get(root/"game/checkpoints/slot1") == "save" &&
                          get(root/"unknown") == "custom file" && get(root/"unknown.dll") == "unproven library",
                          "Uninstall preservation or owned removal failed");
         const auto consoleRoot = base/"console-install";
+        std::cerr << "stage: console confirmation\n";
         fixture(consoleRoot, base/"console-menu");
-        std::wstring command = L"\"" + fs::path(argv[0]).native() + L"\" \"" + helper.native() + L"\" \"" + base.native() +
-                               L"\" --console-child \"" + consoleRoot.native() + L"\"";
-        STARTUPINFOW startup{}; startup.cb = sizeof(startup); PROCESS_INFORMATION process{};
-        removal::require(CreateProcessW(fs::path(argv[0]).c_str(), command.data(), nullptr, nullptr, FALSE,
-                                        CREATE_NEW_CONSOLE | CREATE_UNICODE_ENVIRONMENT, nullptr, base.c_str(), &startup, &process) != 0,
-                         "Cannot start console confirmation check");
-        CloseHandle(process.hThread);
-        removal::require(WaitForSingleObject(process.hProcess, INFINITE) == WAIT_OBJECT_0, "Console check did not exit");
-        DWORD code = 1; removal::require(GetExitCodeProcess(process.hProcess, &code) != 0 && code == 0, "Console confirmation failed");
-        CloseHandle(process.hProcess);
+        console_child(consoleRoot);
         const auto detachedRoot = base/"detached-install";
+        std::cerr << "stage: detached self-removal\n";
         fixture(detachedRoot, base/"detached-menu", helper);
         run_detached(detachedRoot);
         removal::require(!fs::exists(detachedRoot/"yami-native.exe") && get(detachedRoot/"game.ini") == "settings" &&
                          get(detachedRoot/"unknown") == "custom file", "Detached removal lost preservation");
-        fs::remove_all(base);
+        std::error_code cleanup; fs::remove_all(base, cleanup);
         std::cout << "Windows uninstall confirmation, process, ownership, preservation and self-removal checks passed\n";
         return 0;
     } catch (const std::exception& error) {

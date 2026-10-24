@@ -62,11 +62,11 @@ inline bool path_equal(const fs::path& a, const fs::path& b) {
     if (equal(a, b)) return true;
     const auto normalized = [](const fs::path& path) {
         const auto& native = path.native();
-        const int count = NormalizeString(NormalizationC, native.data(), static_cast<int>(native.size()), nullptr, 0);
+        const int count = FoldStringW(MAP_PRECOMPOSED, native.data(), static_cast<int>(native.size()), nullptr, 0);
         require(count > 0, "Cannot normalize an installation path");
         std::wstring result(static_cast<std::size_t>(count), L'\0');
-        require(NormalizeString(NormalizationC, native.data(), static_cast<int>(native.size()),
-                                result.data(), count) == count, "Cannot normalize an installation path");
+        require(FoldStringW(MAP_PRECOMPOSED, native.data(), static_cast<int>(native.size()),
+                            result.data(), count) == count, "Cannot normalize an installation path");
         return result;
     };
     const auto left = normalized(a), right = normalized(b);
@@ -152,6 +152,21 @@ inline Handle open_directory(const fs::path& path, DWORD access = FILE_READ_ATTR
             !(id.attributes & FILE_ATTRIBUTE_REPARSE_POINT), "Installation directory is unsafe: " + text(path));
     return result;
 }
+inline std::wstring current_user_sid() {
+    auto token = GetCurrentProcessToken();
+    DWORD needed = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &needed);
+    require(needed != 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER, "Cannot inspect the current user");
+    std::vector<std::uint8_t> bytes(needed);
+    require(GetTokenInformation(token, TokenUser, bytes.data(), needed, &needed) != 0,
+            "Cannot inspect the current user");
+    wchar_t* sid = nullptr;
+    require(ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(bytes.data())->User.Sid, &sid) != 0,
+            "Cannot encode the current user SID");
+    std::unique_ptr<wchar_t, decltype(&LocalFree)> guard(sid, LocalFree);
+    return sid;
+}
+
 inline bool current_owner(HANDLE handle) {
     auto token = GetCurrentProcessToken();
     DWORD needed = 0;
@@ -190,9 +205,10 @@ inline Identity path_identity(const fs::path& path, bool owned = false) {
     return identify(handle.value);
 }
 inline void secure(const fs::path& path, bool directory) {
-    const wchar_t* description = directory ? L"D:P(A;OICI;FA;;;OW)" : L"D:P(A;;FA;;;OW)";
+    const auto description = (directory ? std::wstring(L"D:P(A;OICI;FA;;;") : std::wstring(L"D:P(A;;FA;;;")) +
+                             current_user_sid() + L")";
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(description, SDDL_REVISION_1,
+    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(description.c_str(), SDDL_REVISION_1,
             &descriptor, nullptr) != 0, "Cannot construct private installation permissions");
     const bool success = SetFileSecurityW(path.c_str(),
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, descriptor) != 0;
