@@ -167,8 +167,9 @@ def build(args: argparse.Namespace) -> None:
         payload.copy(remover, "runtime/yami-remove.exe")
         payload.copy(official / "7z.exe", "runtime/7zz.exe")
         payload.copy(official / "7z.dll", "runtime/7z.dll")
-        search = [official] + [path.resolve(strict=True) for path in args.search_dir]
-        package_windows(payload, [setup, remover, official / "7z.exe"], search)
+        package_windows(payload, [official / "7z.exe"], [official])
+        package_windows(payload, [setup, remover],
+                        [path.resolve(strict=True) for path in args.search_dir])
         for path in list(payload.root.iterdir()):
             if path.is_file() and path.suffix.lower() == ".dll":
                 path.rename(payload.root / "runtime" / path.name)
