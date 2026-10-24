@@ -132,11 +132,16 @@ void validate_shortcut(const Target& target, const fs::path& root) {
             SUCCEEDED(shell.link->GetWorkingDirectory(working, std::size(working))) &&
             SUCCEEDED(shell.link->GetIconLocation(icon, std::size(icon), &iconIndex)) &&
             SUCCEEDED(shell.link->GetArguments(arguments, std::size(arguments))), "Cannot inspect shortcut ownership");
-    const bool shape = path_equal(absolute_path(path), expectedTarget) && path_equal(absolute_path(working), root) &&
-                       path_equal(absolute_path(icon), root/iconName) && iconIndex == 0 && expectedArguments == text(arguments);
-    if (!shape) throw std::runtime_error("Shortcut shape mismatch: target=" + text(path) + " expected=" + text(expectedTarget) +
-            "; working=" + text(working) + " expected=" + text(root) + "; icon=" + text(icon) +
-            " expected=" + text(root/iconName) + "; arguments=" + text(arguments) + " expected=" + expectedArguments);
+    const bool targetOk = path_equal(absolute_path(path), expectedTarget);
+    const bool workingOk = path_equal(absolute_path(working), root);
+    const bool iconOk = path_equal(absolute_path(icon), root/iconName) && iconIndex == 0;
+    const bool argumentsOk = expectedArguments == text(arguments);
+    if (!targetOk || !workingOk || !iconOk || !argumentsOk)
+        throw std::runtime_error("Shortcut shape mismatch: target=" + text(path) + " expected=" + text(expectedTarget) +
+                "; working=" + text(working) + " expected=" + text(root) + "; icon=" + text(icon) +
+                " expected=" + text(root/iconName) + "; arguments=" + text(arguments) + " expected=" + expectedArguments +
+                "; flags=" + std::to_string(targetOk) + std::to_string(workingOk) + std::to_string(iconOk) +
+                std::to_string(argumentsOk) + "; iconIndex=" + std::to_string(iconIndex));
     require(same(path_identity(target.path, true), target.id), "Shortcut changed while its ownership was checked: " + text(target.path));
 }
 Plan preflight(const fs::path& input) {
