@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-set(YAMI_RELEASE_VERSION "1.2.0" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
+set(YAMI_RELEASE_VERSION "1.2.1" CACHE STRING "Native release version (MAJOR.MINOR.PATCH)")
 if(NOT YAMI_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
     message(FATAL_ERROR "YAMI_RELEASE_VERSION must be MAJOR.MINOR.PATCH")
 endif()

@@ -17,8 +17,9 @@ import tarfile
 import tempfile
 import zipfile
 
-from package_release import (BINARIES, LINUX_SYSTEM, MAX_ARCHIVE, MAX_FILES, MAX_MEMBER,
-                             MAX_TOTAL, SEMVER, Payload, allowed_path, architecture,
+from package_release import (BINARIES, FIDELITYFX_LICENSE, FIDELITYFX_LICENSE_PATH,
+                             FIDELITYFX_LICENSE_SHA256, LINUX_SYSTEM, MAX_ARCHIVE, MAX_FILES,
+                             MAX_MEMBER, MAX_TOTAL, SEMVER, Payload, allowed_path, architecture,
                              command, digest, fail, hash_stream, package_linux, verify_archive)
 
 SEVENZIP_VERSION = "26.04"
@@ -46,11 +47,8 @@ REMOVER_LOADERS = {"x86_64": "ld-linux-x86-64.so.2", "arm64": "ld-linux-aarch64.
 REMOVER_SYSTEM = re.compile(
     r"(?:lib(?:c|m|dl|pthread|rt|stdc\+\+|gcc_s)\.so(?:\.[0-9]+)*)\Z")
 UNINSTALL_SCRIPT = Path(__file__).resolve().parent.parent / "native" / "uninstall.sh"
-# Statically linked into the engine executables (Vulkan FSR 3.1.4 upscaler); the MIT terms travel with
-# the installer like the archiver's notices. The update ZIP stays executables/libraries only.
-FIDELITYFX_LICENSE = UNINSTALL_SCRIPT.parent.parent / "third_party" / "fidelityfx-sdk" / "LICENSE.txt"
-FIDELITYFX_LICENSE_PATH = "licenses/fidelityfx/LICENSE.txt"
-FIDELITYFX_LICENSE_SHA256 = "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
+# Statically linked into the engine executables (Vulkan FSR 3.1.4 upscaler); the pinned MIT terms
+# travel with the update ZIP and are stored once at the installer's top level.
 
 
 def provenance(arch: str) -> bytes:
@@ -168,6 +166,8 @@ def verify_sfx(archive: Path, arch: str, glibc_max: str | None = None, engine_ar
         with zipfile.ZipFile(engine_archive) as engine:
             expected_engine = {}
             for member in engine.infolist():
+                if member.filename == FIDELITYFX_LICENSE_PATH:
+                    continue
                 with engine.open(member) as source:
                     expected_engine[member.filename] = hash_stream(source)
     with archive.open("rb") as stream:
@@ -295,6 +295,8 @@ def package(args) -> None:
         (root / "engine").mkdir()
         with zipfile.ZipFile(args.engine_archive) as engine:
             for member in engine.infolist():
+                if member.filename == FIDELITYFX_LICENSE_PATH:
+                    continue
                 target = root / "engine" / member.filename
                 with engine.open(member) as source, target.open("xb") as destination:
                     shutil.copyfileobj(source, destination)
