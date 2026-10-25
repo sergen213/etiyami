@@ -381,6 +381,12 @@ void check_day_night(DisplayOptions options) {
     assert(night_lamp_emission("data/images/lamba_001.tga",0)==0);
     assert(night_lamp_emission("data/images/lamba_001.tga",1)==1);
     assert(night_lamp_emission("data/images/eti/cesitli/trafik_lambasi.tga",1)==1);
+    assert(traffic_light_phase(0)==TrafficLightPhase::Red && traffic_light_phase(3999)==TrafficLightPhase::Red);
+    assert(traffic_light_phase(4000)==TrafficLightPhase::Yellow && traffic_light_phase(4999)==TrafficLightPhase::Yellow);
+    assert(traffic_light_phase(5000)==TrafficLightPhase::Green && traffic_light_phase(8999)==TrafficLightPhase::Green);
+    assert(traffic_light_phase(9000)==TrafficLightPhase::Red);
+    assert(traffic_light_color(TrafficLightPhase::Red)[0]>traffic_light_color(TrafficLightPhase::Red)[1]);
+    assert(traffic_light_color(TrafficLightPhase::Green)[1]>traffic_light_color(TrafficLightPhase::Green)[0]);
     assert(night_window_emission("data/images/eti/pencere/Pencere_008.tga",1)==.35f);
     assert(night_window_emission("data/images/eti/pencere/Pencere_003.tga",1)==0);
     assert(night_window_emission("data/images/eti/cephe/cephe_002.tga",1)==0);
@@ -406,7 +412,46 @@ void check_day_night(DisplayOptions options) {
     emitter_pass.texture_name="data/images/lamba_001.tga";
     const auto lamps=derive_night_lights(emitter_mesh,emitter_pass,2,2,blue,false);
     assert(lamps.size()==1 && std::abs(lamps[0].position[0]-.5f)<.0001f &&
-           std::abs(lamps[0].position[1]+2.f)<.0001f && lamps[0].intensity>0);
+           lamps[0].position[1]<-2 && lamps[0].intensity>0 &&
+           lamps[0].kind==LocalLightKind::Spot && lamps[0].direction[1]==-1);
+    emitter_pass.texture_name="data/images/eti/cesitli/trafik_lambasi.tga";
+    for(auto& vertex:emitter_mesh.vertices) { vertex.position.y*=400; vertex.uv.x=.8f; }
+    auto a=emitter_mesh.vertices[0],b=emitter_mesh.vertices[2],c=emitter_mesh.vertices[3];
+    a.position={.5f,400,1}; a.uv.x=b.uv.x=c.uv.x=.1f;
+    emitter_mesh.vertices.insert(emitter_mesh.vertices.end(),{a,b,c});
+    emitter_mesh.indices={0,1,2,4,5,6};
+    const std::array<std::uint8_t,16> green{{20,220,180,255,20,220,180,255,20,220,180,255,20,220,180,255}};
+    const auto traffic=derive_night_lights(emitter_mesh,emitter_pass,2,2,green,false);
+    assert(traffic.size()==1 && traffic.front().traffic_phase==static_cast<int>(TrafficLightPhase::Green) &&
+           traffic.front().position[1]>350 && traffic.front().intensity<=8 && traffic.front().radius<=240);
+    const std::array<std::uint8_t,16> red{{240,30,20,255,240,30,20,255,240,30,20,255,240,30,20,255}};
+    const auto red_light=derive_night_lights(emitter_mesh,emitter_pass,2,2,red,false);
+    assert(red_light.size()==1 && red_light.front().traffic_phase==static_cast<int>(TrafficLightPhase::Red) &&
+           red_light.front().color[0]>red_light.front().color[1]);
+    Mesh sequence_mesh;
+    const auto lens=[&](float y,float u) {
+        const auto base=sequence_mesh.vertices.size();
+        sequence_mesh.vertices.insert(sequence_mesh.vertices.end(),{{{0,y,0},{u,0},{0,0,1}},
+            {{1,y,0},{u,0},{0,0,1}},{{0,y+1,1},{u,0},{0,0,1}}});
+        sequence_mesh.indices.insert(sequence_mesh.indices.end(),{std::uint16_t(base),std::uint16_t(base+1),std::uint16_t(base+2)});
+    };
+    lens(450,.01f); lens(425,.17f); lens(400,.25f);
+    std::array<std::uint8_t,36> pixels{};
+    const auto texel=[&](int x,std::uint8_t r,std::uint8_t g,std::uint8_t b) {
+        pixels[x*4]=r; pixels[x*4+1]=g; pixels[x*4+2]=b; pixels[x*4+3]=255;
+    };
+    texel(0,240,30,20); texel(1,240,210,20); texel(2,20,220,180);
+    const auto sequence=derive_night_lights(sequence_mesh,emitter_pass,9,1,pixels,false);
+    assert(sequence.size()==3 && std::count_if(sequence.begin(),sequence.end(),[](const LocalLight& light) {
+        return light.traffic_phase==static_cast<int>(TrafficLightPhase::Yellow) && light.color[0]>light.color[2] && light.color[1]>light.color[2];
+    })==1);
+    assert(night_street_lamp("data/levels/level2/lamba18/model.dat"));
+    assert(night_street_lamp("data\\levels\\level1\\Model_sokak_lambasi2\\model.dat"));
+    assert(!night_street_lamp("data/levels/level2/tabela/model.dat"));
+    MaterialPass metal_pass; metal_pass.texture_name="data/images/metal_001.tga";
+    const auto street=derive_night_lights(emitter_mesh,metal_pass,2,2,blue,false,true);
+    assert(street.size()==1 && street[0].position[1]>350 &&
+           street[0].kind==LocalLightKind::Spot && street[0].direction[1]==-1);
     options.width = 384; options.height = 216; options.samples = 0;
     options.enhanced = false; options.parallax = false; options.shadows = 1;
     options.ambient_occlusion = options.reflections = options.bloom = options.sharpen = 0;

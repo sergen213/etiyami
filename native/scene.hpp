@@ -19,6 +19,8 @@ struct ModelResource {
     Model model;
     struct Part { MeshResource* mesh; MaterialResource* material; };
     std::vector<Part> parts;
+    std::size_t street_lamp_part = static_cast<std::size_t>(-1);
+    bool street_lamp_model = false;
 };
 class ModelInstance {
 public:
@@ -47,10 +49,11 @@ private:
     const ModelResource& model_;
 };
 float night_lamp_emission(std::string_view texture_name,float night) noexcept;
+bool night_street_lamp(std::string_view model_name);
 float night_window_emission(std::string_view texture_name,float night) noexcept;
 float night_facade_emission(std::string_view texture_name,float night) noexcept;
 std::vector<LocalLight> derive_night_lights(const Mesh&,const MaterialPass&,int width,int height,
-                                             std::span<const std::uint8_t> rgba,bool flip_vertical);
+                                             std::span<const std::uint8_t> rgba,bool flip_vertical,bool street_lamp=false);
 
 // Immutable CPU/GPU resources are cached per original resource identifier.
 // Mutable skinning belongs to each instance; video storage is reused per source.

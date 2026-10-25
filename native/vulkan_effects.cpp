@@ -113,6 +113,7 @@ struct VulkanEffects::Impl {
         VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     };
     Buffer uniform,materials,instances,scratch,lights,tile_lights;
+    std::vector<float> light_scores;
     Structure tlas;
     std::uint32_t tlas_count=0;
     std::uint32_t top_size_count=0;
@@ -810,10 +811,13 @@ struct VulkanEffects::Impl {
         auto* tiles=static_cast<std::uint32_t*>(tile_lights.mapped);
         std::memset(tiles,0,tile_count*5*sizeof(std::uint32_t));
         p.environment[3]=float(tiles_x);
+        light_scores.resize(f.lights.size());
         for(std::size_t i=0;i<f.lights.size();++i) {
             const auto& light=f.lights[i];
             const Vec3 position{light.position[0],light.position[1],light.position[2]},eye=transform_point(f.view,position);
             if(eye.z-light.radius>0) continue;
+            const float distance2=eye.x*eye.x+eye.y*eye.y+eye.z*eye.z;
+            light_scores[i]=light.intensity*std::max({light.color[0],light.color[1],light.color[2]})/(1+distance2*.0001f);
             int min_x=0,min_y=0,max_x=int(tiles_x)-1,max_y=int(tiles_y)-1;
             if(eye.z+light.radius<=0) {
                 const auto& m=p.current_vp.values;
@@ -830,6 +834,11 @@ struct VulkanEffects::Impl {
             for(int y=min_y;y<=max_y;++y) for(int x=min_x;x<=max_x;++x) {
                 const std::size_t tile=(std::size_t(y)*tiles_x+x)*5;
                 if(tiles[tile]<4) tiles[tile+1+tiles[tile]++]=std::uint32_t(i);
+                else {
+                    unsigned weakest=1;
+                    for(unsigned at=2;at<=4;++at) if(light_scores[tiles[tile+at]]<light_scores[tiles[tile+weakest]]) weakest=at;
+                    if(light_scores[i]>light_scores[tiles[tile+weakest]]) tiles[tile+weakest]=std::uint32_t(i);
+                }
             }
         }
     }

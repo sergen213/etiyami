@@ -2051,6 +2051,42 @@ void check_local_lights(Fixture& fixture) {
     require(std::abs(fixture.patch(moved,160,-654)-fixture.patch(fresh,160,-654))<=3 &&
             std::abs(fixture.patch(moved,-90,-654)-fixture.patch(fresh,-90,-654))<=3,
             "Moving local light left stale illumination in temporal history");
+    renderer.reset_history(); renderer.clear();
+    renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
+    for(int i=0;i<300;++i) {
+        LocalLight weak; weak.position={10000.f+i*10.f,200,-654}; weak.intensity=.01f; weak.radius=1;
+        renderer.submit_light(weak);
+    }
+    LocalLight important; important.position={0,200,-654}; important.intensity=40; important.radius=500;
+    renderer.submit_light(important);
+    DrawState crowded_state; crowded_state.lighting=crowded_state.temporal_static=true;
+    renderer.draw(fixture.floor,0,fixture.material,fixture.pass,crowded_state);
+    renderer.finish_world();
+    const auto crowded=renderer.capture_rgba(); renderer.present();
+    require(fixture.patch(crowded,-90,-654)>fixture.patch(dark,-90,-654)+10,
+            "Crowded scene discarded the camera-relevant local light before selection");
+    renderer.reset_history(); renderer.clear();
+    renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
+    for(int i=0;i<4;++i) {
+        LocalLight distant; distant.position={0,200,-2000.f-i*100}; distant.intensity=60; distant.radius=650;
+        renderer.submit_light(distant);
+    }
+    renderer.submit_light(important);
+    renderer.draw(fixture.floor,0,fixture.material,fixture.pass,crowded_state);
+    renderer.finish_world();
+    const auto tiled=renderer.capture_rgba(); renderer.present();
+    require(fixture.patch(tiled,-90,-654)>fixture.patch(dark,-90,-654)+10,
+            "Distant lights filled the receiver tile before the relevant local light");
+    renderer.reset_history(); renderer.clear();
+    renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
+    important.kind=LocalLightKind::Spot; renderer.submit_light(important);
+    renderer.draw(fixture.floor,0,fixture.material,fixture.pass,crowded_state);
+    renderer.finish_world();
+    const auto downward=renderer.capture_rgba(); renderer.present();
+    require(fixture.patch(downward,-90,-654)>fixture.patch(dark,-90,-654)+10,
+            "Downward spotlight did not illuminate the ground below");
+    require(std::abs(fixture.patch(downward,400,-654)-fixture.patch(dark,400,-654))<=2,
+            "Downward spotlight leaked outside its cone");
     renderer.set_graphics(original); renderer.set_environment(environment_at(TimeOfDay::Day,0));
     std::cout<<"local point illumination/radius/shadow visibility/moving-light history PASS\n";
 }

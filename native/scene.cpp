@@ -51,8 +51,38 @@ static std::uint32_t material_hash(std::string_view name) noexcept {
     return hash;
 }
 
+TrafficLightPhase traffic_light_phase(std::uint64_t elapsed) noexcept {
+    const auto phase=elapsed%9000;
+    return phase<4000?TrafficLightPhase::Red:phase<5000?TrafficLightPhase::Yellow:TrafficLightPhase::Green;
+}
+std::array<float,3> traffic_light_color(TrafficLightPhase phase) noexcept {
+    switch(phase) {
+    case TrafficLightPhase::Red: return {1,.03,.01};
+    case TrafficLightPhase::Yellow: return {1,.65,.02};
+    case TrafficLightPhase::Green: return {.02,1,.08};
+    }
+    return {};
+}
+
 float night_lamp_emission(std::string_view name,float night) noexcept {
     return night>0 && (name.ends_with("lamba_001.tga") || name.ends_with("trafik_lambasi.tga")) ? night : 0;
+}
+
+bool night_street_lamp(std::string_view model_name) {
+    std::string normalized(model_name);
+    for(auto& c:normalized) {
+        if(c=='\\') c='/';
+        else if(c>='A'&&c<='Z') c=char(c+'a'-'A');
+    }
+    const auto slash=normalized.rfind('/');
+    const auto name=std::string_view(normalized).substr(slash==std::string::npos?0:slash+1);
+    const auto parent=normalized.substr(0,slash);
+    const auto parent_slash=parent.rfind('/');
+    const auto directory=std::string_view(parent).substr(parent_slash==std::string::npos?0:parent_slash+1);
+    if(name!="model.dat") return false;
+    if(directory.starts_with("model_sokak_lambasi") || directory=="model_sahaf_carsi_lamba" || directory=="lamba") return true;
+    return directory.starts_with("lamba") && directory.size()>5 &&
+        std::all_of(directory.begin()+5,directory.end(),[](unsigned char c){return c>='0'&&c<='9';});
 }
 
 float night_window_emission(std::string_view name,float night) noexcept {
@@ -70,40 +100,65 @@ float night_facade_emission(std::string_view name,float night) noexcept {
     return facade && material_hash(name)%3==0 ? night*.25f : 0;
 }
 std::vector<LocalLight> derive_night_lights(const Mesh& mesh,const MaterialPass& pass,int width,int height,
-                                             std::span<const std::uint8_t> rgba,bool flip_vertical) {
+                                             std::span<const std::uint8_t> rgba,bool flip_vertical,bool street_lamp) {
     std::vector<LocalLight> result;
     const float lamp=night_lamp_emission(pass.texture_name,1);
+    const bool traffic=pass.texture_name.ends_with("trafik_lambasi.tga");
     const float emission=night_window_emission(pass.texture_name,1)+night_facade_emission(pass.texture_name,1);
-    if(lamp>0) {
-        if(mesh.vertices.empty()) return result;
+    if(mesh.vertices.empty()) return result;
+    if(street_lamp) {
+        float max_y=mesh.vertices.front().position.y;
+        for(const auto& vertex:mesh.vertices) max_y=std::max(max_y,vertex.position.y);
+        // ponytail: no authored emitter nodes; the shipped all-metal lamp heads occupy the top 20 units.
+        Vec3 sum{}; float head_y=max_y; std::size_t count=0;
+        for(const auto& vertex:mesh.vertices) if(vertex.position.y>=max_y-20) {
+            sum.x+=vertex.position.x; sum.z+=vertex.position.z; head_y=std::min(head_y,vertex.position.y); ++count;
+        }
+        LocalLight light; light.position={sum.x/count,head_y-6,sum.z/count};
+        light.color={1,.55f,.2f}; light.intensity=60; light.radius=650; light.kind=LocalLightKind::Spot;
+        result.push_back(light); return result;
+    }
+    if(lamp>0&&!traffic) {
         Vec3 min=mesh.vertices.front().position,max=min;
         for(const auto& vertex:mesh.vertices) {
             min.x=std::min(min.x,vertex.position.x); min.y=std::min(min.y,vertex.position.y); min.z=std::min(min.z,vertex.position.z);
             max.x=std::max(max.x,vertex.position.x); max.y=std::max(max.y,vertex.position.y); max.z=std::max(max.z,vertex.position.z);
         }
-        LocalLight light; light.position={(min.x+max.x)*.5f,min.y-2,(min.z+max.z)*.5f};
-        light.color={1,.55f,.2f}; light.intensity=60*lamp; light.radius=650;
+        LocalLight light; light.position={(min.x+max.x)*.5f,min.y-6,(min.z+max.z)*.5f};
+        light.color={1,.55f,.2f}; light.intensity=60*lamp; light.radius=650; light.kind=LocalLightKind::Spot;
         result.push_back(light); return result;
     }
-    if(emission<=0) return result;
+    if(lamp<=0&&emission<=0) return result;
     if(width<=0||height<=0||rgba.size()!=std::size_t(width)*height*4) throw std::invalid_argument("Invalid night emitter image");
     const auto smooth=[](float a,float b,float value) {
         const float t=std::clamp((value-a)/(b-a),0.f,1.f); return t*t*(3-2*t);
     };
-    const auto mask_at=[&](Vec2 uv) {
+    const auto mask_at=[&](Vec2 uv,int& phase) {
+        phase=-1;
         float u=uv.x-std::floor(uv.x),v=uv.y-std::floor(uv.y); if(flip_vertical) v=1-v;
         const int x=std::min(width-1,int(u*width)),y=std::min(height-1,int(v*height));
         const auto* pixel=rgba.data()+(std::size_t(y)*width+x)*4;
         const float r=pixel[0]/255.f,g=pixel[1]/255.f,b=pixel[2]/255.f,brightness=std::max({r,g,b});
+        const float saturation=brightness-std::min({r,g,b});
+        if(traffic) {
+            if(u>=.32f||brightness<=.12f||saturation<=.03f) return 0.f;
+            float hue=brightness==r?(g-b)/saturation:brightness==g?(b-r)/saturation+2:(r-g)/saturation+4;
+            hue=hue/6; if(hue<0) hue+=1;
+            if(hue<.07f||hue>=.93f) phase=static_cast<int>(TrafficLightPhase::Red);
+            else if(hue<.20f) phase=static_cast<int>(TrafficLightPhase::Yellow);
+            else if(hue>.38f&&hue<.58f) phase=static_cast<int>(TrafficLightPhase::Green);
+            else return 0.f;
+            return smooth(.12f,.35f,brightness)*smooth(.03f,.12f,saturation);
+        }
         return (.35f+.65f*brightness)*smooth(.12f,.35f,brightness)*smooth(.005f,.03f,b-std::max(r,g));
     };
-    struct Candidate { std::array<std::uint32_t,3> ids; Vec3 center,normal; float area,mask; };
+    struct Candidate { std::array<std::uint32_t,3> ids; Vec3 center,normal; float area,mask,low; int phase; };
     std::vector<Candidate> candidates;
     for(std::size_t at=0;at+2<mesh.indices.size();at+=3) {
         const std::array<std::uint32_t,3> ids{{mesh.indices[at],mesh.indices[at+1],mesh.indices[at+2]}};
         const auto& a=mesh.vertices[ids[0]],&b=mesh.vertices[ids[1]],&c=mesh.vertices[ids[2]];
         const Vec2 uv{(a.uv.x+b.uv.x+c.uv.x)/3,(a.uv.y+b.uv.y+c.uv.y)/3};
-        const float mask=mask_at(uv); if(mask<=.01f) continue;
+        int phase; const float mask=mask_at(uv,phase); if(mask<=.01f) continue;
         const Vec3 ab{b.position.x-a.position.x,b.position.y-a.position.y,b.position.z-a.position.z};
         const Vec3 ac{c.position.x-a.position.x,c.position.y-a.position.y,c.position.z-a.position.z};
         const Vec3 cross{ab.y*ac.z-ab.z*ac.y,ab.z*ac.x-ab.x*ac.z,ab.x*ac.y-ab.y*ac.x};
@@ -113,34 +168,68 @@ std::vector<LocalLight> derive_night_lights(const Mesh& mesh,const MaterialPass&
         if(length<=1e-8f) { normal=cross; length=area*2; }
         normal={normal.x/length,normal.y/length,normal.z/length};
         candidates.push_back({ids,{(a.position.x+b.position.x+c.position.x)/3,(a.position.y+b.position.y+c.position.y)/3,
-            (a.position.z+b.position.z+c.position.z)/3},normal,area,mask});
+            (a.position.z+b.position.z+c.position.z)/3},normal,area,mask,std::min({a.position.y,b.position.y,c.position.y}),phase});
     }
     std::vector<std::size_t> parent(candidates.size()); for(std::size_t i=0;i<parent.size();++i) parent[i]=i;
     const auto root=[&](std::size_t value) { while(parent[value]!=value) { parent[value]=parent[parent[value]]; value=parent[value]; } return value; };
     const auto join=[&](std::size_t a,std::size_t b) { a=root(a); b=root(b); if(a!=b) parent[b]=a; };
-    std::unordered_map<std::uint64_t,std::size_t> edges;
-    for(std::size_t i=0;i<candidates.size();++i) {
-        const auto ids=candidates[i].ids;
-        const std::array<std::array<std::uint32_t,2>,3> triangle_edges{{{ids[0],ids[1]},{ids[1],ids[2]},{ids[2],ids[0]}}};
-        for(auto edge:triangle_edges) {
-            if(edge[0]>edge[1]) std::swap(edge[0],edge[1]);
-            const auto key=(std::uint64_t(edge[0])<<32)|edge[1];
-            const auto [at,inserted]=edges.emplace(key,i); if(!inserted) join(i,at->second);
+    if(traffic) for(std::size_t i=0;i<candidates.size();++i) for(std::size_t j=0;j<i;++j) {
+        const auto& a=candidates[i],&b=candidates[j];
+        const float x=a.center.x-b.center.x,y=a.center.y-b.center.y,z=a.center.z-b.center.z;
+        const float facing=a.normal.x*b.normal.x+a.normal.y*b.normal.y+a.normal.z*b.normal.z;
+        if(a.phase==b.phase && x*x+y*y+z*z<60*60 && facing>.2f) join(i,j);
+    }
+    else {
+        std::unordered_map<std::uint64_t,std::size_t> edges;
+        for(std::size_t i=0;i<candidates.size();++i) {
+            const auto ids=candidates[i].ids;
+            const std::array<std::array<std::uint32_t,2>,3> triangle_edges{{{ids[0],ids[1]},{ids[1],ids[2]},{ids[2],ids[0]}}};
+            for(auto edge:triangle_edges) {
+                if(edge[0]>edge[1]) std::swap(edge[0],edge[1]);
+                const auto key=(std::uint64_t(edge[0])<<32)|edge[1];
+                const auto [at,inserted]=edges.emplace(key,i); if(!inserted) join(i,at->second);
+            }
         }
     }
-    struct Aggregate { Vec3 position{},normal{}; float area=0,mask=0; };
+    struct Aggregate { Vec3 position{},normal{}; float area=0,mask=0,low=std::numeric_limits<float>::max(); int phase=-1; };
     std::vector<Aggregate> groups(candidates.size());
     for(std::size_t i=0;i<candidates.size();++i) {
         auto& group=groups[root(i)]; const auto& candidate=candidates[i];
         group.position.x+=candidate.center.x*candidate.area; group.position.y+=candidate.center.y*candidate.area; group.position.z+=candidate.center.z*candidate.area;
         group.normal.x+=candidate.normal.x*candidate.area; group.normal.y+=candidate.normal.y*candidate.area; group.normal.z+=candidate.normal.z*candidate.area;
-        group.mask+=candidate.mask*candidate.area; group.area+=candidate.area;
+        group.mask+=candidate.mask*candidate.area; group.area+=candidate.area; group.low=std::min(group.low,candidate.low); group.phase=candidate.phase;
     }
-    for(const auto& group:groups) if(group.area>0) {
+    std::vector<bool> valid(groups.size(),true);
+    if(traffic) {
+        const auto center=[&](const Aggregate& group) { return Vec3{group.position.x/group.area,group.position.y/group.area,group.position.z/group.area}; };
+        const auto facing=[&](const Aggregate& a,const Aggregate& b) {
+            const float al=a.normal.x*a.normal.x+a.normal.y*a.normal.y+a.normal.z*a.normal.z;
+            const float bl=b.normal.x*b.normal.x+b.normal.y*b.normal.y+b.normal.z*b.normal.z;
+            const float dot=a.normal.x*b.normal.x+a.normal.y*b.normal.y+a.normal.z*b.normal.z;
+            return al>0&&bl>0?dot/std::sqrt(al*bl):0.f;
+        };
+        const auto distance2=[](Vec3 a,Vec3 b) { const float x=a.x-b.x,y=a.y-b.y,z=a.z-b.z; return x*x+y*y+z*z; };
+        for(std::size_t i=0;i<groups.size();++i) if(groups[i].phase==static_cast<int>(TrafficLightPhase::Yellow)) valid[i]=false;
+        for(std::size_t r=0;r<groups.size();++r) if(groups[r].phase==static_cast<int>(TrafficLightPhase::Red))
+            for(std::size_t g=0;g<groups.size();++g) if(groups[g].phase==static_cast<int>(TrafficLightPhase::Green)) {
+                const auto rc=center(groups[r]),gc=center(groups[g]);
+                if(distance2(rc,gc)>=60*60||facing(groups[r],groups[g])<=.2f) continue;
+                const Vec3 middle{(rc.x+gc.x)*.5f,(rc.y+gc.y)*.5f,(rc.z+gc.z)*.5f};
+                std::size_t best=groups.size(); float nearest=60*60;
+                for(std::size_t y=0;y<groups.size();++y) if(groups[y].phase==static_cast<int>(TrafficLightPhase::Yellow)) {
+                    const float distance=distance2(center(groups[y]),middle);
+                    if(distance<nearest&&facing(groups[r],groups[y])>.2f) { best=y; nearest=distance; }
+                }
+                if(best<groups.size()) valid[best]=true;
+            }
+    }
+    for(std::size_t index=0;index<groups.size();++index) if(const auto& group=groups[index];group.area>0&&valid[index]) {
         float length=std::sqrt(group.normal.x*group.normal.x+group.normal.y*group.normal.y+group.normal.z*group.normal.z);
         const Vec3 normal=length>1e-8f?Vec3{group.normal.x/length,group.normal.y/length,group.normal.z/length}:Vec3{};
-        LocalLight light; light.position={group.position.x/group.area+normal.x*2,group.position.y/group.area+normal.y*2,group.position.z/group.area+normal.z*2};
-        light.color={1,.55f,.2f}; light.intensity=24*emission*group.mask/group.area; light.radius=300;
+        LocalLight light; light.position={group.position.x/group.area+normal.x*2,traffic?group.low-2:group.position.y/group.area+normal.y*2,group.position.z/group.area+normal.z*2};
+        light.color=traffic?traffic_light_color(static_cast<TrafficLightPhase>(group.phase)):std::array<float,3>{1,.55f,.2f};
+        light.intensity=(traffic?8*lamp:24*emission)*group.mask/group.area; light.radius=traffic?240:300;
+        light.traffic_phase=traffic?group.phase:-1;
         result.push_back(light);
     }
     return result;
@@ -213,6 +302,16 @@ ModelResource& SceneCache::model(std::string_view descriptor) {
     resource->parts.reserve(resource->model.parts.size());
     for (const auto& part : resource->model.parts)
         resource->parts.push_back({&mesh(mesh_path(path, part, &directories_)), &material(part.material_name)});
+    if(night_street_lamp(descriptor)) for(std::size_t n=0;n<resource->parts.size();++n) {
+        bool separate_head=false;
+        for(const auto& pass:resource->parts[n].material->material.passes) {
+            if(pass.texture_name.ends_with("cret2.tga")) {
+                resource->street_lamp_part=n; separate_head=true; break;
+            }
+            if(pass.texture_name.ends_with("metal_001.tga")) resource->street_lamp_model=true;
+        }
+        if(separate_head) break;
+    }
     return *models_.emplace(std::string(descriptor), std::move(resource)).first->second;
 }
 MaterialResource& SceneCache::material(std::string_view name) {
@@ -347,12 +446,18 @@ void SceneCache::prepare_night_lights(ModelInstance& instance,std::size_t n) {
     auto& part=instance.parts[n]; if(part.night_lights_ready) return;
     const auto& source=instance.resource().parts[n]; const auto& passes=source.material->material.passes;
     part.night_lights.resize(passes.size());
+    if(n==instance.resource().street_lamp_part ||
+       (instance.resource().street_lamp_model && instance.resource().street_lamp_part==static_cast<std::size_t>(-1))) {
+        part.night_lights[0]=derive_night_lights(source.mesh->mesh,passes[0],0,0,{},false,true);
+        part.night_lights_ready=true; return;
+    }
     for(std::size_t p=0;p<passes.size();++p) {
         const auto& pass=passes[p];
-        if(night_lamp_emission(pass.texture_name,1)>0) {
+        const float lamp=night_lamp_emission(pass.texture_name,1);
+        if(lamp>0&&!pass.texture_name.ends_with("trafik_lambasi.tga")) {
             part.night_lights[p]=derive_night_lights(source.mesh->mesh,pass,0,0,{},false); continue;
         }
-        if(night_window_emission(pass.texture_name,1)+night_facade_emission(pass.texture_name,1)<=0) continue;
+        if(lamp<=0&&night_window_emission(pass.texture_name,1)+night_facade_emission(pass.texture_name,1)<=0) continue;
         try {
             const auto path=resolve(pass.texture_name); VideoDecoder decoder(path); VideoFrame frame;
             if(decoder.next(frame)) part.night_lights[p]=derive_night_lights(source.mesh->mesh,pass,frame.width,frame.height,frame.rgba,image_flip_vertical(path));
@@ -369,6 +474,7 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
     const auto graphics = renderer_.graphics_settings();
     const bool parallax = graphics.enhanced && graphics.parallax;
     const bool night_lights=graphics.enhanced&&graphics.ray_tracing&&renderer_.ray_tracing_available()&&state.emission>0;
+    const int traffic_phase=static_cast<int>(traffic_light_phase(elapsed));
     const auto& model = instance.resource();
     for (std::size_t n = 0; n < model.parts.size(); ++n) {
         const auto& part = instance.parts[n];
@@ -381,10 +487,11 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             if (pass.video) video_texture(pass.texture_name, wall_clock, true, texture);
             else if (!texture) texture = image(pass.texture_name);
             auto submission = state;
-            submission.emission=night_lamp_emission(pass.texture_name,state.emission);
+            submission.emission=pass.texture_name.ends_with("trafik_lambasi.tga") ? 0 : night_lamp_emission(pass.texture_name,state.emission);
             submission.window_emission=night_window_emission(pass.texture_name,state.emission)+
                 night_facade_emission(pass.texture_name,state.emission);
             if(night_lights) for(auto light:part.night_lights[p]) {
+                if(light.traffic_phase>=0&&light.traffic_phase!=traffic_phase) continue;
                 const Vec3 local{light.position[0],light.position[1],light.position[2]};
                 const Vec3 world=transform_point(state.model,local);
                 light.position={world.x,world.y,world.z}; light.intensity*=state.emission;

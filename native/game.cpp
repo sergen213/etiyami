@@ -634,7 +634,7 @@ struct Game::State {
                 if(i==0) draw.color={environment.sky[0],environment.sky[1],environment.sky[2],1};
                 draw.ray_geometry=i!=0;
                 draw.temporal_static=i!=0;
-                game.scene_.draw(*sources[i].instance,draw,0,0,now);
+                game.scene_.draw(*sources[i].instance,draw,0,clock.frameNow-clock.levelStart,now);
             }
             for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {
                 DrawState draw; draw.model=entity::upright_transform(runtime[i],models[i]->resource().model.collision_box.y);

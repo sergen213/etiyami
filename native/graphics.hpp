@@ -12,6 +12,9 @@ struct Environment {
     std::array<float,3> sky{{1,1,1}}, fog{{.2f,.2f,.2f}};
     float emission = 0;
 };
+enum class TrafficLightPhase { Red, Yellow, Green };
+TrafficLightPhase traffic_light_phase(std::uint64_t elapsed) noexcept;
+std::array<float,3> traffic_light_color(TrafficLightPhase) noexcept;
 enum class LocalLightKind { Point, Spot };
 struct LocalLight {
     std::array<float,3> position{}, direction{{0,-1,0}};
@@ -19,6 +22,7 @@ struct LocalLight {
     float intensity = 1, radius = 500;
     float inner_cone = .8f, outer_cone = .5f;
     LocalLightKind kind = LocalLightKind::Point;
+    int traffic_phase = -1;
 };
 
 inline constexpr std::uint64_t environment_cycle_ms = 720000;

@@ -707,8 +707,7 @@ struct VulkanRenderer::Impl {
             if(length<=1e-12f||!finite(light.inner_cone)||!finite(light.outer_cone)) throw std::runtime_error("Invalid local-light cone");
             length=std::sqrt(length); for(float& value:light.direction) value/=length;
         }
-        // Bound pathological scene submissions; normal gameplay stays far below this before camera selection.
-        if(local_lights.size()<256) local_lights.push_back(light);
+        local_lights.push_back(light);
     }
     void select_lights() {
         const auto strength=[](const LocalLight& light) {
