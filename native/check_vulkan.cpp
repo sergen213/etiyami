@@ -2017,7 +2017,7 @@ void check_local_lights(Fixture& fixture) {
     settings.ambient_occlusion=settings.reflections=settings.indirect_lighting=0;
     renderer.set_graphics(settings);
     renderer.set_environment(environment_at(TimeOfDay::Night,0));
-    const auto render=[&](Fixture::Mode mode,bool illuminated,float light_x=0,bool reset=true) {
+    const auto render=[&](Fixture::Mode mode,bool illuminated,float light_x=0,bool reset=true,unsigned receiver=0) {
         if(reset) renderer.reset_history(); renderer.clear();
         renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
         if (illuminated) {
@@ -2026,7 +2026,7 @@ void check_local_lights(Fixture& fixture) {
             renderer.submit_light(light);
         }
         DrawState state; state.lighting=state.temporal_static=true;
-        renderer.draw(fixture.floor,0,fixture.material,fixture.pass,state);
+        renderer.draw(receiver?receiver:fixture.floor,0,fixture.material,fixture.pass,state);
         if (mode!=Fixture::Mode::Absent) renderer.draw(fixture.blocker,0,fixture.material,fixture.pass,state);
         renderer.finish_world();
         auto result=renderer.capture_rgba(); renderer.present(); return result;
@@ -2087,6 +2087,23 @@ void check_local_lights(Fixture& fixture) {
             "Downward spotlight did not illuminate the ground below");
     require(std::abs(fixture.patch(downward,400,-654)-fixture.patch(dark,400,-654))<=2,
             "Downward spotlight leaked outside its cone");
+    settings.temporal_aa=false; renderer.set_graphics(settings);
+    const std::array<std::uint16_t,6> smooth_indices{{0,1,2,0,2,3}};
+    const float smooth_length=std::sqrt(1+.4f*.4f);
+    const std::array<Vertex,4> smooth_vertices{{
+        {{-700,-80,-200},{0,0},{-.4f/smooth_length,1/smooth_length,0}},
+        {{700,-80,-200},{1,0},{-.4f/smooth_length,1/smooth_length,0}},
+        {{700,-80,-1600},{1,1},{-.4f/smooth_length,1/smooth_length,0}},
+        {{-700,-80,-1600},{0,1},{-.4f/smooth_length,1/smooth_length,0}}
+    }};
+    const auto smooth_floor=renderer.upload_mesh(smooth_vertices,smooth_indices);
+    const auto flat_lit=render(Fixture::Mode::Absent,true);
+    const auto smooth_lit=render(Fixture::Mode::Absent,true,0,true,smooth_floor);
+    std::cout<<"local authored/facet normal near="<<fixture.patch(smooth_lit,-90,-654)<<'/'
+             <<fixture.patch(flat_lit,-90,-654)<<'\n';
+    require(fixture.patch(smooth_lit,-90,-654)+2<fixture.patch(flat_lit,-90,-654),
+            "RT local light used the facet normal instead of the authored smooth shading normal");
+    renderer.release_mesh(smooth_floor);
     renderer.set_graphics(original); renderer.set_environment(environment_at(TimeOfDay::Day,0));
     std::cout<<"local point illumination/radius/shadow visibility/moving-light history PASS\n";
 }

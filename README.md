@@ -2,6 +2,8 @@
 
 A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's artwork, models, scripts, audio, and videos. **v1.6.2 anchors street-pole and hanging lights to their visible fixtures, smooths walking/camera and RT actor-shadow motion between physics ticks, and matches the green laser with green illumination**, alongside the day/night cycle, traffic-light color cycling, actual shadowed Vulkan RT night lights for occupied windows, guns, muzzle flashes and projectiles, IKV-style parallax occlusion mapping, renderer optimizations, the settings launcher, OpenGL/GLES rendering, Vulkan/optional ray tracing, AMD FSR 3.1.4 upscaling and optional frame generation, enhanced character-pose interpolation and shadows, widescreen support, checkpoints, and automatic launcher/engine updates. No Wine, DirectX installer, or Windows codec installation is needed.
 
+Current source also uses smooth authored normals for Vulkan RT local-light shading and supports roll-free 360° camera yaw with up/down pitch in both aiming modes. Vulkan character shadows remain ray-query based; the directional actor shadow map is OpenGL/GLES-only.
+
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows is available for x86_64. macOS releases are deferred.
 
 **v1.6.2 is public/latest:** [the fixture, motion and projectile-light correction release](https://github.com/sergen213/etiyami/releases/tag/v1.6.2), tagged from source `2b9711e`, contains eight locally built Windows and Linux artifacts. Validation passed 18/18 CTests, Windows update/install/uninstall groups, real Windows and Linux ISO installations, independent package checks, and a packaged 2560×1440 Vulkan RT/frame-generation smoke. GitHub digests and all eight fresh public downloads matched the local files byte-for-byte. Both installed Windows executables reported `1.6.2` under Wine; both ARM64 executables and the ARM64 AppImage setup reported `1.6.2` through QEMU. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified.
@@ -195,7 +197,7 @@ Enhanced-only **parallax occlusion mapping** is enabled by default and can be to
 |---|---|
 | W / Up, S / Down | Move forward / backward |
 | A / Left, D / Right | Move left / right |
-| Mouse | Camera and original menu cursor |
+| Mouse | 360° horizontal camera orbit, up/down pitch, and original menu cursor |
 | Ctrl or left mouse button | Fire |
 | Space | Special action |
 | E or Enter | Interact |
@@ -203,7 +205,7 @@ Enhanced-only **parallax occlusion mapping** is enabled by default and can be to
 | Escape | Game menu |
 | F11 | Toggle fullscreen |
 
-Mouse capture is released when the game loses focus.
+Mouse capture is released when the game loses focus. Camera pitch works in both aiming modes; changing aiming mode does not reset the camera. Automatic-aim shots remain horizontal when no target is selected.
 
 ## Saves and settings
 

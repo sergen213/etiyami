@@ -63,6 +63,7 @@ struct Game::State {
     std::vector<std::uint32_t> ownedStrings;
     PlayerCameraState cameraState;
     Mat4 camera=identity_matrix(),pausePose=identity_matrix();
+    float pausePitch=0;
     FlightState flight,passengerFlight;
     entity::FlightPickupMotion pickupMotion;
     float wavePhase=0,sensitivity=0.5f,pausePitchStep=0.1f;
@@ -134,7 +135,7 @@ struct Game::State {
         actors.at(index).model=model; models.at(index)=std::move(gpu);
         // 00406140 replaces the draw model only, not force/weapon/health or the
         // entity's original collision extents and muzzle controller.
-        runtime[index].transform=identity_matrix();
+        runtime[index].transform=identity_matrix(); runtime[index].playerPitch=0;
         entity::synchronize_position(runtime[index],actors[index]);
     }
     void visibility(std::string_view name,bool visible) {
@@ -311,7 +312,7 @@ struct Game::State {
         if (!second) { menuPauseWall=wallNow; pause_audio(true); }
         if (!first && !actors.empty()) {
             actors[0].hidden=true; if (passenger) actors[*passenger].hidden=true;
-            overlay=true; pausePose=runtime[0].transform; return;
+            overlay=true; pausePose=runtime[0].transform; pausePitch=runtime[0].playerPitch; return;
         }
         game.menu_.show(page); clock.previousLevel=second?-1:clock.level;
         clock.level=0; clock.phase=second?Phase::Intro:Phase::Menu;
@@ -498,7 +499,7 @@ struct Game::State {
         } else {
             operation([&] { auto ctx=context(); combat::apply_player_input(combat,ctx,forces[0],keys,camera,automaticAim); });
             if (clock.phase!=Phase::Active || levelGeneration!=generation) return;
-            entity::look(runtime[0],-smoothedMouse.x,automaticAim?0:-smoothedMouse.y);
+            entity::look(runtime[0],-smoothedMouse.x,-smoothedMouse.y);
             if (raw.interact) operation([&] { entity::triggers(actors[0],metadata.triggers,true,this,&trigger_callback); });
             if (clock.phase!=Phase::Active || levelGeneration!=generation) return;
             objectivesVisible=raw.help;
@@ -558,7 +559,7 @@ struct Game::State {
                 break;
             }
             case menu::CommandKind::RestoreCamera:
-                if (!runtime.empty() && clock.level!=4) { runtime[0].transform=pausePose; runtime[0].playerPitch=0; update_camera(); }
+                if (!runtime.empty() && clock.level!=4) { runtime[0].transform=pausePose; runtime[0].playerPitch=pausePitch; update_camera(); }
                 break;
             case menu::CommandKind::StopMusic: game.audio_.stop(command.name); break;
             case menu::CommandKind::PlayMusic: game.audio_.play(command.name); break;
@@ -572,7 +573,6 @@ struct Game::State {
                 break;
             case menu::CommandKind::SetAimingMode:
                 automaticAim=command.first;
-                if (automaticAim && !runtime.empty()) { entity::rotate_world_x(runtime[0].transform,-runtime[0].playerPitch); runtime[0].playerPitch=0; }
                 break;
             case menu::CommandKind::RunScript: invoke(command.name); break;
             case menu::CommandKind::PersistSettings: persist_settings(); break;
@@ -744,6 +744,7 @@ bool Game::quit_requested() const noexcept { return state_->quit; }
 const gameplay::FrameClock& Game::clock() const noexcept { return state_->clock; }
 std::span<const gameplay::EntityState> Game::entities() const noexcept { return state_->actors; }
 Vec3 Game::player_position() const noexcept { return state_->actors.empty()?Vec3{}:state_->actors[0].committedPosition; }
+Mat4 Game::camera_pose() const noexcept { return state_->camera; }
 menu::Context Game::menu_context() const {
     const auto& s=*state_; const auto* player=s.actors.empty()?nullptr:&s.actors[0];
     return {s.clock.level,s.clock.previousLevel,player!=nullptr,player && player->dead,

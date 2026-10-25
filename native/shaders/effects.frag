@@ -485,7 +485,7 @@ void main() {
     float aoSum=0; vec3 indirectSum=vec3(0);
     vec3 origin=position+physical*.06;
 #ifdef YAMI_RAY_QUERY
-    localOut=vec4(localLighting(origin,physical),0);
+    localOut=vec4(localLighting(origin,n),0);
 #endif
     for(int i=0;i<sampleCount;++i) {
         effectSample(i,gl_FragCoord.xy,stochastic,stable,diffuse,reflectionActive,reflectionCount,

@@ -53,7 +53,11 @@ void rotate_world_z(Mat4& m,float degrees) noexcept { rotation(m,degrees,{0,0,1}
 void rotate_local_up(Mat4& m,float degrees) noexcept { rotation(m,degrees,{m.values[1],m.values[5],m.values[9]}); }
 void turn(Runtime& r,float degrees) noexcept { rotate_local_up(r.transform,degrees); }
 void look(Runtime& r,float yaw,float pitch) noexcept {
-    if (yaw!=0) turn(r,yaw);
+    if (yaw!=0) {
+        rotate_world_x(r.transform,-r.playerPitch);
+        turn(r,yaw);
+        rotate_world_x(r.transform,r.playerPitch);
+    }
     const float next=r.playerPitch+pitch;
     if (pitch!=0 && next<40 && next>=-70) { r.playerPitch=next; rotate_world_x(r.transform,pitch); }
 }

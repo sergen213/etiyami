@@ -615,8 +615,14 @@ void smoke(Platform& host, const Options& opts) {
     }
     push_key(host, SDL_SCANCODE_UP, true); step(); observe();
     push_key(host, SDL_SCANCODE_UP, false);
+    const auto beforeLook=game.camera_pose();
     push_motion(host, {24, -12});
     push_key(host, SDL_SCANCODE_SPACE, true); step(); observe();
+    const auto freeLook=game.camera_pose();
+    require(std::fabs(freeLook.values[9]-beforeLook.values[9])>0.001f,
+            "Vertical mouse input did not pitch the automatic-aim camera");
+    require(std::fabs(freeLook.values[1])<0.0001f,
+            "Yaw after pitch rolled the free camera");
     push_key(host, SDL_SCANCODE_SPACE, false);
     // Let the original special animation finish before testing normal fire.
     for (unsigned frame = 0; frame < 32; ++frame) { step(); observe(); }

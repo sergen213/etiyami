@@ -63,6 +63,7 @@ void spawn(World& world,Context& c,std::size_t owner,Vec3 position,Vec3 directio
 Vec3 player_aim(Context& c,const Mat4& camera,Vec3 muzzle,bool automatic) {
     const auto& actor=c.entities[c.player];
     auto forward=negative(entity::forward_axis(c.runtime[c.player]));
+    if (automatic) { forward.y=0; gameplay::normalize(forward); }
     if (!automatic) {
         const Vec3 origin{camera.values[12],camera.values[13],camera.values[14]};
         const Vec3 ray{-camera.values[8],-camera.values[9],-camera.values[10]};

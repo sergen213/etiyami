@@ -38,6 +38,7 @@ public:
     const gameplay::FrameClock& clock() const noexcept;
     std::span<const gameplay::EntityState> entities() const noexcept;
     Vec3 player_position() const noexcept;
+    Mat4 camera_pose() const noexcept;
     menu::Context menu_context() const;
     const std::filesystem::path& save_directory() const noexcept;
 private:

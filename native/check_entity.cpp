@@ -39,6 +39,22 @@ int main(int argc,char** argv) {
     entity::rotate_world_x(runtime.transform,25);
     const auto upright=entity::upright_transform(runtime,40);
     assert(upright.values[13]==60 && upright.values[1]==0 && upright.values[5]==1 && upright.values[9]==0);
+    entity::Runtime freeCamera;
+    entity::look(freeCamera,0,25);
+    entity::look(freeCamera,90,0);
+    auto expected=identity_matrix();
+    entity::rotate_world_y(expected,90); entity::rotate_world_x(expected,25);
+    for(int row=0;row<3;++row) for(int column=0;column<3;++column)
+        assert(std::fabs(freeCamera.transform.values[column*4+row]-expected.values[column*4+row])<0.0001f);
+    for(int turn=0;turn<3;++turn) entity::look(freeCamera,90,0);
+    const auto forward=entity::forward_axis(freeCamera);
+    assert(std::fabs(forward.x)<0.0001f && std::fabs(forward.y+std::sin(25.0*3.141592653589793/180.0))<0.0001f &&
+           std::fabs(forward.z-std::cos(25.0*3.141592653589793/180.0))<0.0001f);
+    entity::look(freeCamera,45,-10);
+    expected=identity_matrix(); entity::rotate_world_y(expected,45); entity::rotate_world_x(expected,15);
+    for(int row=0;row<3;++row) for(int column=0;column<3;++column)
+        assert(std::fabs(freeCamera.transform.values[column*4+row]-expected.values[column*4+row])<0.0001f);
+    assert(freeCamera.playerPitch==15);
     gameplay::EntityState player; player.role=0;
     gameplay::EntityState enemy; enemy.role=1; enemy.action=6; enemy.dead=true;
     entity::Events events;

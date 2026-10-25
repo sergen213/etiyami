@@ -92,5 +92,10 @@ int main() {
     actors[0].energy=0.75f;
     combat::regenerate(actors[0],runtime[0],110);
     assert(std::fabs(actors[0].energy-0.794f)<0.000001f && runtime[0].regenerationStart==110);
+    actors[1].hidden=true; actors[0].weapon=1; actors[0].energy=1; actors[0].action=0;
+    runtime[0].transform=identity_matrix(); entity::look(runtime[0],0,25);
+    world={}; world.lastPlayerAttack=0; context.frameNow=1000;
+    assert(combat::attack_player(world,context,15,camera,true));
+    assert(world.projectiles.size()==1 && std::fabs(world.projectiles[0].direction.y)<0.0001f);
     std::cout<<"combat cooldown, energy, actual ray hit, synchronous death state, melee delay, live weapon and expiry verified\n";
 }
