@@ -288,6 +288,10 @@ This local-source correction is separate from the historical v1.1.1 implementati
 - Windows x86_64 and GL-only Linux builds compile the shared implementation. Native Windows GPU execution and physical ARM64 GPU execution were not tested.
 - Final private-KWin verification passed **17/17 Vulkan-enabled CTests** and **15/15 GL-only CTests**, plus focused OpenGL/GLES day/night and Vulkan RT environment checks. The legacy standalone OpenGL `renderer` test was excluded: its pavement assertion also fails on the untouched pre-change binary, so it is not a day/night regression. Final combined evidence: `/mnt/1st4TB/.etiyami-fsr/day-night-1792887402` and `/mnt/1st4TB/.etiyami-fsr/day-night-gl-1792887521`.
 
+### v1.5.0 — mission transition and day/night release
+
+[v1.5.0](https://github.com/sergen213/etiyami/releases/tag/v1.5.0) was tagged from `c8542f97587f0f54b399a50748c2201530636fb1`. The release is latest, non-draft and non-prerelease with exactly eight assets: Windows x86_64 engine ZIP/installer and Linux x86_64/ARM64 engine ZIP, `.run` installer and AppImage. Fresh public downloads matched all eight locally validated files byte-for-byte. Linux packaging passed engine dependency, installer integrity/policy and AppImage runtime/policy checks; the public Windows engine ZIP and installer passed integrity, payload, PE/DLL closure and license validation. The x86_64 AppImage reported runtime v0.8.1 and printed `ETI Yami Linux setup 1.5.0` through forced extraction without loader overrides. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified.
+
 
 ### v1.4.0 — parallax occlusion and renderer-performance release
 
