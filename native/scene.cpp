@@ -109,12 +109,42 @@ std::vector<LocalLight> derive_night_lights(const Mesh& mesh,const MaterialPass&
     if(street_lamp) {
         float max_y=mesh.vertices.front().position.y;
         for(const auto& vertex:mesh.vertices) max_y=std::max(max_y,vertex.position.y);
-        // ponytail: no authored emitter nodes; the shipped all-metal lamp heads occupy the top 20 units.
-        Vec3 sum{}; float head_y=max_y; std::size_t count=0;
-        for(const auto& vertex:mesh.vertices) if(vertex.position.y>=max_y-20) {
-            sum.x+=vertex.position.x; sum.z+=vertex.position.z; head_y=std::min(head_y,vertex.position.y); ++count;
+        // Largest in-band component supplies X/Z; the whole lower head band keeps Y below all shade pieces.
+        std::vector<std::size_t> parent(mesh.vertices.size());
+        for(std::size_t i=0;i<parent.size();++i) parent[i]=i;
+        const auto root=[&](std::size_t value) {
+            while(parent[value]!=value) { parent[value]=parent[parent[value]]; value=parent[value]; }
+            return value;
+        };
+        for(std::size_t i=0;i+2<mesh.indices.size();i+=3) {
+            const auto a=root(mesh.indices[i]);
+            parent[root(mesh.indices[i+1])]=a; parent[root(mesh.indices[i+2])]=a;
         }
-        LocalLight light; light.position={sum.x/count,head_y-6,sum.z/count};
+        const float limit=std::numeric_limits<float>::max();
+        std::vector<Vec3> min(mesh.vertices.size(),Vec3{limit,limit,limit}),max(mesh.vertices.size(),Vec3{-limit,-limit,-limit});
+        std::vector<std::size_t> count(mesh.vertices.size(),0);
+        for(std::size_t i=0;i<mesh.vertices.size();++i) {
+            auto& lo=min[root(i)]; auto& hi=max[root(i)]; const auto& p=mesh.vertices[i].position;
+            lo.x=std::min(lo.x,p.x); lo.y=std::min(lo.y,p.y); lo.z=std::min(lo.z,p.z);
+            hi.x=std::max(hi.x,p.x); hi.y=std::max(hi.y,p.y); hi.z=std::max(hi.z,p.z);
+            ++count[root(i)];
+        }
+        std::size_t best=parent.size();
+        for(std::size_t i=0;i<parent.size();++i) if(parent[i]==i&&min[i].y>=max_y-20&&
+            (best==parent.size()||count[i]>count[best])) best=i;
+        Vec3 lo,hi;
+        if(best<parent.size()) { lo=min[best]; hi=max[best]; }
+        else {
+            lo={limit,limit,limit}; hi={-limit,-limit,-limit};
+            for(const auto& vertex:mesh.vertices) if(vertex.position.y>=max_y-20) {
+                const auto& p=vertex.position;
+                lo.x=std::min(lo.x,p.x); lo.y=std::min(lo.y,p.y); lo.z=std::min(lo.z,p.z);
+                hi.x=std::max(hi.x,p.x); hi.y=std::max(hi.y,p.y); hi.z=std::max(hi.z,p.z);
+            }
+        }
+        float head_y=max_y;
+        for(const auto& vertex:mesh.vertices) if(vertex.position.y>=max_y-20) head_y=std::min(head_y,vertex.position.y);
+        LocalLight light; light.position={(lo.x+hi.x)*.5f,head_y-6,(lo.z+hi.z)*.5f};
         light.color={1,.55f,.2f}; light.intensity=60; light.radius=650; light.kind=LocalLightKind::Spot;
         result.push_back(light); return result;
     }
@@ -302,6 +332,7 @@ ModelResource& SceneCache::model(std::string_view descriptor) {
     resource->parts.reserve(resource->model.parts.size());
     for (const auto& part : resource->model.parts)
         resource->parts.push_back({&mesh(mesh_path(path, part, &directories_)), &material(part.material_name)});
+    bool hanging_bulb=false;
     if(night_street_lamp(descriptor)) for(std::size_t n=0;n<resource->parts.size();++n) {
         bool separate_head=false;
         for(const auto& pass:resource->parts[n].material->material.passes) {
@@ -309,9 +340,11 @@ ModelResource& SceneCache::model(std::string_view descriptor) {
                 resource->street_lamp_part=n; separate_head=true; break;
             }
             if(pass.texture_name.ends_with("metal_001.tga")) resource->street_lamp_model=true;
+            hanging_bulb|=pass.texture_name.ends_with("lamba_001.tga");
         }
         if(separate_head) break;
     }
+    resource->street_lamp_model&=!hanging_bulb;
     return *models_.emplace(std::string(descriptor), std::move(resource)).first->second;
 }
 MaterialResource& SceneCache::material(std::string_view name) {

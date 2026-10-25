@@ -765,6 +765,7 @@ PhysicsEffects tick_body(std::size_t owner,ForceState& force,Vec3 gravity,
     PhysicsEffects effects;
     auto& entity=entities[owner];
     if (entity.dead) { entity.movementRequested=false; return effects; }
+    const Vec3 previous=entity.committedPosition;
     entity.positionStart=now;
     if (force.speed!=0 || entity.movementRequested) {
         float distance;
@@ -791,7 +792,7 @@ PhysicsEffects tick_body(std::size_t owner,ForceState& force,Vec3 gravity,
     else if (vertical.fraction*20>0)
         entity.committedPosition=along(start,gravity,vertical.fraction*20);
     set_position(entity,entity.committedPosition,false,now);
-    entity.previousPosition=entity.committedPosition;
+    entity.previousPosition=previous;
     entity.movementRequested=false; // 00415b10 does this after virtual entity tick
     return effects;
 }

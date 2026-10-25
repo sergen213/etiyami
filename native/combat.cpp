@@ -25,7 +25,7 @@ constexpr std::array<std::array<std::string_view,2>,8> variants{{
 }};
 constexpr std::array<WeaponLight,8> light_table{{
     {},
-    {{.15f,.45f,1},6,70,45,280},
+    {{.15f,1,.25f},6,70,45,280},
     {{.35f,.2f,1},8,90,60,320},
     {{1,.3f,.08f},5,60,35,240},
     {{.7f,.85f,1},3,35,20,180},

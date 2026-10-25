@@ -46,7 +46,8 @@ int main() {
     assert(combat::attack_player(world,context,15,camera,false));
     assert(world.projectiles.size()==1 && actors[0].energy==0.75f);
     assert(world.muzzleFlashes.size()==1 && world.muzzleFlashes[0].weapon==1);
-    assert(combat::weapon_light(1).color[2]>combat::weapon_light(1).color[0]);
+    assert(combat::weapon_light(1).color[1]>combat::weapon_light(1).color[0] &&
+           combat::weapon_light(1).color[1]>combat::weapon_light(1).color[2]);
     combat::tick_muzzle_flashes(world,330); assert(world.muzzleFlashes.size()==1);
     combat::tick_muzzle_flashes(world,331); assert(world.muzzleFlashes.empty());
     assert(actors[1].reactToHit); // constructor's unbounded sight query

@@ -377,7 +377,7 @@ void check_actor_shadows(DisplayOptions options) {
     renderer.release_mesh(hud); renderer.release_mesh(cloud);
     renderer.release_mesh(caster); renderer.release_mesh(receiver);
 }
-void check_day_night(DisplayOptions options) {
+void check_day_night(DisplayOptions options,const std::filesystem::path& root) {
     assert(night_lamp_emission("data/images/lamba_001.tga",0)==0);
     assert(night_lamp_emission("data/images/lamba_001.tga",1)==1);
     assert(night_lamp_emission("data/images/eti/cesitli/trafik_lambasi.tga",1)==1);
@@ -412,7 +412,7 @@ void check_day_night(DisplayOptions options) {
     emitter_pass.texture_name="data/images/lamba_001.tga";
     const auto lamps=derive_night_lights(emitter_mesh,emitter_pass,2,2,blue,false);
     assert(lamps.size()==1 && std::abs(lamps[0].position[0]-.5f)<.0001f &&
-           lamps[0].position[1]<-2 && lamps[0].intensity>0 &&
+           std::abs(lamps[0].position[1]+6)<.0001f && lamps[0].intensity>0 &&
            lamps[0].kind==LocalLightKind::Spot && lamps[0].direction[1]==-1);
     emitter_pass.texture_name="data/images/eti/cesitli/trafik_lambasi.tga";
     for(auto& vertex:emitter_mesh.vertices) { vertex.position.y*=400; vertex.uv.x=.8f; }
@@ -449,8 +449,16 @@ void check_day_night(DisplayOptions options) {
     assert(night_street_lamp("data\\levels\\level1\\Model_sokak_lambasi2\\model.dat"));
     assert(!night_street_lamp("data/levels/level2/tabela/model.dat"));
     MaterialPass metal_pass; metal_pass.texture_name="data/images/metal_001.tga";
-    const auto street=derive_night_lights(emitter_mesh,metal_pass,2,2,blue,false,true);
-    assert(street.size()==1 && street[0].position[1]>350 &&
+    Mesh street_mesh;
+    street_mesh.vertices={{{10,400,30},{0,0},{0,1,0}},{{20,400,30},{1,0},{0,1,0}},
+        {{20,410,40},{1,1},{0,1,0}},{{10,410,40},{0,1},{0,1,0}},
+        {{0,0,0},{0,0},{0,1,0}},{{1,0,1},{1,0},{0,1,0}},{{1,400,1},{1,1},{0,1,0}},{{0,400,0},{0,1},{0,1,0}},
+        {{-50,405,0},{0,0},{0,1,0}},{{-40,406,0},{1,0},{0,1,0}},{{-45,407,1},{1,1},{0,1,0}},
+        {{11,390,31},{0,0},{0,1,0}},{{12,391,32},{1,0},{0,1,0}},{{13,392,33},{1,1},{0,1,0}}};
+    street_mesh.indices={0,1,2,0,2,3,4,5,6,4,6,7,8,9,10,11,12,13};
+    const auto street=derive_night_lights(street_mesh,metal_pass,2,2,blue,false,true);
+    assert(street.size()==1 && std::abs(street[0].position[0]-15)<.0001f &&
+           std::abs(street[0].position[1]-384)<.0001f && std::abs(street[0].position[2]-35)<.0001f &&
            street[0].kind==LocalLightKind::Spot && street[0].direction[1]==-1);
     options.width = 384; options.height = 216; options.samples = 0;
     options.enhanced = false; options.parallax = false; options.shadows = 1;
@@ -467,6 +475,9 @@ void check_day_night(DisplayOptions options) {
     }};
     const std::array<std::uint16_t,6> indices{{0,1,2,0,2,3}}, wall_indices{{4,5,6,4,6,7}};
     Renderer renderer(options);
+    SceneCache scene(renderer,root);
+    const auto& hanging=scene.model("data/levels/level1/Lamba10/model.dat");
+    assert(!hanging.street_lamp_model && "Hanging bulb, shade and suspension wire must not all become street lights");
     const auto floor = renderer.upload_mesh(vertices, indices);
     const auto wall = renderer.upload_mesh(vertices, wall_indices);
     const auto lamp = renderer.upload_mesh(lamp_vertices, indices);
@@ -608,14 +619,17 @@ int main(int argc, char** argv) {
         options.width = 192; options.height = 96;
         options.enhanced = false; // Keep the exact original gamma/orientation/alpha path.
         bool day_night_only = false;
+        std::filesystem::path root="game";
         for (int i = 1; i < argc; ++i) {
-            if (std::string_view(argv[i]) == "--gles") options.gles = true;
-            if (std::string_view(argv[i]) == "--no-msaa") options.samples = 0;
-            if (std::string_view(argv[i]) == "--vulkan") options.backend = GraphicsBackend::Vulkan;
-            if (std::string_view(argv[i]) == "--day-night-only") day_night_only = true;
+            const std::string_view argument=argv[i];
+            if (argument == "--gles") options.gles = true;
+            if (argument == "--no-msaa") options.samples = 0;
+            if (argument == "--vulkan") options.backend = GraphicsBackend::Vulkan;
+            if (argument == "--day-night-only") day_night_only = true;
+            if (!argument.starts_with('-')) root=argument;
         }
         {
-        if (day_night_only) { check_day_night(options); SDL_Quit(); return 0; }
+        if (day_night_only) { check_day_night(options,root); SDL_Quit(); return 0; }
             Renderer renderer(options);
             const std::array<Vertex,4> vertices{{
                 {{-1,1,0},{0,1},{0,0,1}}, {{1,1,0},{1,1},{0,0,1}},
@@ -696,7 +710,7 @@ int main(int argc, char** argv) {
             check_actor_shadows(options);
             std::cout << "directional actor shadows/pose/instances/cutout/exclusions/cloud-alpha/live MSAA4/0/4 HUD PASS\n";
         }
-        if (options.backend == GraphicsBackend::OpenGL) check_day_night(options);
+        if (options.backend == GraphicsBackend::OpenGL) check_day_night(options,root);
         SDL_Quit();
         return 0;
     } catch (const std::exception& error) {

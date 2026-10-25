@@ -103,6 +103,12 @@ int main(int argc,char** argv) {
         auto effects=tick_body(0,force,{0,-1,0},100,1,{},entities,healths,score);
         check(near(entities[0].position.z,-6,0.01f) && entities[0].position.y==-19.9f
               && !entities[0].movementRequested && effects.collectedCount==0,"Original horizontal/vertical fixed tick");
+        check(entities[0].previousPosition.x==0 && entities[0].previousPosition.y==0 && entities[0].previousPosition.z==0,
+              "A fixed tick must retain the prior position for smooth horizontal and terrain-following interpolation");
+        const auto between=interpolate(entities[0].previousPosition,entities[0].committedPosition,
+                                      entities[0].positionStart,116);
+        check(near(between.z,-6.f*16.f/33.f,0.01f) && near(between.y,-19.9f*16.f/33.f,0.01f),
+              "Rendered actor must interpolate horizontal and vertical motion between fixed ticks");
         body={}; body.role=0; body.bounds.extents={1,1,1}; body.health=0.5f;
         entities={body}; HealthState health; health.bounds.center={5,0,0}; health.bounds.extents={1,1,1};
         healths={health}; effects={};
