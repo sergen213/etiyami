@@ -348,10 +348,11 @@ jobs:
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
             --notes-file - <<'RELEASE_NOTES'
-          ## v1.4.0 parallax and renderer performance
+          ## v1.6.0 real night local lighting
 
-          - Added IKV-style enhanced-only parallax occlusion mapping to OpenGL/GLES, Vulkan raster and Vulkan ray tracing. Static opaque primary world materials generate separate luminance relief; original assets, geometry, depth, motion, silhouettes and secondary-ray intersections remain unchanged. Use --parallax on|off; it defaults on and classic rendering is unaffected.
-          - Optimized OpenGL state handling and shadow-coordinate work, Vulkan synchronization and no-history transforms, and concurrent relief generation. RX 7900 XTX measurements at 2560x1440 with 8x MSAA show OpenGL at 0.827 s versus 0.833 s with parallax disabled, and Vulkan raster at 19.525 ms versus 20.021 ms. Vulkan RT differences remain below 1% and are not a performance guarantee.
+          - Added actual shadowed Vulkan RT illumination from street-lamp bulbs and occupied window panes, with original emissive artwork retained. Neutral frames, walls and unoccupied windows stay dark.
+          - Added ranged-gun glow, 80 ms muzzle flashes and weapon-colored lights following interpolated projectiles. Current-frame local illumination is composed after temporal history to prevent trails. OpenGL/GLES and classic presentation are unchanged.
+          - Limited lighting to 64 camera-selected sources and four per 16x16 screen tile. Cached-system-memory tile lists avoid mapped-VRAM CPU stalls. RX 7900 XTX level-2 night measurement at 2560x1440 with 8x MSAA: 23.750 ms median GPU frame and 3.086 ms median CPU; this is not a frame-rate guarantee.
           - Retained the Windows per-user offline installer, Start Menu/Desktop shortcuts, flat automatic-update packages, FidelityFX notices, OpenGL/GLES, Vulkan 1.3, optional ray-query effects and FSR 3.1.4 upscaling/frame generation. Windows packages remain unsigned.
 
           ## Windows download and installation
@@ -362,7 +363,7 @@ jobs:
 
           Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. They require glibc 2.35+ and host graphics drivers. AppImages use a static runtime with extraction fallback when FUSE is unavailable. Original assets and saves are never bundled. Physical ARM64 GPU execution and blanket distribution compatibility are not claimed.
 
-          Verification includes 18/18 Vulkan-enabled CTests, 16/16 GL-only CTests, clean Khronos synchronization validation, deterministic Vulkan-raster output matching the original build, real level-2 gameplay in all three paths, and package architecture/runtime checks. Native Windows GPU/GLES and physical ARM64 GPU execution remain uncertified. Earlier release artifacts are not replaced.
+          Verification includes 18/18 Vulkan-enabled CTests, 16/16 GL-only CTests, clean Khronos synchronization validation, moving-light temporal-history checks, real level-2 night gameplay with FSR/frame generation, and package architecture/runtime checks. Native Windows GPU/GLES and physical ARM64 GPU execution remain uncertified. Earlier release artifacts are not replaced.
           RELEASE_NOTES
           gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage dist/*.exe
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.

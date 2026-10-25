@@ -21,6 +21,7 @@ layout(std140,set=0,binding=3) uniform Parameters {
 layout(set=0,binding=4) uniform sampler2D rasterColor;
 layout(set=0,binding=5) uniform isampler2D accumulatedGeometry;
 layout(set=0,binding=6) uniform sampler2D sourceSun;
+layout(set=0,binding=7) uniform sampler2D currentLocal;
 vec3 toneMap(vec3 hdr) {
     hdr=max(hdr*p.post.x,vec3(0));
     // Preserve the authored palette below the neutral HDR shoulder and scale
@@ -29,6 +30,7 @@ vec3 toneMap(vec3 hdr) {
     if(peak>.8) hdr*=(1-.04/(peak-.6))/peak;
     return pow(hdr,vec3(1.0/2.2));
 }
+#define YAMI_LOCAL_LIGHT
 #include "lit_radiance.glsl"
 vec3 radianceAt(ivec2 t) {
     vec3 base=texelFetch(accumulatedBase,t,0).rgb;

@@ -45,6 +45,10 @@ int main() {
     actors[0].energy=1;
     assert(combat::attack_player(world,context,15,camera,false));
     assert(world.projectiles.size()==1 && actors[0].energy==0.75f);
+    assert(world.muzzleFlashes.size()==1 && world.muzzleFlashes[0].weapon==1);
+    assert(combat::weapon_light(1).color[2]>combat::weapon_light(1).color[0]);
+    combat::tick_muzzle_flashes(world,330); assert(world.muzzleFlashes.size()==1);
+    combat::tick_muzzle_flashes(world,331); assert(world.muzzleFlashes.empty());
     assert(actors[1].reactToHit); // constructor's unbounded sight query
     combat::tick_projectiles(world,context,264);
     assert(std::fabs(actors[1].health-0.8f)<0.000001f && world.projectiles[0].lifetime==0);
@@ -64,6 +68,7 @@ int main() {
     world.lastPlayerAttack=0; context.frameNow=501;
     assert(combat::attack_player(world,context,15,camera,false));
     assert(world.meleeDelays.size()==1 && world.meleeDelays[0]==14 && world.projectiles.empty());
+    assert(world.muzzleFlashes.empty());
     for (int tick=0;tick<14;++tick) combat::tick_melee(world,context);
     assert(world.projectiles.empty() && world.meleeDelays[0]==0);
     combat::tick_melee(world,context);

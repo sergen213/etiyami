@@ -21,6 +21,7 @@ public:
     void set_graphics(const GraphicsSettings&);
     void set_environment(const Environment&);
     GraphicsSettings graphics_settings() const noexcept;
+    void submit_light(const LocalLight&);
     void resize();
     void clear();
     void set_brightness(std::uint16_t) noexcept;

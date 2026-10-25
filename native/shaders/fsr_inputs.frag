@@ -31,6 +31,8 @@ layout(set=0,binding=7) uniform sampler2D sourceSun;
 layout(set=0,binding=8) uniform sampler2D previousHistory;
 // sun_taa.comp's temporally filtered per-sample Sun visibility (.r), at the same render texel.
 layout(set=0,binding=9) uniform sampler2D filteredSun;
+layout(set=0,binding=10) uniform sampler2D currentLocal;
+#define YAMI_LOCAL_LIGHT
 #include "lit_radiance.glsl"
 float luminance(vec3 c) { return dot(c,vec3(.2126,.7152,.0722)); }
 void main() {

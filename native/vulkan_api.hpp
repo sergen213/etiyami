@@ -142,5 +142,6 @@ struct VulkanEffectsFrame {
     VkFormat generation_format = VK_FORMAT_UNDEFINED;
     // Every ray-geometry world draw carries the raster's distance fog (DrawState::fog).
     bool fog = false;
+    std::span<const LocalLight> lights;
 };
 } // namespace yami

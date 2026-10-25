@@ -647,6 +647,12 @@ void Renderer::set_environment(const Environment& environment) {
     glUniform4f(uniforms_[16],environment_.ambient,environment_.direct,0,0);
     glUniform3fv(uniforms_[17],1,environment_.fog.data());
 }
+void Renderer::submit_light(const LocalLight& light) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->submit_light(light); return; }
+#endif
+    (void)light;
+}
 void Renderer::set_brightness(std::uint16_t ramp) noexcept {
 #if YAMI_HAS_VULKAN
     if (vulkan_) { vulkan_->set_brightness(ramp); return; }

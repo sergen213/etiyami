@@ -23,6 +23,16 @@ constexpr std::array<std::array<std::string_view,2>,8> variants{{
     {"cd_firlat1","cd_firlat2"},{"pervane_lazer1","pervane_lazer2"},
     {"bisiklet_kursun1","bisiklet_kursun2"},{"sobali_ates1","sobali_ates2"}
 }};
+constexpr std::array<WeaponLight,8> light_table{{
+    {},
+    {{.15f,.45f,1},6,70,45,280},
+    {{.35f,.2f,1},8,90,60,320},
+    {{1,.3f,.08f},5,60,35,240},
+    {{.7f,.85f,1},3,35,20,180},
+    {{1,.15f,.08f},6,75,45,260},
+    {{1,.75f,.15f},5,55,35,240},
+    {{1,.35f,.05f},7,85,50,280}
+}};
 constexpr std::array<std::string_view,6> hitSounds{{"yaman_vurulma1","yaman_vurulma2","yaman_vurulma3","yaman_vurulma4","yaman_vurulma5","yaman_vurulma6"}};
 Vec3 minus(Vec3 a,Vec3 b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
 float dot(Vec3 a,Vec3 b) { return a.x*b.x+a.y*b.y+a.z*b.z; }
@@ -44,6 +54,7 @@ void spawn(World& world,Context& c,std::size_t owner,Vec3 position,Vec3 directio
     const float yaw=180-angle;
     world.projectiles.push_back({owner,position,position,position,direction,
                                  weapon(c.entities.at(owner).weapon).lifetimeTicks,yaw,yaw});
+    if(c.entities[owner].weapon!=0) world.muzzleFlashes.push_back({position,c.frameNow+80,c.entities[owner].weapon});
     if (c.entities[owner].weapon!=0) {
         const auto hit=gameplay::raycast(position,direction,c.blocking,c.entities,owner,false);
         if (hit.kind==gameplay::CollisionHit::Kind::Entity) c.entities[hit.index].reactToHit=true;
@@ -228,6 +239,10 @@ Mat4 projectile_transform(const Projectile& projectile) noexcept {
     auto matrix=identity_matrix(); entity::rotate_world_y(matrix,projectile.yaw);
     matrix.values[12]=projectile.rendered.x; matrix.values[13]=projectile.rendered.y; matrix.values[14]=projectile.rendered.z;
     return matrix;
+}
+const WeaponLight& weapon_light(std::int32_t index) { weapon(index); return light_table[static_cast<std::size_t>(index)]; }
+void tick_muzzle_flashes(World& world,std::uint32_t now) noexcept {
+    std::erase_if(world.muzzleFlashes,[now](const MuzzleFlash& flash){return now>=flash.expires;});
 }
 void special_attack(Context& c) {
     check(c); auto& player=c.entities[c.player];

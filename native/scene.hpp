@@ -38,6 +38,8 @@ public:
         SkinningState skin;
         ShadowBounds bounds;
         std::size_t primary_pass = static_cast<std::size_t>(-1);
+        std::vector<std::vector<LocalLight>> night_lights;
+        bool night_lights_ready = false;
     };
     std::vector<Part> parts;
 private:
@@ -47,6 +49,8 @@ private:
 float night_lamp_emission(std::string_view texture_name,float night) noexcept;
 float night_window_emission(std::string_view texture_name,float night) noexcept;
 float night_facade_emission(std::string_view texture_name,float night) noexcept;
+std::vector<LocalLight> derive_night_lights(const Mesh&,const MaterialPass&,int width,int height,
+                                             std::span<const std::uint8_t> rgba,bool flip_vertical);
 
 // Immutable CPU/GPU resources are cached per original resource identifier.
 // Mutable skinning belongs to each instance; video storage is reused per source.
@@ -86,6 +90,7 @@ private:
     unsigned quad_ = 0, white_ = 0;
     MeshResource& mesh(const std::filesystem::path&);
     bool video_texture(std::string_view, std::uint32_t time, bool loop, unsigned& texture);
+    void prepare_night_lights(ModelInstance&,std::size_t part);
     void draw_quad(const menu::Draw&, std::uint32_t time, bool loop);
 };
 } // namespace yami

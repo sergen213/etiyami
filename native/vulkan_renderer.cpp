@@ -159,6 +159,7 @@ struct VulkanRenderer::Impl {
     std::vector<VulkanRayInstance> ray_instances;
     std::vector<VkDescriptorImageInfo> ray_images;
     std::vector<const Texture*> ray_textures;
+    std::vector<LocalLight> local_lights;
     using PipelineKey=std::array<unsigned,13>;
     std::map<PipelineKey,VkPipeline> pipelines;
     struct alignas(16) Uniform {
@@ -688,12 +689,46 @@ struct VulkanRenderer::Impl {
     }
     void resize(){if(present_stale.exchange(false))recreate=true;int w,h;sdl(SDL_GetWindowSizeInPixels(window,&w,&h));if(w<=0||h<=0||(SDL_GetWindowFlags(window)&SDL_WINDOW_MINIMIZED)){width=std::max(w,0);height=std::max(h,0);recreate=true;history=false;return;}if(unsigned(w)>properties.limits.maxImageDimension2D||unsigned(h)>properties.limits.maxImageDimension2D)throw std::runtime_error("Drawable exceeds Vulkan image limits");if(width!=w||height!=h){width=w;height=h;recreate=true;finished=false;history=false;}if(recreate){make_swapchain();native_targets();}}
     void clear(){wait();if(timings)timings->begin=std::chrono::steady_clock::now();draws.clear();finished=false;world_closed=false;ui=false;world_seen=false;world_end=0;resize();viewport={0,0,width,height};
+        local_lights.clear();
         // FSR 3.1's own Halton(2,3) sequence; its length follows the actual upscale ratio.
         jitter={0,0};
         if(settings.enhanced&&settings.temporal_aa&&context->fsr&&width>0){
             const int phases=ffxFsr3UpscalerGetJitterPhaseCount(std::max(1,int(width*settings.render_scale)),width);
             if(phases<=0||ffxFsr3UpscalerGetJitterOffset(&jitter[0],&jitter[1],int(frame_number%unsigned(phases)),phases)!=FFX_OK)throw std::runtime_error("FSR jitter sequence unavailable");
         }}
+    void submit_light(LocalLight light) {
+        const auto finite=[](float value){return std::isfinite(value);};
+        if(!finite(light.intensity)||!finite(light.radius)||light.intensity<=0||light.radius<=0)
+            throw std::runtime_error("Invalid local-light intensity/radius");
+        for(float value:light.position) if(!finite(value)) throw std::runtime_error("Invalid local-light position");
+        for(float value:light.color) if(!finite(value)||value<0) throw std::runtime_error("Invalid local-light colour");
+        if(light.kind==LocalLightKind::Spot) {
+            float length=0; for(float value:light.direction) { if(!finite(value)) throw std::runtime_error("Invalid local-light direction"); length+=value*value; }
+            if(length<=1e-12f||!finite(light.inner_cone)||!finite(light.outer_cone)) throw std::runtime_error("Invalid local-light cone");
+            length=std::sqrt(length); for(float& value:light.direction) value/=length;
+        }
+        // Bound pathological scene submissions; normal gameplay stays far below this before camera selection.
+        if(local_lights.size()<256) local_lights.push_back(light);
+    }
+    void select_lights() {
+        const auto strength=[](const LocalLight& light) {
+            return light.intensity*std::max({light.color[0],light.color[1],light.color[2]});
+        };
+        if(local_lights.size()>64) {
+            const auto& v=world_view.values;
+            const std::array<float,3> camera{{-(v[0]*v[12]+v[1]*v[13]+v[2]*v[14]),
+                -(v[4]*v[12]+v[5]*v[13]+v[6]*v[14]),-(v[8]*v[12]+v[9]*v[13]+v[10]*v[14])}};
+            const auto score=[&](const LocalLight& light) {
+                float distance2=1,max_colour=0;
+                for(int i=0;i<3;++i) { const float delta=light.position[i]-camera[i]; distance2+=delta*delta; max_colour=std::max(max_colour,light.color[i]); }
+                return light.intensity*max_colour*light.radius*light.radius/distance2;
+            };
+            std::nth_element(local_lights.begin(),local_lights.begin()+64,local_lights.end(),
+                [&](const LocalLight& a,const LocalLight& b){return score(a)>score(b);});
+            local_lights.resize(64);
+        }
+        std::sort(local_lights.begin(),local_lights.end(),[&](const LocalLight& a,const LocalLight& b){return strength(a)>strength(b);});
+    }
     void camera(const Mat4& v,const Mat4& p,bool interface){if(interface&&world_seen)close_world();view=v;projection=vulkan_projection(p);ui=interface||world_closed;viewport=interface&&width>0&&height>0?fit_original_interface(width,height):Viewport{0,0,width,height};if(!ui){world_view=view;world_projection=projection;}}
     void set_environment(const Environment& value){environment=value;}
     void close_world(){if(world_closed)return;world_end=draws.size();world_closed=true;}
@@ -907,7 +942,8 @@ struct VulkanRenderer::Impl {
             }
             // Ray surfaces (normal w>=0) come only from world ray_geometry draws; fog is all-or-none per level in the game.
             const bool fog=std::all_of(draws.begin(),draws.begin()+std::ptrdiff_t(world_end),[](const Draw& d){return !d.state.ray_geometry||d.state.fog;});
-            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,environment,history,&world_motion,&world_previous_normal,sample>1?&world_ms_motion:nullptr,sample>1?&world_ms_normal:nullptr,sample>1?&world_ms_previous_normal:nullptr,generating?composition.format:VK_FORMAT_UNDEFINED,fog};const auto& result=effects->render(frame);
+            select_lights();
+            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,environment,history,&world_motion,&world_previous_normal,sample>1?&world_ms_motion:nullptr,sample>1?&world_ms_normal:nullptr,sample>1?&world_ms_previous_normal:nullptr,generating?composition.format:VK_FORMAT_UNDEFINED,fog,local_lights};const auto& result=effects->render(frame);
             gpu_timestamp(*context,command,GpuComposite,false);fullscreen(result,composition,final_pipeline,true,0);gpu_timestamp(*context,command,GpuComposite,true);
             // IKV renderer_vk.cpp:327-361: interpolate the HUD-less composition, then draw the HUD onto both frames.
             if(generating&&effects->frame_generation()){gpu_timestamp(*context,command,GpuGeneration,false);generated_valid=effects->interpolate(command,composition,generated);gpu_timestamp(*context,command,GpuGeneration,true);}
@@ -1004,6 +1040,7 @@ void VulkanRenderer::set_environment(const Environment& value){impl_->set_enviro
 GraphicsSettings VulkanRenderer::graphics_settings()const noexcept{auto s=impl_->settings;s.samples=samples();s.fullscreen=SDL_GetWindowFlags(impl_->window)&SDL_WINDOW_FULLSCREEN;return s;}
 void VulkanRenderer::resize(){impl_->resize();}
 void VulkanRenderer::clear(){impl_->clear();}
+void VulkanRenderer::submit_light(const LocalLight& light){impl_->submit_light(light);}
 void VulkanRenderer::set_brightness(std::uint16_t b)noexcept{impl_->brightness=unsigned(b)+128;}
 void VulkanRenderer::camera(const Mat4& v,const Mat4& p,bool i){impl_->camera(v,p,i);}
 void VulkanRenderer::hud_camera(){impl_->hud_camera();}

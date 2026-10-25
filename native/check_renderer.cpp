@@ -392,6 +392,21 @@ void check_day_night(DisplayOptions options) {
     assert(night_window_emission("data\\images\\eti\\pencere\\Pencere_008.tga",1)==.35f);
     assert(night_window_emission("data\\images\\eti\\pencere\\Pencere_003.tga",1)==0);
     assert(night_facade_emission("data\\images\\eti\\cephe\\cephe_002.tga",1)==.25f);
+    Mesh emitter_mesh;
+    emitter_mesh.vertices={{{0,0,0},{0,0},{0,0,1}},{{1,0,0},{1,0},{0,0,1}},
+        {{1,1,0},{1,1},{0,0,1}},{{0,1,0},{0,1},{0,0,1}}};
+    emitter_mesh.indices={0,1,2,0,2,3};
+    const std::array<std::uint8_t,16> blue{{20,40,255,255,20,40,255,255,20,40,255,255,20,40,255,255}};
+    MaterialPass emitter_pass; emitter_pass.texture_name="data/images/eti/pencere/Pencere_008.tga";
+    const auto windows=derive_night_lights(emitter_mesh,emitter_pass,2,2,blue,false);
+    assert(windows.size()==1 && std::abs(windows[0].position[0]-.5f)<.0001f &&
+           std::abs(windows[0].position[1]-.5f)<.0001f && windows[0].position[2]>0 && windows[0].intensity>0);
+    emitter_pass.texture_name="data/images/eti/pencere/Pencere_003.tga";
+    assert(derive_night_lights(emitter_mesh,emitter_pass,2,2,blue,false).empty());
+    emitter_pass.texture_name="data/images/lamba_001.tga";
+    const auto lamps=derive_night_lights(emitter_mesh,emitter_pass,2,2,blue,false);
+    assert(lamps.size()==1 && std::abs(lamps[0].position[0]-.5f)<.0001f &&
+           std::abs(lamps[0].position[1]+2.f)<.0001f && lamps[0].intensity>0);
     options.width = 384; options.height = 216; options.samples = 0;
     options.enhanced = false; options.parallax = false; options.shadows = 1;
     options.ambient_occlusion = options.reflections = options.bloom = options.sharpen = 0;

@@ -236,6 +236,7 @@ struct Game::State {
         actors.clear(); runtime.clear(); forces.clear(); ai.clear(); models.clear();
         sources.clear(); decorations.clear(); pickups.clear(); pickupRuntime.clear(); pickupModels.clear();
         alternatePlayer.reset(); passenger.reset(); combat.projectiles.clear(); combat.meleeDelays.clear();
+        combat.muzzleFlashes.clear();
         clock.level=level; clock.previousLevel=level; clock.level_loaded(now);
         cameraState=initialize_player_camera(level); flight={}; passengerFlight={}; levelEnabled=true; overlay=false;
         metadata=read_level_metadata(game.scene_.resolve("data/levels/level"+std::to_string(level)+"/level.xml"));
@@ -522,6 +523,7 @@ struct Game::State {
         }
         for (auto& pickup:pickupRuntime) entity::update_pickup(pickup.animation,clock.frameNow);
         combat::interpolate_projectiles(combat,clock.frameNow); update_camera();
+        combat::tick_muzzle_flashes(combat,clock.frameNow);
     }
     void persist_settings() {
         menu::save_settings(game.saveDirectory_/"game.ini",game.menu_.settings());
@@ -536,7 +538,7 @@ struct Game::State {
                 if (command.first) request_level(command.level,command.second);
                 else if (!actors.empty()) { set_position(actors[0],level_player_start(clock.level),true,clock.frameNow); entity::synchronize_position(runtime[0],actors[0]); }
                 break;
-            case menu::CommandKind::ResetLevel: clear_registry(); actors.clear(); runtime.clear(); forces.clear(); ai.clear(); models.clear(); pickups.clear(); pickupModels.clear(); pickupRuntime.clear(); sources.clear(); decorations.clear(); combat.projectiles.clear(); combat.meleeDelays.clear(); break;
+            case menu::CommandKind::ResetLevel: clear_registry(); actors.clear(); runtime.clear(); forces.clear(); ai.clear(); models.clear(); pickups.clear(); pickupModels.clear(); pickupRuntime.clear(); sources.clear(); decorations.clear(); combat.projectiles.clear(); combat.meleeDelays.clear(); combat.muzzleFlashes.clear(); break;
             case menu::CommandKind::ResumeGame: resume(command.first,command.second); break;
             case menu::CommandKind::ShowMainMenu: show_main(command.level,command.first,command.second); break;
             case menu::CommandKind::LoadCheckpoint: checkpoint(command.name); break;
@@ -615,6 +617,12 @@ struct Game::State {
         const auto environment=environment_at(graphics.enhanced?graphics.time_of_day:TimeOfDay::Day,
                                                clock.frameNow-environmentEpoch);
         game.renderer_.set_environment(environment);
+        const auto submit_weapon_light=[&](Vec3 position,const combat::WeaponLight& profile,float intensity) {
+            if(!graphics.enhanced||!graphics.ray_tracing||environment.emission<=0||intensity<=0) return;
+            LocalLight light; light.position={position.x,position.y,position.z}; light.color=profile.color;
+            light.intensity=intensity*environment.emission; light.radius=profile.radius;
+            game.renderer_.submit_light(light);
+        };
         if (clock.phase==Phase::Active && !actors.empty()) {
             entity::respawn_big_health(actors[0],pickups,score);
             if (clock.level==4) entity::update_flight_pickups(pickupMotion,pickupRuntime,pickups);
@@ -633,6 +641,10 @@ struct Game::State {
                 draw.lighting=true; draw.fog=clock.level!=4; draw.diffuse_light=entity::draw_light(actors[i],runtime[i]);
                 game.scene_.draw(*models[i],draw,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame,now);
             }
+            if(!actors[0].hidden&&actors[0].weapon>0)
+                submit_weapon_light(entity::player_muzzle(runtime[0],actors[0].position),combat::weapon_light(actors[0].weapon),combat::weapon_light(actors[0].weapon).gun);
+            for(const auto& flash:combat.muzzleFlashes)
+                submit_weapon_light(flash.position,combat::weapon_light(flash.weapon),combat::weapon_light(flash.weapon).flash);
             for (std::size_t i=0;i<pickups.size();++i) if (!pickups[i].hidden && !pickups[i].removed) {
                 DrawState draw; draw.fog=clock.level!=4; entity::Runtime pose;
                 const auto p=pickups[i].bounds.center; pose.transform.values[12]=p.x; pose.transform.values[13]=p.y; pose.transform.values[14]=p.z;
@@ -655,6 +667,7 @@ struct Game::State {
                 const auto weapon=static_cast<std::size_t>(actors.at(projectile.owner).weapon);
                 if (projectileModels[weapon]) { DrawState draw; draw.model=combat::projectile_transform(projectile); draw.fog=clock.level!=4;
                     game.scene_.draw(*projectileModels[weapon],draw,0,now,now); }
+                submit_weapon_light(projectile.rendered,combat::weapon_light(weapon),combat::weapon_light(weapon).projectile);
             }
             game.renderer_.finish_world();
             const bool wideHud=game.menu_.page()==0;

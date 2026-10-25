@@ -15,6 +15,12 @@ struct Weapon {
 };
 const std::array<Weapon,8>& weapons() noexcept; //004323a0, exact table stride48
 const Weapon& weapon(std::int32_t index); // Invalid script indices are errors, not defaults.
+struct WeaponLight {
+    std::array<float,3> color{};
+    float gun = 0, flash = 0, projectile = 0, radius = 0;
+};
+const WeaponLight& weapon_light(std::int32_t index);
+struct MuzzleFlash { Vec3 position; std::uint32_t expires = 0; std::int32_t weapon = 0; };
 void regenerate(gameplay::EntityState&, entity::Runtime&, std::uint32_t frameNow);
 struct Projectile {
     std::size_t owner = 0; // stable entity identity; do not compact the entity array
@@ -27,6 +33,7 @@ struct World {
     std::vector<std::uint32_t> meleeDelays; // player+194 list, countdown in fixed ticks
     std::uint32_t lastPlayerAttack = 0; // shared004693a8; persists across level reload
     std::uint32_t projectileTickStart = 0; //004ff6a0
+    std::vector<MuzzleFlash> muzzleFlashes;
     bool firstMeleeHit = true; // global004ade08, initialized004173a1; survives level reload
 };
 struct Context {
@@ -59,6 +66,7 @@ void apply_player_input(World&,Context&,gameplay::ForceState&,const gameplay::Pl
 void tick_melee(World&, Context&); //0040bed0; BEFORE body/AI fixed tick
 void tick_projectiles(World&, Context&,std::uint32_t fixedTick); //00425fc0; AFTER bodies
 void interpolate_projectiles(World&,std::uint32_t frameNow) noexcept;
+void tick_muzzle_flashes(World&,std::uint32_t frameNow) noexcept;
 Mat4 projectile_transform(const Projectile&) noexcept; // rendered model upright yaw only
 // State/score is GameplayRecovery's damage(); this adds exact audio/flash/hook.
 gameplay::DamageResult damage(World&,Context&,std::size_t target,float amount);

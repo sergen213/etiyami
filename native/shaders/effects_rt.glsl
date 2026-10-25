@@ -30,6 +30,8 @@ struct Instance {
 };
 layout(std430,set=0,binding=5) readonly buffer Instances { Instance instance[]; };
 layout(set=0,binding=6) uniform sampler2D sourceTextures[];
+layout(std430,set=0,binding=14) readonly buffer LocalLights { vec4 localLight[]; };
+layout(std430,set=0,binding=15) readonly buffer LocalLightTiles { uint localTile[]; };
 #endif
 #ifdef YAMI_PENDING
 #ifndef YAMI_PENDING_ACCESS

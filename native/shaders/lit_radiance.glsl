@@ -45,6 +45,9 @@ vec3 litRadiance(vec3 base,ivec2 t,float depth,float sampleSun,out vec3 composed
     vec4 gain=texelFetch(accumulatedGain,t,0);
     float ao=intBitsToFloat(texelFetch(accumulatedGeometry,t,0).z);
     composed=gain.rgb;
+#ifdef YAMI_LOCAL_LIGHT
+    composed+=texelFetch(currentLocal,t,0).rgb;
+#endif
     if(ao>=0) {
         // AO's fixed 10-unit rays draw dark outlines along every ledge and window frame of buildings
         // down the street, which read as artefacts and alias at render resolution: keep it in the

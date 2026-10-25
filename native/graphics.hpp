@@ -12,6 +12,15 @@ struct Environment {
     std::array<float,3> sky{{1,1,1}}, fog{{.2f,.2f,.2f}};
     float emission = 0;
 };
+enum class LocalLightKind { Point, Spot };
+struct LocalLight {
+    std::array<float,3> position{}, direction{{0,-1,0}};
+    std::array<float,3> color{{1,1,1}};
+    float intensity = 1, radius = 500;
+    float inner_cone = .8f, outer_cone = .5f;
+    LocalLightKind kind = LocalLightKind::Point;
+};
+
 inline constexpr std::uint64_t environment_cycle_ms = 720000;
 inline Environment environment_at(TimeOfDay mode, std::uint64_t elapsed) {
     const Environment day;

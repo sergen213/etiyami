@@ -112,14 +112,14 @@ struct VulkanEffects::Impl {
         std::uint32_t vertices=0,indices=0;
         VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     };
-    Buffer uniform,materials,instances,scratch;
+    Buffer uniform,materials,instances,scratch,lights,tile_lights;
     Structure tlas;
     std::uint32_t tlas_count=0;
     std::uint32_t top_size_count=0;
     VkAccelerationStructureBuildSizesInfoKHR top_sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     std::unordered_map<std::uint64_t,Blas> cache;
     // shadow_offset: Sun pass second output (effects.frag shadowOffset), written only for the midpoint selector.
-    VulkanImage effects,reflected,sun,shadow_offset,history[2],geometry[2],base[2],reflection[2],output;
+    VulkanImage effects,reflected,sun,shadow_offset,local,history[2],geometry[2],base[2],reflection[2],output;
     // FSR render-resolution inputs, its shared dilation resources, and display-resolution output.
     // fsr_illumination: reactive-mask history (fsr_inputs.frag), written [fsr_ping], previous [1-fsr_ping].
     // fsr_reactive also serves frame interpolation as its shading-change mask.
@@ -216,7 +216,7 @@ struct VulkanEffects::Impl {
         b={};
     }
     // host: CPU-written and mapped (the effects uniform and ray instance/material tables), preferring mappable VRAM.
-    void reserve(Buffer& b,VkDeviceSize size,VkBufferUsageFlags usage,bool host=false) {
+    void reserve(Buffer& b,VkDeviceSize size,VkBufferUsageFlags usage,bool host=false,bool cached=false) {
         if(b.gpu.size>=size) return;
         destroy(b);
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -227,7 +227,7 @@ struct VulkanEffects::Impl {
         flags.flags=(usage&VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)?VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT:0;
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.pNext=flags.flags?&flags:nullptr; allocation.allocationSize=requirements.size;
-        if(host) checked(allocate_host_memory(c,allocation,requirements.memoryTypeBits,host_upload_memory,host_memory,b.gpu.memory),"effects allocate buffer");
+        if(host) checked(allocate_host_memory(c,allocation,requirements.memoryTypeBits,cached?host_readback_memory:host_upload_memory,host_memory,b.gpu.memory),"effects allocate buffer");
         else {
             allocation.memoryTypeIndex=memory_type(requirements.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             checked(c.vk.vkAllocateMemory(c.device,&allocation,nullptr,&b.gpu.memory),"effects allocate buffer");
@@ -296,9 +296,10 @@ struct VulkanEffects::Impl {
         transition(cmd,image,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
     VkDescriptorSetLayout layout(bool ray,bool temporal,std::uint32_t source_capacity=0,bool display=false,bool ms=false,bool source_cache=true) {
-        std::array<VkDescriptorSetLayoutBinding,14> bindings{};
+        std::array<VkDescriptorSetLayoutBinding,16> bindings{};
         const unsigned ray_count=ray?(source_cache?2:1):0;
-        const unsigned base_count=temporal?13:display?7:ray?8:5,count=base_count+(ms?3:0)+ray_count;
+        const unsigned base_count=temporal?13:display?8:ray?8:5;
+        unsigned count=base_count+(ms?3:0)+ray_count;
         for(unsigned i=0;i<count;++i) {
             bindings[i].binding=i; bindings[i].descriptorCount=1; bindings[i].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
             // Ray sets also serve effects_rt.comp and effects_resolve.vert (Parameters).
@@ -313,8 +314,11 @@ struct VulkanEffects::Impl {
             bindings[4].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
             bindings[5].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[6].descriptorCount=source_capacity;
+            bindings[count]={14,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT|VK_SHADER_STAGE_VERTEX_BIT,nullptr};
+            bindings[count+1]={15,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT|VK_SHADER_STAGE_VERTEX_BIT,nullptr};
+            count+=2;
         }
-        std::array<VkDescriptorBindingFlags,14> binding_flags{}; if(ray) binding_flags[6]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+        std::array<VkDescriptorBindingFlags,16> binding_flags{}; if(ray) binding_flags[6]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
         VkDescriptorSetLayoutBindingFlagsCreateInfo flags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO}; flags.bindingCount=count; flags.pBindingFlags=binding_flags.data();
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; info.bindingCount=count; info.pBindings=bindings.data(); info.pNext=ray?&flags:nullptr;
         VkDescriptorSetLayout result{}; checked(c.vk.vkCreateDescriptorSetLayout(c.device,&info,nullptr,&result),"effects descriptor layout"); return result;
@@ -386,7 +390,9 @@ struct VulkanEffects::Impl {
         info.magFilter=info.minFilter=VK_FILTER_NEAREST;
         checked(c.vk.vkCreateSampler(c.device,&info,nullptr,&nearest_sampler),"effects depth sampler");
         reserve(uniform,sizeof(Parameters),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,true);
-        std::array<VkDescriptorPoolSize,3> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,48},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,7},
+        reserve(lights,64*4*sizeof(std::array<float,4>),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true);
+        reserve(tile_lights,5*sizeof(std::uint32_t),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true,true);
+        std::array<VkDescriptorPoolSize,3> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,64},{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,7},
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,4}}};
         VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO}; pool_info.maxSets=7; pool_info.poolSizeCount=std::uint32_t(sizes.size()); pool_info.pPoolSizes=sizes.data();
         checked(c.vk.vkCreateDescriptorPool(c.device,&pool_info,nullptr,&pool),"effects descriptor pool");
@@ -394,8 +400,10 @@ struct VulkanEffects::Impl {
         effect_ms_layout=layout(false,false,0,false,true);
         effect_pipeline_layout=pipeline_layout(effect_layout); temporal_pipeline_layout=pipeline_layout(temporal_layout); display_pipeline_layout=pipeline_layout(display_layout);
         effect_ms_pipeline_layout=pipeline_layout(effect_ms_layout);
-        effect_pipeline=pipeline(effect_pipeline_layout,spirv::effects_frag,2);
-        effect_ms_pipeline=pipeline(effect_ms_pipeline_layout,spirv::effects_ms_frag,2);
+        effect_pipeline=pipeline(effect_pipeline_layout,spirv::effects_frag,3,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
+            spirv::vulkan_final_vert,VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,VK_FORMAT_R16G16B16A16_SFLOAT);
+        effect_ms_pipeline=pipeline(effect_ms_pipeline_layout,spirv::effects_ms_frag,3,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
+            spirv::vulkan_final_vert,VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,VK_FORMAT_R16G16B16A16_SFLOAT);
         temporal_pipeline=pipeline(temporal_pipeline_layout,spirv::temporal_frag,4,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R32G32B32A32_SINT);
         display_pipeline=pipeline(display_pipeline_layout,spirv::display_frag,1);
         effect_set=descriptor(effect_layout,pool); temporal_set=descriptor(temporal_layout,pool); display_set=descriptor(display_layout,pool);
@@ -403,9 +411,9 @@ struct VulkanEffects::Impl {
         // FSR inputs: raster colour, depth and motion metadata plus Parameters (binding 3), the
         // current temporal gain/geometry/reflection and Sun that compose the lit radiance (4..7),
         // the previous reactive-mask history (8) and the filtered per-sample Sun (9).
-        std::array<VkDescriptorSetLayoutBinding,10> inputs{};
-        for(std::uint32_t i=0;i<10;++i) inputs[i]={i,i==3?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
-        VkDescriptorSetLayoutCreateInfo inputs_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; inputs_info.bindingCount=10; inputs_info.pBindings=inputs.data();
+        std::array<VkDescriptorSetLayoutBinding,11> inputs{};
+        for(std::uint32_t i=0;i<11;++i) inputs[i]={i,i==3?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
+        VkDescriptorSetLayoutCreateInfo inputs_info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; inputs_info.bindingCount=11; inputs_info.pBindings=inputs.data();
         checked(c.vk.vkCreateDescriptorSetLayout(c.device,&inputs_info,nullptr,&fsr_inputs_layout),"FSR inputs descriptor layout");
         fsr_inputs_pipeline_layout=pipeline_layout(fsr_inputs_layout);
         // Lit colour, UV motion, reactive history (log2 illumination, linear depth, log2 artwork luminance: half
@@ -585,21 +593,23 @@ struct VulkanEffects::Impl {
         // descriptor sets stay alive in their own pool.
         destroy_ray_pipeline();
         std::array<VkDescriptorPoolSize,4> sizes{{{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity*3+23},
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,3},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,3},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,3},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,9},
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,3}}};
         VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         info.maxSets=3; info.poolSizeCount=std::uint32_t(sizes.size()); info.pPoolSizes=sizes.data();
         checked(c.vk.vkCreateDescriptorPool(c.device,&info,nullptr,&ray_pool),"effects grow ray descriptor pool");
         ray_layout=layout(true,false,capacity); ray_pipeline_layout=pipeline_layout(ray_layout,pending_layout);
-        ray_pipeline=pipeline(ray_pipeline_layout,spirv::effects_rt_frag,2);
+        ray_pipeline=pipeline(ray_pipeline_layout,spirv::effects_rt_frag,3,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
+            spirv::vulkan_final_vert,VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,VK_FORMAT_R16G16B16A16_SFLOAT);
         ray_ms_layout=layout(true,false,capacity,false,true);
         ray_ms_pipeline_layout=pipeline_layout(ray_ms_layout,pending_layout);
-        ray_ms_pipeline=pipeline(ray_ms_pipeline_layout,spirv::effects_rt_ms_frag,2);
+        ray_ms_pipeline=pipeline(ray_ms_pipeline_layout,spirv::effects_rt_ms_frag,3,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
+            spirv::vulkan_final_vert,VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,VK_FORMAT_R16G16B16A16_SFLOAT);
         for(unsigned ms=0;ms<2;++ms) {
             const VkPipelineLayout ray_pass=ms?ray_ms_pipeline_layout:ray_pipeline_layout;
             pending_pipeline[ms]=compute_pipeline(ray_pass,spirv::effects_rt_comp);
-            resolve_pipeline[ms]=pipeline(ray_pass,spirv::effects_resolve_frag,2,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
-                spirv::effects_resolve_vert,VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+            resolve_pipeline[ms]=pipeline(ray_pass,spirv::effects_resolve_frag,3,VK_FORMAT_R16G16B16A16_SFLOAT,VK_FORMAT_R16G16B16A16_SFLOAT,
+                spirv::effects_resolve_vert,VK_PRIMITIVE_TOPOLOGY_POINT_LIST,VK_FORMAT_R16G16B16A16_SFLOAT);
         }
         ray_ms_set=descriptor(ray_ms_layout,ray_pool);
         classify_pipeline=pipeline(ray_pipeline_layout,spirv::effects_classify_frag,1,VK_FORMAT_R8G8B8A8_UNORM);
@@ -725,6 +735,7 @@ struct VulkanEffects::Impl {
             source(2,reflection[old],nearest_sampler); source(4,*f.color,sampler);
             source(5,geometry[old],nearest_sampler);
             source(6,sun_active?sun:effects,nearest_sampler);
+            source(7,local,nearest_sampler);
         } else {
             source(0,temporal?effects:sun_pass?reflected:*f.color,nearest_sampler);
             source(1,*f.depth,nearest_sampler); source(2,*f.normal,nearest_sampler);
@@ -751,9 +762,10 @@ struct VulkanEffects::Impl {
             }
         }
         VkDescriptorBufferInfo ubo{uniform.gpu.buffer,0,sizeof(Parameters)},table{materials.gpu.buffer,0,materials.gpu.size};
-        std::array<VkWriteDescriptorSet,14> writes{};
+        const VkDescriptorBufferInfo light_table{lights.gpu.buffer,0,lights.gpu.size},tile_table{tile_lights.gpu.buffer,0,tile_lights.gpu.size};
+        std::array<VkWriteDescriptorSet,16> writes{};
         const unsigned ray_count=ray?(sun_pass?1:2):0;
-        const unsigned base_count=temporal?13:display?7:ray?8:5,count=base_count+(ms?3:0)+ray_count;
+        const unsigned base_count=temporal?13:display?8:ray?8:5,count=base_count+(ms?3:0)+ray_count;
         for(unsigned i=0;i<count;++i) {
             writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=set;
             writes[i].dstBinding=ray&&i>=count-ray_count?12+i-(count-ray_count):ms&&i>=base_count&&i<base_count+3?8+i-base_count:(!ray&&!temporal&&!display&&i==4)?7:i; writes[i].descriptorCount=1;
@@ -766,8 +778,10 @@ struct VulkanEffects::Impl {
             writes[4].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR; writes[4].pImageInfo=nullptr; writes[4].pNext=&as;
             writes[5].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; writes[5].pImageInfo=nullptr; writes[5].pBufferInfo=&table;
             writes[6].descriptorCount=std::uint32_t(f.textures.size()); writes[6].pImageInfo=f.textures.data();
+            writes[count]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,set,14,0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,nullptr,&light_table,nullptr};
+            writes[count+1]={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,nullptr,set,15,0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,nullptr,&tile_table,nullptr};
         }
-        c.vk.vkUpdateDescriptorSets(c.device,count,writes.data(),0,nullptr);
+        c.vk.vkUpdateDescriptorSets(c.device,count+(ray?2:0),writes.data(),0,nullptr);
     }
     // indirect: draw effects_resolve points from the pending queue over the loaded targets instead of a full-screen triangle.
     void pass(VkCommandBuffer cmd,std::span<VulkanImage*> targets,VkPipeline pipeline,VkPipelineLayout layout,VkDescriptorSet set,VkBuffer indirect=VK_NULL_HANDLE) {
@@ -789,6 +803,37 @@ struct VulkanEffects::Impl {
         c.vk.vkCmdEndRendering(cmd);
         for(auto* target:targets) transition(cmd,*target,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
+    void prepare_light_tiles(const VulkanEffectsFrame& f,Parameters& p) {
+        const std::uint32_t tiles_x=(f.extent.width+15)/16,tiles_y=(f.extent.height+15)/16;
+        const std::size_t tile_count=std::size_t(tiles_x)*tiles_y;
+        reserve(tile_lights,tile_count*5*sizeof(std::uint32_t),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,true,true);
+        auto* tiles=static_cast<std::uint32_t*>(tile_lights.mapped);
+        std::memset(tiles,0,tile_count*5*sizeof(std::uint32_t));
+        p.environment[3]=float(tiles_x);
+        for(std::size_t i=0;i<f.lights.size();++i) {
+            const auto& light=f.lights[i];
+            const Vec3 position{light.position[0],light.position[1],light.position[2]},eye=transform_point(f.view,position);
+            if(eye.z-light.radius>0) continue;
+            int min_x=0,min_y=0,max_x=int(tiles_x)-1,max_y=int(tiles_y)-1;
+            if(eye.z+light.radius<=0) {
+                const auto& m=p.current_vp.values;
+                const float w=m[3]*position.x+m[7]*position.y+m[11]*position.z+m[15];
+                const float x=(m[0]*position.x+m[4]*position.y+m[8]*position.z+m[12])/w;
+                const float y=(m[1]*position.x+m[5]*position.y+m[9]*position.z+m[13])/w;
+                const float rx=light.radius*std::abs(f.projection.values[0])/(-eye.z)*1.05f;
+                const float ry=light.radius*std::abs(f.projection.values[5])/(-eye.z)*1.05f;
+                const auto clamp_x=[&](float value){return std::clamp(int(std::floor(value)),0,int(tiles_x)-1);};
+                const auto clamp_y=[&](float value){return std::clamp(int(std::floor(value)),0,int(tiles_y)-1);};
+                min_x=clamp_x((x-rx+1)*.5f*f.extent.width/16); max_x=clamp_x((x+rx+1)*.5f*f.extent.width/16);
+                min_y=clamp_y((y-ry+1)*.5f*f.extent.height/16); max_y=clamp_y((y+ry+1)*.5f*f.extent.height/16);
+            }
+            for(int y=min_y;y<=max_y;++y) for(int x=min_x;x<=max_x;++x) {
+                const std::size_t tile=(std::size_t(y)*tiles_x+x)*5;
+                if(tiles[tile]<4) tiles[tile+1+tiles[tile]++]=std::uint32_t(i);
+            }
+        }
+    }
+
     const VulkanImage& render(const VulkanEffectsFrame& f) {
         if(!f.color || !f.depth || !f.normal || !f.extent.width || !f.extent.height || !f.output_extent.width || !f.output_extent.height) throw std::runtime_error("Vulkan effects: invalid world targets");
         // Interpolation continues only from a frame that interpolated immediately before this one.
@@ -796,11 +841,12 @@ struct VulkanEffects::Impl {
         if(!f.settings.enhanced) { valid=false; destroy_fsr(); return *f.color; }
         const bool ms=f.ms_motion && f.ms_normal && f.ms_previous_normal;
         bool rt=c.ray_query && f.settings.ray_tracing && !f.instances.empty() &&
-            ((f.settings.shadows>0&&f.environment.direct>0) || f.settings.ambient_occlusion>0 || f.settings.reflections>0 || f.settings.indirect_lighting>0);
+            ((f.settings.shadows>0&&f.environment.direct>0) || f.settings.ambient_occlusion>0 || f.settings.reflections>0 || f.settings.indirect_lighting>0 || !f.lights.empty());
         if(rt) ensure_ray_capacity(f.textures.size());
         const bool sun_active=rt&&f.settings.shadows>0&&f.environment.direct>0;
         if(!same(effects.extent,f.extent) || !same(output.extent,f.output_extent)) valid=false;
         image(effects,f.extent); image(reflected,f.extent); image(output,f.output_extent);
+        image(local,f.extent);
         // FSR replaces artwork AA/upscaling; RT lighting history stays in the temporal pass.
         if(!c.fsr || !f.settings.temporal_aa || !f.motion) destroy_fsr();
         else if(!fsr || !same(fsr_render,f.extent) || !same(fsr_display,f.output_extent) || generation_format!=f.generation_format)
@@ -847,7 +893,7 @@ struct VulkanEffects::Impl {
         p.strengths={f.settings.ambient_occlusion,f.settings.reflections,rt?f.settings.shadows*f.environment.direct:0,rt?f.settings.indirect_lighting:0};
         // post.z: the display pass reads FSR's upscaled lit radiance instead of composing it.
         p.post={f.settings.exposure,f.settings.bloom,upscale?1.f:0.f,f.settings.roughness};
-        p.environment={f.environment.ambient,f.environment.direct,0,0};
+        p.environment={f.environment.ambient,f.environment.direct,float(f.lights.size()),0};
         p.fog={f.environment.fog[0],f.environment.fog[1],f.environment.fog[2],0};
         const bool history_eligible=valid&&f.history_valid&&(f.settings.temporal_aa||rt);
         p.temporal={history_eligible?1.f:0.f,f.settings.temporal_aa?1.f:0.f,float(frame_index%4096),f.motion&&f.previous_normal?1.f:0.f};
@@ -860,7 +906,16 @@ struct VulkanEffects::Impl {
         // jitter.z: fsr_inputs.frag may compare against the previous FSR frame's reactive history
         // (exactly when FSR keeps its own history, d.reset below is false).
         p.jitter[2]=upscale&&history_eligible&&fsr_history?1.f:0.f;
+        prepare_light_tiles(f,p);
         std::memcpy(uniform.mapped,&p,sizeof p);
+        auto* gpu_lights=static_cast<std::array<float,4>*>(lights.mapped);
+        for(std::size_t i=0;i<f.lights.size();++i) {
+            const auto& light=f.lights[i];
+            gpu_lights[i*4]={light.position[0],light.position[1],light.position[2],light.radius};
+            gpu_lights[i*4+1]={light.color[0],light.color[1],light.color[2],light.intensity};
+            gpu_lights[i*4+2]={light.direction[0],light.direction[1],light.direction[2],light.inner_cone};
+            gpu_lights[i*4+3]={light.outer_cone,light.kind==LocalLightKind::Spot?1.f:0.f,0,0};
+        }
         const VkDescriptorSet effect_descriptor=rt?(ms?ray_ms_set:ray_set):(ms?effect_ms_set:effect_set);
         const VkPipeline effect_shader=rt?(ms?ray_ms_pipeline:ray_pipeline):(ms?effect_ms_pipeline:effect_pipeline);
         const VkPipelineLayout effect_pass_layout=rt?(ms?ray_ms_pipeline_layout:ray_pipeline_layout):(ms?effect_ms_pipeline_layout:effect_pipeline_layout);
@@ -890,7 +945,7 @@ struct VulkanEffects::Impl {
             pass(f.command,classify_targets,ms?classify_ms_pipeline:classify_pipeline,effect_pass_layout,effect_descriptor);
             gpu_timestamp(c,f.command,GpuClassify,true);
         }
-        VulkanImage* effect_targets[]{&effects,&reflected};
+        VulkanImage* effect_targets[]{&effects,&reflected,&local};
         gpu_timestamp(c,f.command,GpuEffects,false); pass(f.command,effect_targets,effect_shader,effect_pass_layout,effect_descriptor);
         if(queued) {
             // Queued state and indirect arguments -> compute; its final values -> the resolve points.
@@ -946,21 +1001,21 @@ struct VulkanEffects::Impl {
             // FSR input colour is composed from the temporal outputs this frame just wrote (display.frag's inputs);
             // binding 8 is the previous reactive history while the pass writes the other one.
             VulkanImage& previous_illumination=fsr_illumination[1-fsr_ping];
-            std::array<VkDescriptorImageInfo,10> inputs{{{nearest_sampler,f.color->view,f.color->layout},
+            std::array<VkDescriptorImageInfo,11> inputs{{{nearest_sampler,f.color->view,f.color->layout},
                 {nearest_sampler,f.depth->view,f.depth->layout},{nearest_sampler,f.motion->view,f.motion->layout},{},
                 {nearest_sampler,history[next].view,history[next].layout},{nearest_sampler,geometry[next].view,geometry[next].layout},
                 {nearest_sampler,reflection[next].view,reflection[next].layout},
                 {nearest_sampler,(sun_active?sun:effects).view,(sun_active?sun:effects).layout},
                 {nearest_sampler,previous_illumination.view,previous_illumination.layout},
-                {nearest_sampler,filtered_sun.view,filtered_sun.layout}}};
+                {nearest_sampler,filtered_sun.view,filtered_sun.layout},{nearest_sampler,local.view,local.layout}}};
             VkDescriptorBufferInfo ubo{uniform.gpu.buffer,0,sizeof(Parameters)};
-            std::array<VkWriteDescriptorSet,10> writes{};
-            for(std::uint32_t i=0;i<10;++i) {
+            std::array<VkWriteDescriptorSet,11> writes{};
+            for(std::uint32_t i=0;i<11;++i) {
                 writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; writes[i].dstSet=fsr_inputs_set; writes[i].dstBinding=i; writes[i].descriptorCount=1;
                 writes[i].descriptorType=i==3?VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 if(i==3) writes[i].pBufferInfo=&ubo; else writes[i].pImageInfo=&inputs[i];
             }
-            c.vk.vkUpdateDescriptorSets(c.device,10,writes.data(),0,nullptr);
+            c.vk.vkUpdateDescriptorSets(c.device,11,writes.data(),0,nullptr);
             VulkanImage* input_targets[]{&fsr_color,&fsr_motion,&fsr_illumination[fsr_ping],&fsr_reactive};
             pass(f.command,input_targets,fsr_inputs_pipeline,fsr_inputs_pipeline_layout,fsr_inputs_set); gpu_timestamp(c,f.command,GpuFsrInputs,true);
             fsr_ping=1-fsr_ping;
@@ -1095,9 +1150,9 @@ struct VulkanEffects::Impl {
     }
     void cleanup() noexcept {
         for(auto& entry:cache) destroy(entry.second.as);
-        destroy(tlas); destroy(scratch); destroy(instances); destroy(materials); destroy(uniform); destroy(queue); destroy(pending);
+        destroy(tlas); destroy(scratch); destroy(instances); destroy(materials); destroy(uniform); destroy(lights); destroy(tile_lights); destroy(queue); destroy(pending);
         destroy_fsr();
-        destroy(effects); destroy(reflected); destroy(sun); destroy(shadow_offset); destroy(output);
+        destroy(effects); destroy(reflected); destroy(sun); destroy(shadow_offset); destroy(local); destroy(output);
         for(auto& i:history) destroy(i); for(auto& i:geometry) destroy(i);
         for(auto& i:base) destroy(i); for(auto& i:reflection) destroy(i);
         destroy_ray_pipeline();

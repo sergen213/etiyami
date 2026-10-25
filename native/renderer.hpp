@@ -57,6 +57,7 @@ public:
     void reset_history();
     void set_environment(const Environment&);
     void set_graphics(const GraphicsSettings&);
+    void submit_light(const LocalLight&);
     GraphicsSettings graphics_settings() const noexcept;
     void resize();
     void clear();

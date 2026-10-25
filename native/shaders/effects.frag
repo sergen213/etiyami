@@ -10,6 +10,7 @@ layout(location=0) in vec2 vUv;
 layout(location=0) out vec4 gainOut;
 #if !defined(YAMI_SUN_PASS) && !defined(YAMI_SOURCE_CLASSIFY)
 layout(location=1) out vec4 reflectionOut;
+layout(location=2) out vec4 localOut;
 #endif
 #ifdef YAMI_RAY_QUERY
 layout(set=0,binding=12) uniform isampler2D sourceMotion;
@@ -133,6 +134,32 @@ bool occluded(vec3 origin,vec3 direction,float maximum,out uint object,out uint 
     toWorld=rayQueryGetIntersectionObjectToWorldEXT(q,true);
     return true;
 }
+#if !defined(YAMI_SUN_PASS)
+vec3 localLighting(vec3 origin,vec3 normal) {
+    vec3 sum=vec3(0);
+    const uint tilesX=uint(p.environment.w),tile=(uint(gl_FragCoord.y)/16*tilesX+uint(gl_FragCoord.x)/16)*5;
+    const uint count=min(localTile[tile],4u);
+    for(uint at=1;at<=count;++at) {
+        const uint i=localTile[tile+at];
+        const vec4 positionRadius=localLight[i*4],colourIntensity=localLight[i*4+1];
+        const vec4 directionInner=localLight[i*4+2],misc=localLight[i*4+3];
+        const vec3 delta=positionRadius.xyz-origin;
+        const float distance=length(delta),radius=positionRadius.w;
+        if(distance>=radius||distance<=.12) continue;
+        const vec3 direction=delta/distance;
+        float attenuation=clamp(1-distance/radius,0,1);
+        attenuation=attenuation*attenuation/(1+distance*distance*.0001);
+        float cone=1;
+        if(misc.y>.5) cone=smoothstep(misc.x,directionInner.w,dot(-direction,directionInner.xyz));
+        const float facing=max(dot(normal,direction),0)*attenuation*cone;
+        if(facing<=.00001) continue;
+        uint object,primitive; vec2 bary; mat4x3 toWorld;
+        if(!occluded(origin,direction,distance-.12,object,primitive,bary,toWorld))
+            sum+=colourIntensity.rgb*colourIntensity.w*facing;
+    }
+    return sum;
+}
+#endif
 // Shadow terminator (Hanika, "Hacking the Shadow Terminator", 2021): a point on a flat facet of a
 // smooth-shaded low-poly model is lifted onto the curved surface its authored vertex normals imply,
 // so Sun rays stop shadowing each facet that merely tilts away from the light. Flat geometry
@@ -424,7 +451,7 @@ void main() {
 #else
     float complete=sourceComplete(texel)?1:0;
 #endif
-    gainOut=vec4(0,0,0,1); reflectionOut=vec4(0,0,0,complete);
+    gainOut=vec4(0,0,0,1); reflectionOut=vec4(0,0,0,complete); localOut=vec4(0);
     if(p.temporal.w>0) {
         float centerDepth=intBitsToFloat(texelFetch(surfaceMetadata,texel,0).y);
         if(centerDepth<=0 || isnan(centerDepth) || isinf(centerDepth)) return;
@@ -457,6 +484,9 @@ void main() {
     int reflectionCount=p.post.w==0?1:sampleCount;
     float aoSum=0; vec3 indirectSum=vec3(0);
     vec3 origin=position+physical*.06;
+#ifdef YAMI_RAY_QUERY
+    localOut=vec4(localLighting(origin,physical),0);
+#endif
     for(int i=0;i<sampleCount;++i) {
         effectSample(i,gl_FragCoord.xy,stochastic,stable,diffuse,reflectionActive,reflectionCount,
                      origin,physical,mirror,random,aoSum,indirectSum,reflected);

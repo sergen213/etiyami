@@ -2008,6 +2008,52 @@ void check_day_night(Fixture& fixture) {
     renderer.set_graphics(original); renderer.set_environment(environment_at(TimeOfDay::Day,0));
     std::cout<<"day/night environment, emissive lamps and unchanged HUD PASS\n";
 }
+void check_local_lights(Fixture& fixture) {
+    if (!fixture.renderer.ray_tracing_available()) return;
+    auto& renderer=fixture.renderer;
+    const auto original=renderer.graphics_settings();
+    auto settings=original;
+    settings.ray_tracing=true; settings.temporal_aa=false; settings.shadows=0;
+    settings.ambient_occlusion=settings.reflections=settings.indirect_lighting=0;
+    renderer.set_graphics(settings);
+    renderer.set_environment(environment_at(TimeOfDay::Night,0));
+    const auto render=[&](Fixture::Mode mode,bool illuminated,float light_x=0,bool reset=true) {
+        if(reset) renderer.reset_history(); renderer.clear();
+        renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
+        if (illuminated) {
+            LocalLight light;
+            light.position={light_x,200,-654}; light.color={1,1,1}; light.intensity=40; light.radius=500;
+            renderer.submit_light(light);
+        }
+        DrawState state; state.lighting=state.temporal_static=true;
+        renderer.draw(fixture.floor,0,fixture.material,fixture.pass,state);
+        if (mode!=Fixture::Mode::Absent) renderer.draw(fixture.blocker,0,fixture.material,fixture.pass,state);
+        renderer.finish_world();
+        auto result=renderer.capture_rgba(); renderer.present(); return result;
+    };
+    const auto dark=render(Fixture::Mode::Absent,false);
+    const auto lit=render(Fixture::Mode::Absent,true);
+    std::cout<<"local dark/lit near="<<fixture.patch(dark,-90,-654)<<'/'<<fixture.patch(lit,-90,-654)
+             <<" far="<<fixture.patch(dark,500,-654)<<'/'<<fixture.patch(lit,500,-654)<<'\n';
+    require(fixture.patch(lit,-90,-654)>fixture.patch(dark,-90,-654)+10,
+            "Local point light did not illuminate a dark receiver");
+    require(std::abs(fixture.patch(lit,500,-654)-fixture.patch(dark,500,-654))<=2,
+            "Local point light escaped its radius");
+    const auto shadow=render(Fixture::Mode::Opaque,true);
+    require(fixture.patch(lit,-90,-654)-fixture.patch(shadow,-90,-654)>=8,
+            "Opaque geometry did not block local-light visibility");
+    require(std::abs(fixture.patch(shadow,220,-654)-fixture.patch(lit,220,-654))<=2,
+            "Local-light shadow darkened an unoccluded receiver");
+    settings.temporal_aa=true; renderer.set_graphics(settings);
+    render(Fixture::Mode::Absent,true,0,true);
+    const auto moved=render(Fixture::Mode::Absent,true,250,false);
+    const auto fresh=render(Fixture::Mode::Absent,true,250,true);
+    require(std::abs(fixture.patch(moved,160,-654)-fixture.patch(fresh,160,-654))<=3 &&
+            std::abs(fixture.patch(moved,-90,-654)-fixture.patch(fresh,-90,-654))<=3,
+            "Moving local light left stale illumination in temporal history");
+    renderer.set_graphics(original); renderer.set_environment(environment_at(TimeOfDay::Day,0));
+    std::cout<<"local point illumination/radius/shadow visibility/moving-light history PASS\n";
+}
 
 int main(int argc, char** argv) {
     bool force_off = false, require_rt = false, temporal_only = false, oblique_only = false, environment_only = false;
@@ -2033,6 +2079,7 @@ int main(int argc, char** argv) {
     int result = 0;
     try {
         Fixture fixture;
+        check_local_lights(fixture);
         check_day_night(fixture);
         if (environment_only) return 0;
         std::cout << fixture.renderer.backend_name() << " drawable=" << fixture.width << 'x' << fixture.height
