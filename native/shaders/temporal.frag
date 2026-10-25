@@ -18,6 +18,7 @@ layout(std140,set=0,binding=3) uniform Parameters {
     vec4 previousRayBasisY;
     vec4 previousRayBasisZ;
     vec4 previousCamera;
+    vec4 environment,fog;
 } p;
 layout(set=0,binding=4) uniform sampler2D historyGain;
 layout(set=0,binding=5) uniform isampler2D historyGeometry;

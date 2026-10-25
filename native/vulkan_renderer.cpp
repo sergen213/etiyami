@@ -104,6 +104,7 @@ struct VulkanRenderer::Impl {
     VkSampleCountFlags sample_flags=1;
     float max_aniso=1;
     GraphicsSettings settings{};
+    Environment environment{};
     unsigned brightness=257,frame_number=0;
     bool finished=false,world_closed=false,ui=false,world_seen=false,history=false,recreate=true;
     std::size_t world_end=0;
@@ -168,14 +169,16 @@ struct VulkanRenderer::Impl {
         std::array<float,4> light,diffuse,color,uv,world_up,flags,alpha_jitter;
         Mat4 previous_mvp,previous_normal_world;
         std::array<std::int32_t,4> temporal;
+        std::array<float,4> environment,fog;
     };
-    static_assert(sizeof(Uniform)==512&&alignof(Uniform)==16);
+    static_assert(sizeof(Uniform)==544&&alignof(Uniform)==16);
     static_assert(offsetof(Uniform,model_view)==0&&offsetof(Uniform,projection)==64);
     static_assert(offsetof(Uniform,normal_eye)==128&&offsetof(Uniform,raster_grid)==176);
     static_assert(offsetof(Uniform,normal_world)==192&&offsetof(Uniform,light)==256);
     static_assert(offsetof(Uniform,diffuse)==272&&offsetof(Uniform,color)==288&&offsetof(Uniform,uv)==304);
     static_assert(offsetof(Uniform,world_up)==320&&offsetof(Uniform,flags)==336&&offsetof(Uniform,alpha_jitter)==352);
     static_assert(offsetof(Uniform,previous_mvp)==368&&offsetof(Uniform,previous_normal_world)==432&&offsetof(Uniform,temporal)==496);
+    static_assert(offsetof(Uniform,environment)==512&&offsetof(Uniform,fog)==528);
     std::shared_ptr<Buffer> uniforms,upload_staging,readback;
     VkDeviceSize uniform_stride=0;
     VulkanImage world_color{},world_depth{},world_normal{},world_ms_color{},world_ms_depth{},world_ms_normal{};
@@ -692,6 +695,7 @@ struct VulkanRenderer::Impl {
             if(phases<=0||ffxFsr3UpscalerGetJitterOffset(&jitter[0],&jitter[1],int(frame_number%unsigned(phases)),phases)!=FFX_OK)throw std::runtime_error("FSR jitter sequence unavailable");
         }}
     void camera(const Mat4& v,const Mat4& p,bool interface){if(interface&&world_seen)close_world();view=v;projection=vulkan_projection(p);ui=interface||world_closed;viewport=interface&&width>0&&height>0?fit_original_interface(width,height):Viewport{0,0,width,height};if(!ui){world_view=view;world_projection=projection;}}
+    void set_environment(const Environment& value){environment=value;}
     void close_world(){if(world_closed)return;world_end=draws.size();world_closed=true;}
     void hud_camera(){close_world();auto p=interface_projection();if(std::int64_t(width)*3<std::int64_t(height)*4)camera(identity_matrix(),p,true);else{if(height>0)p.values[0]=2.f/(768.f*width/height);camera(identity_matrix(),p,false);}ui=true;}
     std::shared_ptr<Texture> texture_resource(std::shared_ptr<VulkanImage> storage){
@@ -770,7 +774,8 @@ struct VulkanRenderer::Impl {
                     old->state.diffuse_light[0]==d.state.diffuse_light[0] &&
                     old->state.diffuse_light[1]==d.state.diffuse_light[1] &&
                     old->state.diffuse_light[2]==d.state.diffuse_light[2] &&
-                    old->state.lighting==d.state.lighting && old->state.fog==d.state.fog &&
+                    old->state.lighting==d.state.lighting && old->state.fog==d.state.fog && old->state.emission==d.state.emission &&
+                    old->state.window_emission==d.state.window_emission &&
                     old->alpha_function==d.alpha_function && old->alpha_reference==d.alpha_reference &&
                     old->color_mask==d.raster.mask;
                 d.temporal_token=material_match?old->token:next_temporal_token++;
@@ -811,6 +816,8 @@ struct VulkanRenderer::Impl {
             const float validity=d.world&&d.state.ray_geometry?((d.state.temporal_static||d.correspondence)&&!d.raster.blend&&d.raster.depth_write?1.f:0.f):-1.f;
             u.flags={d.state.lighting?1.f:0.f,d.enhanced?1.f:0.f,d.texture!=white?1.f:0.f,validity};
             u.alpha_jitter={float(d.alpha_function),d.alpha_reference,d.world&&d.enhanced?2*jitter[0]/world_extent.width:0,d.world&&d.enhanced?2*jitter[1]/world_extent.height:0};
+            u.environment={environment.ambient,environment.direct,d.state.emission,d.state.window_emission};
+            u.fog={environment.fog[0],environment.fog[1],environment.fog[2],0};
             std::memcpy(static_cast<std::byte*>(uniforms->mapped)+i*uniform_stride,&u,sizeof(u));
         }
     }
@@ -892,7 +899,7 @@ struct VulkanRenderer::Impl {
                 VulkanRayInstance instance;
                 instance.mesh={d.mesh->vertices->gpu,d.mesh->indices->gpu,unsigned(d.mesh->vertex_count),unsigned(d.mesh->index_count),d.mesh->revision,d.mesh->key};
                 instance.model=d.state.model;instance.previous_vertices=d.previous_vertices->gpu;instance.previous_model=d.previous_model;instance.texture_index=texture_index;
-                instance.uv_transform=d.state.uv_transform;instance.color=d.state.color;instance.diffuse_light=d.state.diffuse_light;
+                instance.uv_transform=d.state.uv_transform;instance.color=d.state.color;instance.diffuse_light=d.state.diffuse_light;instance.emission=d.state.emission;instance.window_emission=d.state.window_emission;
                 instance.alpha_function=d.alpha_function;instance.alpha_reference=d.alpha_reference;instance.alpha_test=d.alpha_function!=0;
                 instance.flip_vertical=d.texture->flip;instance.cull=d.raster.cull;instance.cull_face=d.raster.cull_face;
                 instance.lighting=d.state.lighting;
@@ -900,7 +907,7 @@ struct VulkanRenderer::Impl {
             }
             // Ray surfaces (normal w>=0) come only from world ray_geometry draws; fog is all-or-none per level in the game.
             const bool fog=std::all_of(draws.begin(),draws.begin()+std::ptrdiff_t(world_end),[](const Draw& d){return !d.state.ray_geometry||d.state.fog;});
-            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,history,&world_motion,&world_previous_normal,sample>1?&world_ms_motion:nullptr,sample>1?&world_ms_normal:nullptr,sample>1?&world_ms_previous_normal:nullptr,generating?composition.format:VK_FORMAT_UNDEFINED,fog};const auto& result=effects->render(frame);
+            VulkanEffectsFrame frame{command,&world_color,&world_depth,&world_normal,world_extent,{unsigned(width),unsigned(height)},world_view,world_projection,previous_vp,jitter,ray_instances,ray_images,settings,environment,history,&world_motion,&world_previous_normal,sample>1?&world_ms_motion:nullptr,sample>1?&world_ms_normal:nullptr,sample>1?&world_ms_previous_normal:nullptr,generating?composition.format:VK_FORMAT_UNDEFINED,fog};const auto& result=effects->render(frame);
             gpu_timestamp(*context,command,GpuComposite,false);fullscreen(result,composition,final_pipeline,true,0);gpu_timestamp(*context,command,GpuComposite,true);
             // IKV renderer_vk.cpp:327-361: interpolate the HUD-less composition, then draw the HUD onto both frames.
             if(generating&&effects->frame_generation()){gpu_timestamp(*context,command,GpuGeneration,false);generated_valid=effects->interpolate(command,composition,generated);gpu_timestamp(*context,command,GpuGeneration,true);}
@@ -957,7 +964,7 @@ struct VulkanRenderer::Impl {
         if(!valid_graphics(s))throw std::runtime_error("Invalid graphics settings");
         wait();
         if(s.fullscreen!=bool(SDL_GetWindowFlags(window)&SDL_WINDOW_FULLSCREEN))sdl(SDL_SetWindowFullscreen(window,s.fullscreen));
-        const bool reset=s.samples!=settings.samples||s.render_scale!=settings.render_scale||s.temporal_aa!=settings.temporal_aa||s.enhanced!=settings.enhanced||s.parallax!=settings.parallax;
+        const bool reset=s.samples!=settings.samples||s.render_scale!=settings.render_scale||s.temporal_aa!=settings.temporal_aa||s.enhanced!=settings.enhanced||s.parallax!=settings.parallax||s.time_of_day!=settings.time_of_day;
         const bool filtering=std::min(s.anisotropy,max_aniso)!=settings.anisotropy;
         settings=s;settings.anisotropy=std::min(s.anisotropy,max_aniso);select_samples();update_generation();
         if(filtering)for(auto& t:textures)if(t->mipmaps){
@@ -993,6 +1000,7 @@ float VulkanRenderer::anisotropy()const noexcept{return impl_->settings.anisotro
 int VulkanRenderer::max_samples()const noexcept{return impl_->max_sample;}
 float VulkanRenderer::max_anisotropy()const noexcept{return impl_->max_aniso;}
 void VulkanRenderer::set_graphics(const GraphicsSettings& s){impl_->set_graphics(s);}
+void VulkanRenderer::set_environment(const Environment& value){impl_->set_environment(value);}
 GraphicsSettings VulkanRenderer::graphics_settings()const noexcept{auto s=impl_->settings;s.samples=samples();s.fullscreen=SDL_GetWindowFlags(impl_->window)&SDL_WINDOW_FULLSCREEN;return s;}
 void VulkanRenderer::resize(){impl_->resize();}
 void VulkanRenderer::clear(){impl_->clear();}

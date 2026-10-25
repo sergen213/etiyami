@@ -542,7 +542,8 @@ void AudioSystem::register_original_sounds(const std::filesystem::path& root) {
         {"kus1","env/hayvan_kus1.mp3",30,false}, {"kus2","env/hayvan_kus2.mp3",30,false}, {"kus3","env/hayvan_kus3.mp3",30,false}, {"kus4","env/hayvan_kus4.mp3",30,false},
         {"kedi5","env/hayvan_kedi5.mp3",30,false}, {"kedi4","env/hayvan_kedi4.mp3",30,false}, {"kedi3","env/hayvan_kedi3.mp3",30,false},
         {"yami","yami.wav",44,false}, {"menumusic","menu.wav",20,true},
-        {"level1","level1.wav",10,true}, {"level2","level2.wav",10,true}, {"level3","level3.wav",10,true}, {"level4","level4.wav",10,true}
+        {"level1","level1.wav",10,true}, {"level2","level2.wav",10,true}, {"level3","level3.wav",10,true}, {"level4","level4.wav",10,true},
+        {"tarama_tv1","tarama_TV1.wav",100,true}
     };
     for(const auto& e:table) {
         register_sound({e.name,root/"data"/(e.music?"music":"effects")/e.path,e.music,e.music,false,static_cast<std::uint8_t>(e.volume),0});

@@ -20,6 +20,7 @@ layout(std140,set=0,binding=3) uniform Parameters {
     vec4 previousRayBasisY;
     vec4 previousRayBasisZ;
     vec4 previousCamera;
+    vec4 environment,fog;
 } p;
 // The current frame's denoised temporal outputs (display.frag bindings 1, 5, 2, 6), at render size under FSR.
 layout(set=0,binding=4) uniform sampler2D accumulatedGain;

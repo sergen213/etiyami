@@ -168,7 +168,7 @@ private:
     GraphicsSettings graphics_;
     int maxSamples_ = 0;
     float maxAnisotropy_ = 1;
-    std::array<std::array<char,64>,8> graphicsText_{};
+    std::array<std::array<char,64>,9> graphicsText_{};
     void dispatch(const Context&, bool released);
     void emit(CommandKind, int level = 0, bool first = false, bool second = false,
               std::string_view name = {});

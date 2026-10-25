@@ -77,7 +77,7 @@ struct Game::State {
     std::optional<std::pair<int,bool>> pendingLevel;
     std::string movie,lastCheckpoint;
     std::uint32_t movieStart=0;
-    std::uint32_t wallNow=0,clockOffset=0;
+    std::uint32_t wallNow=0,clockOffset=0,environmentEpoch=0;
     std::optional<std::uint32_t> menuPauseWall;
     std::optional<std::size_t> passenger;
     std::vector<menu::Objective> objectives;
@@ -611,6 +611,10 @@ struct Game::State {
             return;
         }
         now-=clockOffset;
+        const auto graphics=game.renderer_.graphics_settings();
+        const auto environment=environment_at(graphics.enhanced?graphics.time_of_day:TimeOfDay::Day,
+                                               clock.frameNow-environmentEpoch);
+        game.renderer_.set_environment(environment);
         if (clock.phase==Phase::Active && !actors.empty()) {
             entity::respawn_big_health(actors[0],pickups,score);
             if (clock.level==4) entity::update_flight_pickups(pickupMotion,pickupRuntime,pickups);
@@ -618,6 +622,8 @@ struct Game::State {
             if (game.renderer_.shadow_enabled()) draw_actor_shadows();
             for (std::size_t i=0;i<sources.size();++i) if (!sources[i].hidden) {
                 DrawState draw; draw.model=sources[i].transform; draw.lighting=i!=0; draw.fog=i!=0 && clock.level!=4;
+                draw.emission=environment.emission;
+                if(i==0) draw.color={environment.sky[0],environment.sky[1],environment.sky[2],1};
                 draw.ray_geometry=i!=0;
                 draw.temporal_static=i!=0;
                 game.scene_.draw(*sources[i].instance,draw,0,0,now);
@@ -684,7 +690,8 @@ Game::Game(Renderer& renderer,SceneCache& scene,menu::Menu& menu,AudioSystem& au
 Game::~Game()=default;
 void Game::initialize(bool skipIntro) {
     std::filesystem::create_directories(saveDirectory_); audio_.register_original_sounds(scene_.root());
-    state_->wallNow=state_->clock.frameNow=static_cast<std::uint32_t>(SDL_GetTicks()); menu_.show(1);
+    state_->wallNow=state_->clock.frameNow=state_->environmentEpoch=static_cast<std::uint32_t>(SDL_GetTicks());
+    menu_.show(1);
     state_->saveCounts=menu::checkpoint_counts(saveDirectory_);
     state_->install_hosts(); state_->menu_commands();
     if (skipIntro) { state_->clock.phase=Phase::Menu; state_->clock.paused=true; audio_.play("menumusic"); }

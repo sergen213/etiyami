@@ -169,6 +169,10 @@ int main(int argc, char** argv) {
         for(std::size_t i=0;i<reference.size();++i) require(std::abs(looped[35751*2+i]-reference[i])<1e-7,"Stream loop boundary altered PCM");
         mixer.stop(channel);
         mixer.register_original_sounds(root); // Decode present recovered paths; retain original null samples.
+        mixer.stop("tarama_tv1"); // Mission 1's final cinematic always stops this music.
+        channel=mixer.play("tarama_tv1");
+        require(channel>=0,"Mission 1 grandmother music must use its original case-sensitive WAV");
+        mixer.stop(channel);
         require(mixer.play("yaman_vurulma6")==-1 && mixer.play("yaman_melee_vur")==-1,
                 "Original unregistered combat names must not fabricate playback");
         for(const auto name:{"alarm_basla","kus1","kus2"}) {

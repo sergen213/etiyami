@@ -123,13 +123,13 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
             std::max({plus.x+plus.width,minus.x+minus.width,needle.x+needle.width})-left,
             std::max({plus.y+plus.height,minus.y+minus.height,needle.y+needle.height})-bottom};
     }
-    for (std::size_t row=0;row<8;++row) {
+    for (std::size_t row=0;row<9;++row) {
         const auto& minus=page.buttons[16+row*2].rect;
         const auto& plus=page.buttons[17+row*2].rect;
         focusRects[5+row]={minus.x,minus.y,plus.x+plus.width-minus.x,plus.height};
     }
     focusRects[playFocus]=playRect; focusRects[closeFocus]=closeRect;
-    focusRects[advancedFocus]=page.buttons[32].rect;
+    focusRects[advancedFocus]=page.buttons[34].rect;
     focusRects[backendFocus]=backendRect;
     std::size_t focus=playFocus;
     int pressedAction=-1, pressedMenu=-1;
@@ -203,7 +203,7 @@ bool run_launcher(Renderer& renderer, SceneCache& scene, menu::Menu& menu,
             commands();
             return;
         }
-        const std::size_t button=focus==advancedFocus?32:focus<5 ? originalPlus[focus]+(increase?0:1) :
+        const std::size_t button=focus==advancedFocus?34:focus<5 ? originalPlus[focus]+(increase?0:1) :
                                                     16+(focus-5)*2+(increase?1:0);
         const auto& rect=page.buttons[button].rect;
         menu.set_cursor({rect.x+rect.width/2,rect.y+rect.height/2-45});

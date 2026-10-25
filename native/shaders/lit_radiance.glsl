@@ -64,13 +64,13 @@ vec3 litRadiance(vec3 base,ivec2 t,float depth,float sampleSun,out vec3 composed
     // Orthographic depth is 1+NDC depth (<=2): f is 1 there, as nearer than 1000.
     float f=clamp((2000-depth)/1000,0,1);
     if(p.rayBasisX.w<=0 || !(depth>0) || f>=1) return lit;
-    // Display-domain refog without dividing by f: the raster colour is c_f = .2(1-f) + D with D = f*c for a
-    // plain surface, so .2(1-f) + f*lit(c) = .2(1-f) + (D^2.2*composed + f^2.2*reflection)^(1/2.2) exactly.
+    // Display-domain refog without dividing by f: the raster colour is c_f = fog(1-f) + D with D = f*c for a
+    // plain surface, so fog(1-f) + f*lit(c) = fog(1-f) + (D^2.2*composed + f^2.2*reflection)^(1/2.2) exactly.
     // Blended effects (pickups, glows) drawn over a fogged surface carry no depth of their own and only add
     // to D, so they stay visible and lit like before; unfogging by 1/f erased them where f reached 0.
-    vec3 deviation=pow(max(base,vec3(0)),vec3(1/2.2))-.2*(1-f);
+    vec3 deviation=pow(max(base,vec3(0)),vec3(1/2.2))-p.fog.rgb*(1-f);
     vec3 scaled=pow(abs(deviation),vec3(2.2))*composed+pow(f,2.2)*reflection;
-    return pow(max(.2*(1-f)+sign(deviation)*pow(scaled,vec3(1/2.2)),vec3(0)),vec3(2.2));
+    return pow(max(p.fog.rgb*(1-f)+sign(deviation)*pow(scaled,vec3(1/2.2)),vec3(0)),vec3(2.2));
 }
 // Temporal texel t's own accumulated base: its geometry W is that surface's depth.
 vec3 litRadiance(vec3 base,ivec2 t) {

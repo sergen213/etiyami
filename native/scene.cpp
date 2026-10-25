@@ -40,6 +40,34 @@ ShadowBounds indexed_bounds(std::span<const Vertex> vertices, std::span<const st
     return bounds;
 }
 }
+static std::uint32_t material_hash(std::string_view name) noexcept {
+    std::uint32_t hash=2166136261;
+    for (unsigned char c:name) {
+        if (c=='\\') c='/';
+        else if (c>='A' && c<='Z') c=unsigned(c+'a'-'A');
+        hash=(hash^c)*16777619;
+    }
+    return hash;
+}
+
+float night_lamp_emission(std::string_view name,float night) noexcept {
+    return night>0 && (name.ends_with("lamba_001.tga") || name.ends_with("trafik_lambasi.tga")) ? night : 0;
+}
+
+float night_window_emission(std::string_view name,float night) noexcept {
+    if (night<=0) return 0;
+    const bool window=name.find("/pencere/")!=std::string_view::npos || name.find("\\pencere\\")!=std::string_view::npos ||
+        name.find("kemerli_pencere")!=std::string_view::npos;
+    if (!window) return 0;
+    const auto hash=material_hash(name);
+    return hash%3==0 ? night*.35f : 0; // Stable pseudo-random occupancy: one third lit, never flickering.
+}
+float night_facade_emission(std::string_view name,float night) noexcept {
+    if (night<=0) return 0;
+    const bool facade=name.find("/cephe/")!=std::string_view::npos || name.find("\\cephe\\")!=std::string_view::npos ||
+        name.find("/cephe_")!=std::string_view::npos || name.find("\\cephe_")!=std::string_view::npos;
+    return facade && material_hash(name)%3==0 ? night*.25f : 0;
+}
 ModelInstance::ModelInstance(Renderer& renderer, const ModelResource& model, bool animated)
     : renderer_(renderer), model_(model) {
     parts.reserve(model.parts.size());
@@ -254,6 +282,9 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             if (pass.video) video_texture(pass.texture_name, wall_clock, true, texture);
             else if (!texture) texture = image(pass.texture_name);
             auto submission = state;
+            submission.emission=night_lamp_emission(pass.texture_name,state.emission);
+            submission.window_emission=night_window_emission(pass.texture_name,state.emission)+
+                night_facade_emission(pass.texture_name,state.emission);
             submission.ray_primary = p == part.primary_pass;
             submission.ray_geometry = state.ray_geometry && submission.ray_primary;
             submission.temporal_static = state.temporal_static && !part.owned && !pass.video;

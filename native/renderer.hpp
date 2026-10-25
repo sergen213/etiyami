@@ -27,6 +27,8 @@ struct DrawState {
     std::array<float, 4> uv_transform{{1, 1, 0, 0}}; // scale.xy, offset.xy
     std::uint64_t temporal_id = 0; // Stable instance/part identity; zero has no dynamic correspondence.
     unsigned relief = 0; // Enhanced static-world relief texture; zero keeps original flat shading.
+    float emission = 0; // Warm lamp radiance, added after authored texture modulation.
+    float window_emission = 0; // Blue glass mask inside original façade artwork.
 };
 struct ShadowBounds {
     Vec3 min{}, max{};
@@ -53,6 +55,7 @@ public:
     const char* backend_name() const noexcept;
     bool ray_tracing_available() const noexcept;
     void reset_history();
+    void set_environment(const Environment&);
     void set_graphics(const GraphicsSettings&);
     GraphicsSettings graphics_settings() const noexcept;
     void resize();
@@ -134,7 +137,8 @@ private:
     Mat4 last_model_, last_model_view_;
     bool model_valid_ = false, normal_valid_ = false;
     std::array<float, 4> light_{{0.5f, 1, 0.3f, 0}};
-    std::array<int, 16> uniforms_{};
+    std::array<int, 19> uniforms_{};
+    Environment environment_{};
     int width_ = 0, height_ = 0, samples_ = 0, max_samples_ = 0, max_texture_size_ = 0;
     int requested_samples_ = 0;
     float anisotropy_ = 1, max_anisotropy_ = 1;

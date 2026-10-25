@@ -13,6 +13,7 @@ layout(std140,set=0,binding=3) uniform Parameters {
     vec4 previousRayBasisY;
     vec4 previousRayBasisZ;
     vec4 previousCamera;
+    vec4 environment,fog;
 } p;
 #ifdef YAMI_RAY_QUERY
 layout(set=0,binding=4) uniform accelerationStructureEXT scene;
@@ -119,12 +120,15 @@ bool trace(vec3 origin,vec3 direction,float maximum,bool shade,out vec3 radiance
     vec3 n; vec2 uv;
     triangle(m,primitive,bary,n,uv);
     n=normalize(transpose(mat3(toObject))*n);
-    vec3 artwork=pow(max(textureLod(sourceTextures[nonuniformEXT(m.material.x)],uv,0).rgb,vec3(0)),vec3(2.2));
+    vec3 displayArt=max(textureLod(sourceTextures[nonuniformEXT(m.material.x)],uv,0).rgb,vec3(0));
+    vec3 artwork=pow(displayArt,vec3(2.2));
+    vec3 windows=m.misc.z*vec3(1,.55,.2)*(.35+.65*max(displayArt.r,max(displayArt.g,displayArt.b)))*
+        smoothstep(.12,.35,max(displayArt.r,max(displayArt.g,displayArt.b)))*smoothstep(.005,.03,displayArt.b-max(displayArt.r,displayArt.g));
     if(m.misc.w>.5) {
         float hemisphereLight=dot(n,vec3(0,1,0))*.5+.5;
-        vec3 lighting=clamp(vec3(.416+.08*hemisphereLight)+.8*m.diffuse.rgb*max(dot(n,lightDirection),0),0,1);
-        radiance=artwork*pow(lighting,vec3(2.2));
-    } else radiance=artwork*pow(max(m.color.rgb,vec3(0)),vec3(2.2));
+        vec3 lighting=clamp(vec3(.416+.08*hemisphereLight)*p.environment.x+.8*m.diffuse.rgb*max(dot(n,lightDirection),0)*p.environment.y,0,1);
+        radiance=artwork*pow(lighting,vec3(2.2))+artwork*m.misc.y*vec3(1,.55,.2)+windows;
+    } else radiance=artwork*pow(max(m.color.rgb,vec3(0)),vec3(2.2))+artwork*m.misc.y*vec3(1,.55,.2)+windows;
     return true;
 }
 #endif

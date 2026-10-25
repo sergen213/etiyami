@@ -19,6 +19,7 @@ public:
     int max_samples() const noexcept;
     float max_anisotropy() const noexcept;
     void set_graphics(const GraphicsSettings&);
+    void set_environment(const Environment&);
     GraphicsSettings graphics_settings() const noexcept;
     void resize();
     void clear();

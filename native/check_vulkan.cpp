@@ -1965,8 +1965,52 @@ void check_moving_shadow_history(Fixture& fixture, bool force_off) {
     std::cout << "stationary receiver/moving blocker/RT short history PASS\n";
 }
 } // namespace
+void check_day_night(Fixture& fixture) {
+    auto& renderer=fixture.renderer;
+    const auto original=renderer.graphics_settings();
+    auto rt_settings=original; rt_settings.ray_tracing=true; rt_settings.shadows=1;
+    renderer.set_graphics(rt_settings);
+    const std::array<std::uint8_t,4> white{{255,255,255,255}};
+    const auto texture=renderer.upload_texture(1,1,white,false);
+    const auto frame=[&](float emission) {
+        renderer.reset_history();
+        renderer.clear();
+        renderer.camera(identity_matrix(),frustum_projection(.75f,fixture.aspect,1,30000));
+        DrawState state;
+        state.lighting=state.temporal_static=state.fog=true;
+        state.diffuse_light={.5f,.5f,.5f,1}; state.emission=emission;
+        renderer.draw(fixture.floor,texture,fixture.material,fixture.pass,state);
+        renderer.finish_world();
+        renderer.hud_camera();
+        DrawState ui; ui.color={.125f,.75f,.25f,1}; ui.ray_geometry=false;
+        auto pass=fixture.pass; pass.depth_test=pass.depth_write=false;
+        renderer.draw(fixture.overlay,0,fixture.material,pass,ui);
+        auto result=renderer.capture_rgba(); renderer.present(); return result;
+    };
+    renderer.set_environment(environment_at(TimeOfDay::Day,0));
+    const auto day=frame(0);
+    require(day==frame(0),"Fixed daylight was not deterministic");
+    renderer.set_environment(environment_at(TimeOfDay::Night,0));
+    const auto night=frame(0),lamps=frame(1);
+    require(night!=day,"Night did not change the lit/fogged world");
+    std::uint64_t night_sum=0,lamp_sum=0;
+    for(std::size_t i=0;i<night.size();i+=4) { night_sum+=night[i]; lamp_sum+=lamps[i]; }
+    require(lamp_sum>night_sum+1000,"Night lamp emission did not brighten the world");
+    const int hud_x=int(64.f*fixture.height/768),hud_y=hud_x;
+    for(const auto* image:{&day,&night,&lamps}) {
+        const auto at=(std::size_t(hud_y)*fixture.width+hud_x)*4;
+        require(std::abs(int((*image)[at])-32)<=1 && std::abs(int((*image)[at+1])-191)<=1 &&
+                std::abs(int((*image)[at+2])-64)<=1,"Environment changed native-resolution HUD");
+    }
+    auto classic_settings=original; classic_settings.enhanced=false;
+    renderer.set_graphics(classic_settings); renderer.set_environment(environment_at(TimeOfDay::Day,0));
+    require(frame(0)==frame(0),"Classic fixed daylight was not deterministic");
+    renderer.set_graphics(original); renderer.set_environment(environment_at(TimeOfDay::Day,0));
+    std::cout<<"day/night environment, emissive lamps and unchanged HUD PASS\n";
+}
+
 int main(int argc, char** argv) {
-    bool force_off = false, require_rt = false, temporal_only = false, oblique_only = false;
+    bool force_off = false, require_rt = false, temporal_only = false, oblique_only = false, environment_only = false;
     bool shadow_only = false, overlay_only = false, ray_origin_only = false, lighting_noise_only = false;
     bool shadow_noise_only = false, reflection_noise_only = false, rare_reflection_only = false;
     for (int i = 1; i < argc; ++i) {
@@ -1981,6 +2025,7 @@ int main(int argc, char** argv) {
         else if (std::string_view(argv[i]) == "--shadow-noise-only") shadow_noise_only = true;
         else if (std::string_view(argv[i]) == "--reflection-noise-only") reflection_noise_only = true;
         else if (std::string_view(argv[i]) == "--rare-reflection-only") rare_reflection_only = true;
+        else if (std::string_view(argv[i]) == "--environment-only") environment_only = true;
         else { std::cerr << "Usage: check_vulkan [--rt-off | --require-rt] [--temporal-only | --oblique-only | --shadow-only | --overlay-only | --ray-origin-only | --lighting-noise-only | --shadow-noise-only | --reflection-noise-only | --rare-reflection-only]\n"; return 1; }
     }
     if (force_off && require_rt) { std::cerr << "Conflicting RT requirements\n"; return 1; }
@@ -1988,6 +2033,8 @@ int main(int argc, char** argv) {
     int result = 0;
     try {
         Fixture fixture;
+        check_day_night(fixture);
+        if (environment_only) return 0;
         std::cout << fixture.renderer.backend_name() << " drawable=" << fixture.width << 'x' << fixture.height
                   << " ray-query-capable=" << fixture.renderer.ray_tracing_available() << '\n';
         require(!require_rt || fixture.renderer.ray_tracing_available(),

@@ -63,8 +63,9 @@ struct alignas(16) Parameters {
     std::array<float,4> ray_basis_x,ray_basis_y,ray_basis_z;
     std::array<float,4> previous_ray_basis_x,previous_ray_basis_y,previous_ray_basis_z;
     std::array<float,4> previous_camera;
+    std::array<float,4> environment,fog;
 };
-static_assert(sizeof(Parameters)==464);
+static_assert(sizeof(Parameters)==496);
 bool camera_ray_basis(Parameters& p,const Mat4& view,const Mat4& projection) {
     const auto& v=view.values; const auto& projection_values=projection.values;
     if(v[3]!=0 || v[7]!=0 || v[11]!=0 || v[15]!=1 ||
@@ -701,7 +702,7 @@ struct VulkanEffects::Impl {
             gpu_instances[instance_index]=gpu;
             gpu_materials[instance_index]={mesh.vertices.address,mesh.indices.address,instance.uv_transform,instance.color,instance.diffuse_light,
                 {instance.texture_index,instance.alpha_function,std::uint32_t(instance.alpha_test),std::uint32_t(instance.flip_vertical)},
-                {instance.alpha_reference,float(instance.cull),float(instance.cull_face),float(instance.lighting)},instance.previous_vertices.address,0,{}};
+                {instance.alpha_reference,instance.emission,instance.window_emission,float(instance.lighting)},instance.previous_vertices.address,0,{}};
             for(int r=0;r<3;++r) for(int col=0;col<4;++col) gpu_materials[instance_index].previous_model[r][col]=instance.previous_model.values[col*4+r];
             ++instance_index;
         }
@@ -795,9 +796,9 @@ struct VulkanEffects::Impl {
         if(!f.settings.enhanced) { valid=false; destroy_fsr(); return *f.color; }
         const bool ms=f.ms_motion && f.ms_normal && f.ms_previous_normal;
         bool rt=c.ray_query && f.settings.ray_tracing && !f.instances.empty() &&
-            (f.settings.shadows>0 || f.settings.ambient_occlusion>0 || f.settings.reflections>0 || f.settings.indirect_lighting>0);
+            ((f.settings.shadows>0&&f.environment.direct>0) || f.settings.ambient_occlusion>0 || f.settings.reflections>0 || f.settings.indirect_lighting>0);
         if(rt) ensure_ray_capacity(f.textures.size());
-        const bool sun_active=rt&&f.settings.shadows>0;
+        const bool sun_active=rt&&f.settings.shadows>0&&f.environment.direct>0;
         if(!same(effects.extent,f.extent) || !same(output.extent,f.output_extent)) valid=false;
         image(effects,f.extent); image(reflected,f.extent); image(output,f.output_extent);
         // FSR replaces artwork AA/upscaling; RT lighting history stays in the temporal pass.
@@ -833,6 +834,7 @@ struct VulkanEffects::Impl {
         if(f.settings.temporal_aa!=previous_settings.temporal_aa || f.settings.render_scale!=previous_settings.render_scale ||
             f.settings.samples!=previous_settings.samples || f.settings.anisotropy!=previous_settings.anisotropy ||
             f.settings.ray_tracing!=previous_settings.ray_tracing || f.settings.enhanced!=previous_settings.enhanced || f.settings.parallax!=previous_settings.parallax ||
+            f.settings.time_of_day!=previous_settings.time_of_day ||
             f.settings.roughness!=previous_settings.roughness || f.settings.ambient_occlusion!=previous_settings.ambient_occlusion ||
             f.settings.reflections!=previous_settings.reflections || f.settings.shadows!=previous_settings.shadows || f.settings.indirect_lighting!=previous_settings.indirect_lighting) valid=false;
         p.extent={float(f.extent.width),float(f.extent.height),float(f.output_extent.width),float(f.output_extent.height)};
@@ -842,9 +844,11 @@ struct VulkanEffects::Impl {
         // == Sun grid == render size under FSR).
         midpoint=sun_active && upscale && interpolation;
         p.jitter={f.jitter[0]/f.extent.width,f.jitter[1]/f.extent.height,0,midpoint?1.f:0.f};
-        p.strengths={f.settings.ambient_occlusion,f.settings.reflections,rt?f.settings.shadows:0,rt?f.settings.indirect_lighting:0};
+        p.strengths={f.settings.ambient_occlusion,f.settings.reflections,rt?f.settings.shadows*f.environment.direct:0,rt?f.settings.indirect_lighting:0};
         // post.z: the display pass reads FSR's upscaled lit radiance instead of composing it.
         p.post={f.settings.exposure,f.settings.bloom,upscale?1.f:0.f,f.settings.roughness};
+        p.environment={f.environment.ambient,f.environment.direct,0,0};
+        p.fog={f.environment.fog[0],f.environment.fog[1],f.environment.fog[2],0};
         const bool history_eligible=valid&&f.history_valid&&(f.settings.temporal_aa||rt);
         p.temporal={history_eligible?1.f:0.f,f.settings.temporal_aa?1.f:0.f,float(frame_index%4096),f.motion&&f.previous_normal?1.f:0.f};
         p.previous_vp=history_eligible?f.previous_view_projection:p.current_vp;

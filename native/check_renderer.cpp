@@ -1,4 +1,5 @@
 #include "renderer.hpp"
+#include "scene.hpp"
 #include "parallax.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -376,6 +377,122 @@ void check_actor_shadows(DisplayOptions options) {
     renderer.release_mesh(hud); renderer.release_mesh(cloud);
     renderer.release_mesh(caster); renderer.release_mesh(receiver);
 }
+void check_day_night(DisplayOptions options) {
+    assert(night_lamp_emission("data/images/lamba_001.tga",0)==0);
+    assert(night_lamp_emission("data/images/lamba_001.tga",1)==1);
+    assert(night_lamp_emission("data/images/eti/cesitli/trafik_lambasi.tga",1)==1);
+    assert(night_window_emission("data/images/eti/pencere/Pencere_008.tga",1)==.35f);
+    assert(night_window_emission("data/images/eti/pencere/Pencere_003.tga",1)==0);
+    assert(night_window_emission("data/images/eti/cephe/cephe_002.tga",1)==0);
+    assert(night_facade_emission("data/images/eti/cephe/cephe_002.tga",0)==0);
+    assert(night_facade_emission("data/images/eti/cephe/cephe_002.tga",1)==.25f);
+    assert(night_facade_emission("data/images/eti/cephe/cephe_003.tga",1)==0);
+    assert(night_facade_emission("data/images/eti/cephe_035_1.tga",1)==0);
+    assert(night_facade_emission("data/images/eti/duvar_003.tga",1)==0);
+    assert(night_window_emission("data\\images\\eti\\pencere\\Pencere_008.tga",1)==.35f);
+    assert(night_window_emission("data\\images\\eti\\pencere\\Pencere_003.tga",1)==0);
+    assert(night_facade_emission("data\\images\\eti\\cephe\\cephe_002.tga",1)==.25f);
+    options.width = 384; options.height = 216; options.samples = 0;
+    options.enhanced = false; options.parallax = false; options.shadows = 1;
+    options.ambient_occlusion = options.reflections = options.bloom = options.sharpen = 0;
+    const std::array<Vertex,8> vertices{{
+        {{-500,-80,-100},{0,0},{0,1,0}}, {{500,-80,-100},{1,0},{0,1,0}},
+        {{500,-80,-2000},{1,1},{0,1,0}}, {{-500,-80,-2000},{0,1},{0,1,0}},
+        {{-100,-80,-1500},{0,0},{0,0,1}}, {{100,-80,-1500},{1,0},{0,0,1}},
+        {{100,250,-1500},{1,1},{0,0,1}}, {{-100,250,-1500},{0,1},{0,0,1}}
+    }};
+    const std::array<Vertex,4> lamp_vertices{{
+        {{-70,20,-400},{0,0},{0,0,1}}, {{-30,20,-400},{1,0},{0,0,1}},
+        {{-30,60,-400},{1,1},{0,0,1}}, {{-70,60,-400},{0,1},{0,0,1}}
+    }};
+    const std::array<std::uint16_t,6> indices{{0,1,2,0,2,3}}, wall_indices{{4,5,6,4,6,7}};
+    Renderer renderer(options);
+    const auto floor = renderer.upload_mesh(vertices, indices);
+    const auto wall = renderer.upload_mesh(vertices, wall_indices);
+    const auto lamp = renderer.upload_mesh(lamp_vertices, indices);
+    const int width = renderer.pixel_width(), height = renderer.pixel_height();
+    const float logical_width = 768.f*width/height;
+    const std::array<Vertex,4> hud_vertices{{
+        {{logical_width-128,32,0},{0,0},{0,0,1}}, {{logical_width-32,32,0},{1,0},{0,0,1}},
+        {{logical_width-32,128,0},{1,1},{0,0,1}}, {{logical_width-128,128,0},{0,1},{0,0,1}}
+    }};
+    const auto hud = renderer.upload_mesh(hud_vertices, indices);
+    const std::array<std::uint8_t,4> gray{{64,64,64,255}};
+    const auto texture = renderer.upload_texture(1,1,gray,false,false);
+    Material material; material.cull = false;
+    MaterialPass pass, hud_pass; hud_pass.depth_test = hud_pass.depth_write = false;
+    DrawState world, lamp_state, hud_state;
+    world.lighting = true;
+    lamp_state.color = {.5f,.5f,.5f,1};
+    hud_state.color = {.125f,.75f,.25f,1};
+    hud_state.fog = true; hud_state.emission = 1; // Interface state must ignore both.
+    bool emit = false;
+    const auto render = [&] {
+        renderer.clear();
+        renderer.camera(identity_matrix(),frustum_projection(.75f,float(width)/height,1,30000));
+        world.fog = false; renderer.draw(floor,0,material,pass,world);
+        world.fog = true; renderer.draw(wall,0,material,pass,world);
+        lamp_state.emission = emit ? 1.f : 0.f;
+        renderer.draw(lamp,texture,material,pass,lamp_state);
+        renderer.finish_world();
+        renderer.hud_camera();
+        renderer.draw(hud,texture,material,hud_pass,hud_state);
+        return renderer.capture_rgba();
+    };
+    const auto pixel = [&](const auto& frame,int x,int y,int channel) {
+        return int(frame[(std::size_t(y)*width+x)*4+channel]);
+    };
+    const int hud_x = width-int(80.f*height/768), hud_y = int(80.f*height/768);
+    const auto day = environment_at(TimeOfDay::Day,0);
+    const auto night = environment_at(TimeOfDay::Night,0);
+    const auto verify_night = [&](const auto& baseline) {
+        renderer.set_environment(night); emit = false;
+        const auto dark = render();
+        for (int channel = 0; channel < 3; ++channel)
+            assert(pixel(dark,width/2,height/8,channel) < pixel(baseline,width/2,height/8,channel));
+        assert(pixel(dark,width/2,height/2,0) != pixel(baseline,width/2,height/2,0));
+        for (int channel = 0; channel < 4; ++channel)
+            assert(pixel(dark,hud_x,hud_y,channel) == pixel(baseline,hud_x,hud_y,channel));
+        auto fog = day; fog.fog = night.fog;
+        renderer.set_environment(fog);
+        const auto fogged = render();
+        assert(pixel(fogged,width/2,height/2,0) != pixel(baseline,width/2,height/2,0));
+        for (int channel = 0; channel < 4; ++channel) {
+            assert(pixel(fogged,width/2,height/8,channel) == pixel(baseline,width/2,height/8,channel));
+            assert(pixel(fogged,hud_x,hud_y,channel) == pixel(baseline,hud_x,hud_y,channel));
+        }
+        renderer.set_environment(night); emit = true;
+        const auto bright = render();
+        const float aspect = float(width)/height;
+        const int lamp_x = int((.5f-50/(400*.75f*aspect)*.5f)*width);
+        const int lamp_y = int((.5f+40/(400*.75f)*.5f)*height);
+        const int lamp_radius_x = int(20/(400*.75f*aspect)*.5f*width)+1;
+        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+            if (std::abs(x-lamp_x) > lamp_radius_x || std::abs(y-lamp_y) > 18)
+                for (int channel = 0; channel < 4; ++channel)
+                    assert(pixel(bright,x,y,channel) == pixel(dark,x,y,channel));
+        assert(pixel(bright,lamp_x,lamp_y,0) > pixel(dark,lamp_x,lamp_y,0));
+        assert(pixel(bright,lamp_x,lamp_y,3) == pixel(dark,lamp_x,lamp_y,3));
+        emit = false;
+    };
+    const auto classic = render();
+    renderer.set_environment(day);
+    assert(render() == classic);
+    verify_night(classic);
+    auto graphics = renderer.graphics_settings(); graphics.enhanced = true;
+    renderer.set_graphics(graphics); renderer.set_environment(day);
+    if(options.backend==GraphicsBackend::OpenGL) assert(renderer.shadow_enabled());
+    const auto enhanced = render();
+    assert(render() == enhanced);
+    verify_night(enhanced);
+    if(options.backend==GraphicsBackend::OpenGL) assert(!renderer.shadow_enabled());
+    graphics.enhanced = false; renderer.set_graphics(graphics);
+    renderer.set_environment(day);
+    assert(render() == classic);
+    renderer.release_mesh(hud); renderer.release_mesh(lamp);
+    renderer.release_mesh(wall); renderer.release_mesh(floor);
+}
+
 void check_parallax_render(DisplayOptions options) {
     options.width = 384; options.height = 216; options.samples = 0;
     options.enhanced = true; options.parallax = true;
@@ -423,18 +540,22 @@ void check_parallax_render(DisplayOptions options) {
 }
 
 
+
 int main(int argc, char** argv) {
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::cerr << SDL_GetError() << '\n'; return 1; }
     try {
         DisplayOptions options;
         options.width = 192; options.height = 96;
         options.enhanced = false; // Keep the exact original gamma/orientation/alpha path.
+        bool day_night_only = false;
         for (int i = 1; i < argc; ++i) {
             if (std::string_view(argv[i]) == "--gles") options.gles = true;
             if (std::string_view(argv[i]) == "--no-msaa") options.samples = 0;
             if (std::string_view(argv[i]) == "--vulkan") options.backend = GraphicsBackend::Vulkan;
+            if (std::string_view(argv[i]) == "--day-night-only") day_night_only = true;
         }
         {
+        if (day_night_only) { check_day_night(options); SDL_Quit(); return 0; }
             Renderer renderer(options);
             const std::array<Vertex,4> vertices{{
                 {{-1,1,0},{0,1},{0,0,1}}, {{1,1,0},{1,1},{0,0,1}},
@@ -515,6 +636,7 @@ int main(int argc, char** argv) {
             check_actor_shadows(options);
             std::cout << "directional actor shadows/pose/instances/cutout/exclusions/cloud-alpha/live MSAA4/0/4 HUD PASS\n";
         }
+        if (options.backend == GraphicsBackend::OpenGL) check_day_night(options);
         SDL_Quit();
         return 0;
     } catch (const std::exception& error) {

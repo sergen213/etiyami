@@ -12,6 +12,7 @@ layout(set=0,binding=1,std140) uniform Draw {
     vec4 light, diffuse, color, uvTransform, worldUp, flags, alphaJitter;
     mat4 previousMVP, previousNormalWorld;
     ivec4 temporal;
+    vec4 environment,fog;
 } u;
 layout(location=0) out vec2 vUv;
 layout(location=1) out vec4 vColor;
@@ -38,6 +39,6 @@ void main() {
     vPreviousPosition=previousPosition;
     if(u.flags.x>0.5 && u.flags.y<0.5) {
         float d=max(dot(vNormal,normalize(u.light.xyz-eye.xyz*u.light.w)),0);
-        vColor=vec4(clamp(vec3(.456)+.8*u.diffuse.rgb*d,0,1),1);
+        vColor=vec4(clamp(vec3(.456)*u.environment.x+.8*u.diffuse.rgb*d*u.environment.y,0,1),1);
     } else vColor=u.color;
 }

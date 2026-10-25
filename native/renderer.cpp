@@ -98,6 +98,7 @@ uniform mat4 uShadowModel;
 uniform float uShadowStrength;
 uniform mat3 uNormal;
 uniform vec4 uLight, uDiffuse, uColor, uUvTransform;
+uniform vec4 uEnvironment;
 uniform bool uLighting, uEnhanced;
 out vec2 vUv;
 out vec4 vColor;
@@ -115,7 +116,7 @@ void main() {
     if (uLighting && !uEnhanced) {
         vec3 light = normalize(uLight.xyz-eye.xyz*uLight.w);
         float diffuse = max(dot(uNormal*aNormal,light),0.0);
-        vColor = vec4(clamp(vec3(0.456)+0.8*uDiffuse.rgb*diffuse,0.0,1.0),1.0);
+        vColor = vec4(clamp(vec3(0.456)*uEnvironment.x+0.8*uEnvironment.y*uDiffuse.rgb*diffuse,0.0,1.0),1.0);
     } else vColor = uColor;
 }
 )";
@@ -124,13 +125,13 @@ in vec2 vUv;
 in vec4 vColor;
 in float vFogDepth;
 in vec3 vNormal, vEye;
-uniform vec4 uLight, uDiffuse;
-uniform vec3 uWorldUp;
+uniform vec4 uLight, uDiffuse, uEnvironment;
+uniform vec3 uWorldUp, uFogColor;
 uniform bool uLighting, uEnhanced, uParallax;
 uniform sampler2D uTexture, uRelief;
 uniform bool uTextured, uFog, uFlipVertical;
 uniform int uAlphaFunction;
-uniform float uAlphaReference;
+uniform float uAlphaReference, uEmission;
 in vec3 vShadow;
 uniform highp sampler2D uShadow;
 uniform float uShadowStrength;
@@ -168,6 +169,10 @@ float visibility(float diffuse) {
     }
     return 1.0-uShadowStrength*occluded/9.0;
 }
+float windowGlass(vec3 c) {
+    float brightness=max(c.r,max(c.g,c.b));
+    return smoothstep(.12,.35,brightness)*smoothstep(.005,.03,c.b-max(c.r,c.g))*(.35+.65*brightness);
+}
 out vec4 outColor;
 void main() {
     vec4 value = vColor;
@@ -180,16 +185,21 @@ void main() {
         vec3 light = normalize(uLight.xyz-vEye*uLight.w);
         float diffuse = max(dot(normal,light),0.0);
         float hemisphere = dot(normal,uWorldUp)*0.5+0.5;
-        value = vec4(clamp(vec3(0.416+0.08*hemisphere)+0.8*uDiffuse.rgb*diffuse*visibility(diffuse),0.0,1.0),1.0);
+        value = vec4(clamp(vec3(0.416+0.08*hemisphere)*uEnvironment.x+0.8*uEnvironment.y*uDiffuse.rgb*diffuse*visibility(diffuse),0.0,1.0),1.0);
     }
-    if (uTextured) value *= texture(uTexture,surface);
+    if (uTextured) {
+        vec4 texel = texture(uTexture,surface);
+        value *= texel;
+        if (uEmission != 0.0) value.rgb += uEmission*vec3(1.0,0.55,0.2)*texel.rgb;
+        if (uEnvironment.w != 0.0) value.rgb += uEnvironment.w*windowGlass(texel.rgb)*vec3(1.0,0.55,0.2);
+    }
     float a = value.a, r = uAlphaReference;
     bool pass = uAlphaFunction == 0 || uAlphaFunction == 519 ||
         (uAlphaFunction == 513 && a < r) || (uAlphaFunction == 514 && a == r) ||
         (uAlphaFunction == 515 && a <= r) || (uAlphaFunction == 516 && a > r) ||
         (uAlphaFunction == 517 && a != r) || (uAlphaFunction == 518 && a >= r);
     if (!pass) discard;
-    if (uFog) value.rgb = mix(vec3(0.2),value.rgb,clamp((2000.0-vFogDepth)/1000.0,0.0,1.0));
+    if (uFog) value.rgb = mix(uFogColor,value.rgb,clamp((2000.0-vFogDepth)/1000.0,0.0,1.0));
     outColor = value;
 }
 )";
@@ -364,11 +374,12 @@ Renderer::Renderer(const DisplayOptions& options) : desired_(options), gles_(opt
         glGenRenderbuffers(1, &color_buffer_);
         glUseProgram(program_);
         constexpr const char* names[] = {"uModelView", "uNormal", "uProjection", "uLight",
-            "uDiffuse", "uColor", "uLighting", "uFog", "uAlphaFunction", "uAlphaReference", "uTextured", "uFlipVertical", "uUvTransform", "uEnhanced", "uWorldUp", "uParallax"};
+            "uDiffuse", "uColor", "uLighting", "uFog", "uAlphaFunction", "uAlphaReference", "uTextured", "uFlipVertical", "uUvTransform", "uEnhanced", "uWorldUp", "uParallax", "uEnvironment", "uFogColor", "uEmission"};
         for (std::size_t n = 0; n < uniforms_.size(); ++n) {
             uniforms_[n] = glGetUniformLocation(program_, names[n]);
             if (uniforms_[n] == -1) throw std::runtime_error(std::string("Inactive shader uniform: ")+names[n]);
         }
+        set_environment(environment_);
         glUniform1i(glGetUniformLocation(program_, "uTexture"), 0);
         glUniform1i(glGetUniformLocation(program_, "uRelief"), 1);
         shadow_model_uniform_ = glGetUniformLocation(program_,"uShadowModel");
@@ -516,7 +527,7 @@ bool Renderer::shadow_enabled() const noexcept {
 #if YAMI_HAS_VULKAN
     if (vulkan_) return false;
 #endif
-    return enhanced_ && desired_.shadows > 0;
+    return enhanced_ && desired_.shadows > 0 && environment_.direct > 0;
 }
 bool Renderer::shadow_caster_visible(const ShadowBounds& bounds) const {
     if (!bounds.valid || !world_camera_) return false;
@@ -625,6 +636,16 @@ void Renderer::end_shadows() {
     shadow_pass_=false; shadow_valid_=shadow_drawn_;
     model_valid_=normal_valid_=false;
     gl_check("Character shadow pass");
+}
+void Renderer::set_environment(const Environment& environment) {
+#if YAMI_HAS_VULKAN
+    if (vulkan_) { vulkan_->set_environment(environment); return; }
+#endif
+    environment_ = environment;
+    shadow_valid_ = false;
+    glUseProgram(program_);
+    glUniform4f(uniforms_[16],environment_.ambient,environment_.direct,0,0);
+    glUniform3fv(uniforms_[17],1,environment_.fog.data());
 }
 void Renderer::set_brightness(std::uint16_t ramp) noexcept {
 #if YAMI_HAS_VULKAN
@@ -1060,12 +1081,14 @@ void Renderer::draw(unsigned id, unsigned texture, const Material& material, con
         glUniform4fv(uniforms_[4], 1, state.diffuse_light.data());
     } else glUniform4fv(uniforms_[5], 1, state.color.data());
     glUniform1i(uniforms_[6], state.lighting);
-    glUniform1i(uniforms_[7], state.fog);
+    glUniform1i(uniforms_[7], state.fog && world_camera_);
     glUniform1i(uniforms_[8], pass.alpha_test ? pass.alpha_function : 0);
     glUniform1f(uniforms_[9], std::clamp(pass.alpha_reference, 0.f, 1.f));
     glUniform1i(uniforms_[10], texture != 0);
     if (texture) glUniform1i(uniforms_[11], textures_[texture-1].flip_vertical);
     glUniform4fv(uniforms_[12], 1, state.uv_transform.data());
+    glUniform4f(uniforms_[16],environment_.ambient,environment_.direct,0,world_camera_?state.window_emission:0);
+    glUniform1f(uniforms_[18], world_camera_ ? state.emission : 0);
     glBindTexture(GL_TEXTURE_2D, texture ? textures_[texture-1].id : 0);
     glBindVertexArray(meshes_[id-1].vao);
     glDrawElements(GL_TRIANGLES, static_cast<int>(meshes_[id-1].index_count), GL_UNSIGNED_SHORT, nullptr);

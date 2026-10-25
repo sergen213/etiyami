@@ -44,6 +44,10 @@ private:
     Renderer& renderer_;
     const ModelResource& model_;
 };
+float night_lamp_emission(std::string_view texture_name,float night) noexcept;
+float night_window_emission(std::string_view texture_name,float night) noexcept;
+float night_facade_emission(std::string_view texture_name,float night) noexcept;
+
 // Immutable CPU/GPU resources are cached per original resource identifier.
 // Mutable skinning belongs to each instance; video storage is reused per source.
 class SceneCache {

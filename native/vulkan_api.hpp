@@ -118,6 +118,8 @@ struct VulkanRayInstance {
     bool alpha_test = false, cull = false;
     std::uint32_t cull_face = 0x405;
     bool lighting = false;
+    float emission = 0;
+    float window_emission = 0;
 };
 struct VulkanEffectsFrame {
     VkCommandBuffer command = VK_NULL_HANDLE;
@@ -128,6 +130,7 @@ struct VulkanEffectsFrame {
     std::span<const VulkanRayInstance> instances;
     std::span<const VkDescriptorImageInfo> textures;
     GraphicsSettings settings{};
+    Environment environment{};
     bool history_valid = false;
     // Sample-zero integer prior UV/depth/token (clip-W for perspective,
     // 1+device depth for orthographic), and RGBA32_SINT prior authored oct/current

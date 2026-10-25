@@ -53,7 +53,8 @@ struct SdlLifetime {
 };
 enum GraphicsOption { Msaa, Filtering, Occlusion, Reflections, Bloom, Sharpen,
                       EnhancedLighting, Fullscreen, Backend, RayTracing, TemporalAA, Parallax,
-                      Shadows, IndirectLighting, Exposure, RenderScale, Roughness, FrameGeneration, GraphicsOptionCount };
+                      Shadows, IndirectLighting, Exposure, RenderScale, Roughness, FrameGeneration,
+                      TimeOfDayOption, GraphicsOptionCount };
 struct Options {
     DisplayOptions display;
     fs::path assets, saves, capture;
@@ -102,6 +103,12 @@ Options options(int argc, char** argv) {
             require(backend=="opengl" || backend=="vulkan", "Renderer must be opengl or vulkan");
             result.display.backend=backend=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
             result.graphicsOverrides[Backend]=true;
+        }
+        else if (name == "--time-of-day") {
+            const auto mode=value();
+            require(mode=="cycle" || mode=="day" || mode=="night", "Time of day must be cycle, day or night");
+            result.display.time_of_day=mode=="cycle"?TimeOfDay::Cycle:mode=="day"?TimeOfDay::Day:TimeOfDay::Night;
+            result.graphicsOverrides[TimeOfDayOption]=true;
         }
         else if (name == "--ray-tracing" || name == "--taa" || name == "--frame-generation" || name == "--parallax") {
             const auto enabled=value();
@@ -168,6 +175,7 @@ GraphicsSettings merge_graphics(const Options& options, GraphicsSettings saved) 
     if (flags[RenderScale]) saved.render_scale=requested.render_scale;
     if (flags[Roughness]) saved.roughness=requested.roughness;
     if (flags[FrameGeneration]) saved.frame_generation=requested.frame_generation;
+    if (flags[TimeOfDayOption]) saved.time_of_day=requested.time_of_day;
     return saved;
 }
 
@@ -679,6 +687,7 @@ int main(int argc, char** argv) {
                          "  --shadows 0..1 --gi 0..1 --exposure .1..4\n"
                          "  --render-scale .5..1 (FSR presets 1, .667, .588, .5) --roughness .05..1 (Vulkan only)\n"
                          "  --frame-generation on|off (Vulkan: FSR 3.1.4 frame generation; needs --taa on)\n"
+                         "  --time-of-day cycle|day|night (default cycle: 12-minute day/night transition)\n"
                          "  --gpu-timings (Vulkan: per-stage GPU timestamps, summary on stderr at exit)\n"
 #ifdef YAMI_LAUNCHER_DEFAULT
                          "  Default: launcher; assets discovered beside executable or in game/.\n";

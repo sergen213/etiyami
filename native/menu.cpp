@@ -29,17 +29,17 @@ constexpr std::array<float,4> hudColor{{
     std::bit_cast<float>(0x3c75c28fu), 1}};
 constexpr std::array<float,4> white{{1,1,1,1}};
 constexpr std::array<float,4> parchmentInk{{.16f,.12f,.08f,1}};
-constexpr std::array<std::string_view,8> graphicsLabels{{
+constexpr std::array<std::string_view,9> graphicsLabels{{
     "Işıklandırma","Ortam gölgesi","Yansımalar","Parlama","Keskinlik",
-    "Yumuşatma","Doku filtresi","Tam ekran"}};
+    "Yumuşatma","Doku filtresi","Tam ekran","Gün döngüsü"}};
 constexpr std::array<std::string_view,8> vulkanLabels{{
     "Işın izleme","FSR 3.1","Gölge gücü","Dolaylı ışık",
     "Pozlama","Çizim ölçeği","Pürüzlülük","Kare üretimi"}};
-constexpr std::array<std::string_view,17> graphicsFields{{
+constexpr std::array<std::string_view,18> graphicsFields{{
     "grafik_gelistirilmis","grafik_ao","grafik_yansima","grafik_parlama",
     "grafik_keskinlik","grafik_msaa","grafik_anizotropi","grafik_tamekran",
     "grafik_backend","grafik_rt","grafik_taa","grafik_golge","grafik_gi",
-    "grafik_pozlama","grafik_olcek","grafik_puruz","grafik_kare_uretimi"}};
+    "grafik_pozlama","grafik_olcek","grafik_puruz","grafik_kare_uretimi","grafik_zaman"}};
 constexpr auto sampleChoices=[] {
     std::array<int,30> choices{};
     int value=4; // 2 samples is rounded up to 4 by some drivers.
@@ -267,7 +267,10 @@ Settings read_settings(std::istream& input) {
         seen[index]=true;
         const auto value=std::string_view(line).substr(separator+1);
         auto& graphics=result.graphics;
-        if (index==8) {
+        if (index==17) {
+            require(value=="cycle" || value=="day" || value=="night", "Invalid native time of day");
+            graphics.time_of_day=value=="cycle"?TimeOfDay::Cycle:value=="day"?TimeOfDay::Day:TimeOfDay::Night;
+        } else if (index==8) {
             require(value=="opengl" || value=="vulkan", "Invalid native graphics backend");
             graphics.backend=value=="vulkan"?GraphicsBackend::Vulkan:GraphicsBackend::OpenGL;
         } else if (index==0 || index==7 || index==9 || index==10 || index==16) {
@@ -341,6 +344,8 @@ void write_settings(std::ostream& output, const Settings& settings) {
     append(graphicsFields[14],graphics.render_scale);
     append(graphicsFields[15],graphics.roughness);
     append(graphicsFields[16],graphics.frame_generation?1:0);
+    output << graphicsFields[17] << '='
+           << (graphics.time_of_day==TimeOfDay::Cycle?"cycle":graphics.time_of_day==TimeOfDay::Day?"day":"night") << '\n';
     require(bool(output), "Cannot write original settings stream");
 }
 void save_settings(const std::filesystem::path& path, const Settings& settings) {
@@ -456,7 +461,7 @@ Menu::Menu(const std::filesystem::path& root) : fonts_(read_fonts(root)) {
     pages_[3].buttons[15].angle=60; // 0041cbb0/00415360: automatic aiming default
     auto& settingsPage=pages_[3];
     for (std::size_t row=0;row<graphicsLabels.size();++row) {
-        const float labelY=574-float(row)*62;
+        const float labelY=574-float(row)*54;
         settingsPage.labels.push_back({{764,labelY},{},std::string(graphicsLabels[row]),"title"});
         for (bool increase:{false,true}) {
             Button button;
@@ -640,7 +645,7 @@ void Menu::dispatch(const Context& context, bool released) {
         if (active(0)) {
             emit(CommandKind::PersistSettings); originalSettingsDirty_=false; current_=1; break;
         }
-        if (active(32)) advancedGraphics_=!advancedGraphics_;
+        if (active(34)) advancedGraphics_=!advancedGraphics_;
         bool changed=false;
         for (std::size_t i=0;i<4;++i) {
             auto& angle=buttons[3+i*3].angle;
@@ -661,6 +666,11 @@ void Menu::dispatch(const Context& context, bool released) {
         for (std::size_t row=0;row<graphicsLabels.size();++row) {
             const bool decrease=active(16+row*2),increase=active(17+row*2);
             if (!increase && !decrease) continue;
+            if (row==8) {
+                const int mode=std::clamp(int(graphics_.time_of_day)+(increase?1:-1),0,2);
+                graphics_.time_of_day=static_cast<TimeOfDay>(mode);
+                continue;
+            }
             if (advancedGraphics_) {
                 if (row==0) graphics_.ray_tracing=increase;
                 else if (row==1) graphics_.temporal_aa=increase;
@@ -846,12 +856,12 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
         if (current_==7 && i==0) { left=0; right=context.loadingProgress; }
         quad(button.rect,button.over?button.overMaterial:button.material,button.style,int(i),
              button.over,left,right,current_==6?0.0015f:0);
-        if (current_==3 && i==32) {
+        if (current_==3 && i==34) {
             auto& toggle=draws_.back();
             toggle.material={};
             toggle.color=button.over?std::array<float,4>{{.50f,.54f,.29f,1}}:
                                       std::array<float,4>{{.25f,.29f,.14f,1}};
-        } else if (current_==3 && i>=16 && i<32 && !button.over) {
+        } else if (current_==3 && i>=16 && i<34 && !button.over) {
             auto& native=draws_.back();
             native.material={};
             native.texture=(i-16)%2==0?"data/images/menuimages/dugme/ayarlar_eksi.tga":
@@ -909,7 +919,9 @@ std::span<const Draw> Menu::draw(const Context& context, const Hud& hud, float l
         for (std::size_t row=0;row<graphicsLabels.size();++row) {
             const auto& label=page.labels[row];
             std::string_view value;
-            if (advancedGraphics_) {
+            if (row==8) value=graphics_.time_of_day==TimeOfDay::Cycle?"Döngü":
+                              graphics_.time_of_day==TimeOfDay::Day?"Gündüz":"Gece";
+            else if (advancedGraphics_) {
                 // Row 7 was the read-only device row; its RT capability now shows on row 0.
                 if (row==7 && !activeVulkan_ && graphics_.backend==GraphicsBackend::Vulkan) value="Oyunda kontrol";
                 else if (!activeVulkan_ && row!=2) value="Vulkan için";

@@ -9,6 +9,7 @@ layout(set=0,binding=1,std140) uniform Draw {
     vec4 light, diffuse, color, uvTransform, worldUp, flags, alphaJitter;
     mat4 previousMVP, previousNormalWorld;
     ivec4 temporal;
+    vec4 environment,fog;
 } u;
 layout(location=0) in vec2 vUv;
 layout(location=1) in vec4 vColor;
@@ -126,7 +127,7 @@ void main() {
         vec3 n=normalize(vNormal-gradient);
         float d=max(dot(n,normalize(u.light.xyz-vEye*u.light.w)),0);
         float h=dot(n,u.worldUp.xyz)*.5+.5;
-        value=vec4(clamp(vec3(.416+.08*h)+.8*u.diffuse.rgb*d,0,1),1);
+        value=vec4(clamp(vec3(.416+.08*h)*u.environment.x+.8*u.diffuse.rgb*d*u.environment.y,0,1),1);
     }
     // Preserve the exported palette, fog and alpha compositing in the artist's
     // display-authored domain, including MSAA. The floating world attachment
@@ -134,13 +135,16 @@ void main() {
     if(u.flags.z>.5) {
         vec4 texel=texture(artwork,surface);
         value*=texel;
+        value.rgb+=texel.rgb*u.environment.z*vec3(1,.55,.2);
+        value.rgb+=u.environment.w*(.35+.65*max(texel.r,max(texel.g,texel.b)))*
+            smoothstep(.12,.35,max(texel.r,max(texel.g,texel.b)))*smoothstep(.005,.03,texel.b-max(texel.r,texel.g))*vec3(1,.55,.2);
     }
     float a=value.a,r=u.alphaJitter.y;
     int f=int(u.alphaJitter.x);
     bool pass=f==0 || f==519 || (f==513&&a<r)||(f==514&&a==r)||
         (f==515&&a<=r)||(f==516&&a>r)||(f==517&&a!=r)||(f==518&&a>=r);
     if(!pass) discard;
-    if(u.diffuse.w<0) value.rgb=mix(vec3(.2),value.rgb,clamp((2000-abs(vEye.z))/1000,0,1));
+    if(u.diffuse.w<0) value.rgb=mix(u.fog.rgb,value.rgb,clamp((2000-abs(vEye.z))/1000,0,1));
     outColor=value;
 #ifndef YAMI_INTERFACE_ONLY
     vec3 worldNormal=vWorldNormal-transpose(mat3(u.modelView))*gradient;

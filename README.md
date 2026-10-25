@@ -165,7 +165,7 @@ See [extracting from the original installer](#extracting-from-the-original-insta
 
 Choose your settings, then click **OYNA / PLAY**. In the game's main menu, choose **Yeni Oyun / New Game** to start.
 
-The v1.1.1 launcher retains the 13 shared settings from release 1.0.4 and the in-game **Ayarlar / Settings** screen: brightness, sensitivity, aiming mode, music/effects volume, lighting, ambient occlusion, reflections, bloom, sharpening, MSAA, texture filtering, and fullscreen. It stays windowed while you configure settings; the saved fullscreen choice applies when you press Play. Sharpening applies only to OpenGL/GLES; its saved preference is not reset when Vulkan is selected.
+The launcher and in-game **Ayarlar / Settings** screen retain the original brightness, sensitivity, aiming mode, and music/effects volume controls alongside lighting, ambient occlusion, reflections, bloom, sharpening, MSAA, texture filtering, fullscreen, and **Gün döngüsü**. The time row selects **Döngü / Gündüz / Gece** (Cycle / Day / Night) and is saved with the other graphics preferences. The launcher stays windowed while you configure settings; the saved fullscreen choice applies when you press Play. Sharpening applies only to OpenGL/GLES; its saved preference is not reset when Vulkan is selected.
 
 Keyboard navigation: **Tab / Shift+Tab** selects a control, **arrow keys** adjust it, **Enter / Space** activates it, and **Escape** closes the launcher. Mouse buttons apply changes on release. Closing saves settings without starting the game.
 
@@ -184,6 +184,9 @@ Enhanced OpenGL/GLES character shadows were already available in v1.1.0 and are 
 The original assets have no authored roughness/metalness maps: roughness is a conservative global dielectric treatment, not replacement PBR artwork. This is hybrid raster/RT, not full path tracing. No 1440p/60-fps performance guarantee or physical ARM64 GPU verification is claimed.
 
 Enhanced-only **parallax occlusion mapping** is enabled by default and can be toggled with `--parallax on|off`. Following the IKV implementation, static opaque primary world materials derive separate relief textures from diffuse luminance (8–24 occlusion steps plus one secant refinement); original assets are not modified. Relief affects primary artwork and shading normals only: silhouettes, geometry, depth, motion data, alpha hits and secondary RT intersections remain flat. Actors, HUD, videos, blended/alpha-tested surfaces and classic rendering do not use it.
+
+**Day/night environment:** Cycle is the default and completes a day → night → day transition in 12 minutes of unpaused gameplay. Day keeps the original lighting; Night darkens the world, uses blue night sky/fog, disables directional shadows, and lights the original `lamba_001` and traffic-light materials with warm emission. Stable pseudo-random occupancy lights about one third of building windows; blue-glass regions glow warmly while neutral frames, mullions, walls, and other windows stay dark. These are emissive fixtures/windows, not new point-light pools. Level loads continue the same cycle phase; menus pause it, and restarting the executable starts at daylight. Classic graphics always retains the original daylight presentation without discarding the saved time preference. `--time-of-day cycle|day|night` selects the mode directly.
+
 
 ## Game controls
 
@@ -339,6 +342,7 @@ Effect strengths accept values from `0` to `1`; zero disables that effect. CLI g
 | `--renderer` | `opengl` or `vulkan`; default OpenGL unless saved otherwise |
 | `--ray-tracing`, `--taa` | `on` / `off`; Vulkan only, enabled by default; `--taa` toggles FSR 3.1 |
 | `--parallax` | `on` / `off`; enhanced-only generated relief on eligible static world materials, default on |
+| `--time-of-day` | `cycle`, `day`, or `night`; enhanced world cycle, fixed original daylight, or fixed night with emissive lamps; default `cycle` |
 | `--frame-generation` | `on` / `off`; Vulkan FSR 3.1.4 frame generation, default off; needs FSR on and a supporting GPU |
 | `--gpu-timings` | Vulkan only, not saved; records GPU timestamps per frame stage (world raster, acceleration builds, RT classify/effects/Sun, temporal, FSR inputs/dispatch, display, composite, frame generation, UI, present blit) plus CPU wall time from frame start to submit (`cpu`) and between consecutive real-frame presents (`interval`), and prints count/mean/median/p95 ms plus per-frame BLAS/TLAS/instance counters to stderr on exit |
 | `--shadows` | `0..1`; shared enhanced GL/GLES character-shadow / Vulkan RT shadow strength, default `0.75`; zero disables shadows |

@@ -79,6 +79,35 @@ void check_graphics(Menu& menu) {
     menu.set_settings(settings); menu.clear_commands();
     assert(menu.settings().graphics==settings.graphics);
     assert(menu.settings_effect().values.graphics==settings.graphics);
+    assert(menu.pages()[3].buttons.size()==35);
+    const auto& graphicsLabels=menu.pages()[3].labels;
+    for (std::size_t row=1;row<9;++row)
+        assert(near(graphicsLabels[row-1].position.y-graphicsLabels[row].position.y,54));
+    const auto timePlus=graphics_button(menu,"Gün döngüsü",true);
+    const auto timeMinus=graphics_button(menu,"Gün döngüsü",false);
+    const auto shows=[&](std::string_view text) {
+        const auto draws=menu.draw({});
+        return std::any_of(draws.begin(),draws.end(),[&](const Draw& draw) {
+            return draw.glyph && draw.text==text;
+        });
+    };
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Cycle && shows("Döngü"));
+    menu.clear_commands(); click_button(menu,timePlus);
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Day && shows("Gündüz")); changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,timePlus);
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Night && shows("Gece")); changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,timePlus);
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Night);
+    assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
+    menu.clear_commands(); click_button(menu,34);
+    assert(shows("Gece"));
+    menu.clear_commands(); click_button(menu,timeMinus);
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Day && shows("Gündüz")); changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,timeMinus);
+    assert(menu.settings().graphics.time_of_day==yami::TimeOfDay::Cycle && shows("Döngü")); changed_graphics(menu);
+    menu.clear_commands(); click_button(menu,timeMinus);
+    assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
+    menu.clear_commands(); click_button(menu,34);
     const auto sharpenPlus=graphics_button(menu,"Keskinlik",true);
     const auto sharpenMinus=graphics_button(menu,"Keskinlik",false);
     menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
@@ -92,7 +121,7 @@ void check_graphics(Menu& menu) {
         menu.clear_commands(); click_button(menu,sharpenMinus);
         assert(near(menu.settings().graphics.sharpen,sharpness)); changed_graphics(menu);
         const auto before=menu.settings().graphics;
-        menu.clear_commands(); click_button(menu,32);
+        menu.clear_commands(); click_button(menu,34);
         menu.clear_commands(); click_button(menu,25); // Advanced row 4 is exposure, not sharpening.
         auto exposed=before; exposed.exposure+=.05f;
         assert(menu.settings().graphics==exposed); changed_graphics(menu);
@@ -114,7 +143,7 @@ void check_graphics(Menu& menu) {
             menu.clear_commands(); click_button(menu,26);
             assert(!has(menu,CommandKind::ApplySettings) && !has(menu,CommandKind::PersistSettings));
         }
-        menu.clear_commands(); click_button(menu,32);
+        menu.clear_commands(); click_button(menu,34);
     }
     menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
     menu.set_graphics_device(false,false);
@@ -213,13 +242,13 @@ void check_graphics(Menu& menu) {
     }
     menu.set_launcher_backend(yami::GraphicsBackend::OpenGL);
     menu.set_graphics_device(false,false);
-    menu.clear_commands(); click_button(menu,32);
+    menu.clear_commands(); click_button(menu,34);
     const auto beforeShadow=menu.settings().graphics;
     menu.clear_commands(); click_button(menu,21); // Existing advanced shadow increase index.
     auto afterShadow=beforeShadow; afterShadow.shadows+=.05f;
     assert(menu.settings().graphics==afterShadow && !afterShadow.ray_tracing);
     changed_graphics(menu);
-    menu.clear_commands(); click_button(menu,32);
+    menu.clear_commands(); click_button(menu,34);
     std::ostringstream output; write_settings(output,menu.settings());
     std::istringstream input(output.str()); const auto restored=read_settings(input);
     assert(restored.graphics==menu.settings().graphics);
@@ -234,6 +263,13 @@ void check_graphics(Menu& menu) {
     assert(near(defaults.shadows,.75f) && near(defaults.indirect_lighting,.35f));
     assert(near(defaults.exposure,1) && near(defaults.render_scale,1) && near(defaults.roughness,.85f));
     assert(legacySettings.graphics==defaults);
+    assert(defaults.time_of_day==yami::TimeOfDay::Cycle);
+    for (const auto mode:{yami::TimeOfDay::Cycle,yami::TimeOfDay::Day,yami::TimeOfDay::Night}) {
+        auto selected=restored; selected.graphics.time_of_day=mode;
+        std::ostringstream saved; write_settings(saved,selected);
+        std::istringstream loaded(saved.str());
+        assert(read_settings(loaded).graphics==selected.graphics);
+    }
     for (const auto backend:{yami::GraphicsBackend::OpenGL,yami::GraphicsBackend::Vulkan}) {
         auto selected=restored; selected.graphics.backend=backend;
         selected.graphics.ray_tracing=true; selected.graphics.temporal_aa=true;
@@ -257,7 +293,9 @@ void check_graphics(Menu& menu) {
                               "grafik_backend=opengl\ngrafik_backend=vulkan\n",
                               "grafik_rt=2\n","grafik_rt=-1\n","grafik_rt=true\n","grafik_rt=\n",
                               "grafik_taa=2\n","grafik_taa=-1\n","grafik_taa=true\n","grafik_taa=\n",
-                              "grafik_rt=0\ngrafik_rt=1\n","grafik_taa=0\ngrafik_taa=1\n"}) {
+                              "grafik_rt=0\ngrafik_rt=1\n","grafik_taa=0\ngrafik_taa=1\n",
+                              "grafik_zaman=\n","grafik_zaman=Day\n","grafik_zaman=dusk\n",
+                              "grafik_zaman=0\n","grafik_zaman=day\ngrafik_zaman=night\n"}) {
         std::istringstream malformed(legacy+extension);
         bool rejected=false;
         try { (void)read_settings(malformed); } catch (const std::exception&) { rejected=true; }
@@ -315,6 +353,12 @@ void check_graphics(Menu& menu) {
     std::ostringstream invalidOutput;
     bool rejected=false;
     try { write_settings(invalidOutput,invalidBackend); } catch (const std::exception&) { rejected=true; }
+    assert(rejected);
+    auto invalidTime=restored;
+    invalidTime.graphics.time_of_day=static_cast<yami::TimeOfDay>(-1);
+    std::ostringstream invalidTimeOutput;
+    rejected=false;
+    try { write_settings(invalidTimeOutput,invalidTime); } catch (const std::exception&) { rejected=true; }
     assert(rejected);
     settings=menu.settings();
     settings.graphics.anisotropy=std::numeric_limits<float>::max();
@@ -375,7 +419,23 @@ void check_settings_file() {
     for (const auto& entry:fs::directory_iterator(directory))
         assert(entry.path()==path); // Failed writes cannot leave temporary files behind.
 }
+void check_environment() {
+    const auto day=yami::environment_at(yami::TimeOfDay::Day,123);
+    assert(day.ambient==1 && day.direct==1 && day.emission==0);
+    assert((day.sky==std::array<float,3>{1,1,1}));
+    assert((day.fog==std::array<float,3>{.2f,.2f,.2f}));
+    const auto night=yami::environment_at(yami::TimeOfDay::Night,456);
+    assert(night.ambient<day.ambient && night.direct==0 && night.emission>0);
+    assert(night.sky[2]>night.sky[0] && night.fog[2]>night.fog[0]);
+    assert(yami::environment_at(yami::TimeOfDay::Cycle,0).sky==day.sky);
+    assert(yami::environment_at(yami::TimeOfDay::Cycle,yami::environment_cycle_ms/2).fog==night.fog);
+    assert(yami::environment_at(yami::TimeOfDay::Cycle,yami::environment_cycle_ms).sky==day.sky);
+    const auto dusk=yami::environment_at(yami::TimeOfDay::Cycle,yami::environment_cycle_ms/4);
+    assert(dusk.direct>night.direct && dusk.direct<day.direct && dusk.emission>day.emission && dusk.emission<night.emission);
+}
+
 int main(int argc, char** argv) {
+    check_environment();
     Menu menu(argc > 1 ? argv[1] : "game");
     assert(menu.pages().size()==24 && menu.page()==1);
     assert(menu.fonts().size()==1 && menu.fonts()[0].height==22);
