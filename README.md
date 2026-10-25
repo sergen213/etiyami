@@ -4,7 +4,7 @@ A native C++20/SDL3 reconstruction of **ETI Yami**, using the original game's ar
 
 **The original game assets are not included in this repository or release downloads. You need a legitimate copy of the original game.** Linux releases are available for x86_64 and ARM64; Windows is available for x86_64. macOS releases are deferred.
 
-**v1.5.0 is public/latest:** [the day/night and mission-transition release](https://github.com/sergen213/etiyami/releases/tag/v1.5.0), tagged from source `c8542f9`, contains eight Windows and Linux artifacts. Fresh public downloads matched the locally validated Windows ZIP/installer and Linux ZIP, `.run`, and AppImage files byte-for-byte. The x86_64 AppImage printed `ETI Yami Linux setup 1.5.0` through forced extraction. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified.
+**v1.6.0 is public/latest:** [the real night local-lighting release](https://github.com/sergen213/etiyami/releases/tag/v1.6.0), tagged from source `f5bd36c`, contains eight Windows and Linux artifacts. All four jobs in [CI run 40161636757](https://github.com/sergen213/etiyami/actions/runs/40161636757) passed. Fresh public downloads matched every GitHub SHA256 digest and passed Windows/Linux package validation. Both Windows executables reported `1.6.0` under Wine; the x86_64 AppImage printed `ETI Yami Linux setup 1.6.0` through forced extraction. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified.
 
 Installer-created uninstall scripts and shortcuts require **installer 1.0.3 or newer**, available in [the public v1.0.3 release](https://github.com/sergen213/etiyami/releases/tag/v1.0.3); the 1.0.2 installer does not provide them.
 
