@@ -348,12 +348,13 @@ jobs:
           gh release create "$RELEASE_TAG" --verify-tag --draft \
             --title "ETI Yami $RELEASE_TAG" \
             --notes-file - <<'RELEASE_NOTES'
-          ## v1.6.1 fixture-light corrections
+          ## v1.6.4 smooth motion and performance
 
-          - Street-pole and hanging fixtures use downward warm spotlights below their housings, producing ground pools instead of sideways point-light spill. All-metal multi-part streetlamps are included.
-          - Traffic heads cycle red for 4 seconds → yellow for 1 second → green for 4 seconds, starting red at each level. Only the active lens supplies restrained matching-colored illumination; the yellow backplate and broad warm flood are gone.
-          - Camera-relevant lights survive crowded scenes, and each 16x16 tile keeps the four highest intensity/distance-scored overlapping sources instead of the first four globally strongest sources.
-          - Original assets and gameplay behavior are unchanged. OpenGL/GLES and classic presentation remain outside Vulkan RT local lighting. Windows packages remain unsigned.
+          - Walking motion is interpolated from each physics tick's scheduled time, removing frame-rate dependent stutter and skipped motion when a frame runs two ticks.
+          - Uphill climbing no longer hops: characters are drawn at a constant height above slopes while the original physics is unchanged. The camera follows the smoothed height.
+          - Level-four flight now renders smoothly between physics ticks, with Yaman staying attached to the plane.
+          - Character collision uses the current physics position instead of the lagging on-screen position.
+          - Off-screen characters skip per-frame animation skinning (30 fps poses where ray tracing or shadows can still show them), and material emission and parallax lookups are computed once per material.
 
           ## Windows download and installation
 
@@ -363,7 +364,7 @@ jobs:
 
           Six assets cover Linux x86_64 and ARM64: engine/launcher ZIPs, offline GUI .run installers and .AppImage installers. They require glibc 2.35+ and host graphics drivers. AppImages use a static runtime with extraction fallback when FUSE is unavailable. Original assets and saves are never bundled. Physical ARM64 GPU execution and blanket distribution compatibility are not claimed.
 
-          Verification includes 18/18 CTests, real Vulkan phase and ground-pool captures, and a 2560×1440/MSAA8 gameplay smoke at 24.318 ms median GPU frame on RX 7900 XTX. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified. Earlier release artifacts are not replaced.
+          Verification includes the gameplay, combat and AI regression suites and real SDL gameplay smokes for levels 1-3 on OpenGL and Vulkan. Native Windows GPU/GLES execution and physical ARM64 GPU execution remain uncertified. Earlier release artifacts are not replaced.
           RELEASE_NOTES
           gh release upload "$RELEASE_TAG" dist/*.zip dist/*.run dist/*.AppImage dist/*.exe
           # Query drafts through REST and keep the numeric ID; draft HTML URLs are not API URLs.

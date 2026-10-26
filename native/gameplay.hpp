@@ -224,6 +224,10 @@ WorldSweep sweep_world(const Aabb&,Vec3 direction,float distance,
                        const std::vector<Obb>&,const std::vector<EntityState>&,
                        const std::vector<HealthState>&,std::int32_t level,
                        std::optional<std::size_t> owner = {},bool livingOnly = true) noexcept;
+// Render-only, not original: vertical lift that keeps a grounded body at the
+// flat-ground 2-unit hover. Physics climbs slopes in ~2.6-unit pops every few
+// ticks (the 0.1 gravity-sweep clearance); this hides them without changing it.
+float ground_lift(const Aabb& body,const std::vector<Obb>&) noexcept;
 struct ForceState {
     float rate = 400, decay = 400*0.033333335f;
     float stepDecay = (400*0.033333335f)*0.033333335f, halfStep = 400*0.00055555563f;

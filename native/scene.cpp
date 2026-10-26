@@ -352,7 +352,10 @@ MaterialResource& SceneCache::material(std::string_view name) {
     auto resource = std::make_unique<MaterialResource>();
     resource->material = read_material(resolve("data/materials/"+std::string(name)+".dat"));
     resource->textures.resize(resource->material.passes.size());
-    resource->relief.resize(resource->material.passes.size());
+    resource->relief.assign(resource->material.passes.size(),~0u);
+    for (const auto& pass:resource->material.passes)
+        resource->info.push_back({pass.texture_name.ends_with("trafik_lambasi.tga")?0:night_lamp_emission(pass.texture_name,1),
+            night_window_emission(pass.texture_name,1)+night_facade_emission(pass.texture_name,1)});
     return *materials_.emplace(std::string(name), std::move(resource)).first->second;
 }
 unsigned SceneCache::image(std::string_view name) {
@@ -438,19 +441,21 @@ bool SceneCache::video_texture(std::string_view name, std::uint32_t time, bool l
         renderer_.update_texture(texture, frame.width, frame.height, frame.rgba, video.padding_x, video.padding_y);
     return true;
 }
-void SceneCache::prepare(ModelInstance& instance, std::size_t animation, std::uint32_t elapsed) {
+void SceneCache::prepare(ModelInstance& instance, std::size_t animation, std::uint32_t elapsed, Skin detail) {
     const auto& model = instance.resource();
     const bool interpolate = renderer_.graphics_settings().enhanced; // smooth 30fps poses (enhanced only)
     for (std::size_t n = 0; n < model.parts.size(); ++n) {
         auto& part = instance.parts[n];
         const auto& source = model.parts[n];
         if (part.owned) {
+            const bool skinned = part.animation != static_cast<std::size_t>(-1);
+            if (detail == Skin::Hold && skinned) continue;
             if (animation >= source.mesh->animations.size())
                 throw std::runtime_error("Entity animation ordinal exceeds model mesh animation list");
             const auto& clip = source.mesh->animations[animation];
             const auto frame = animation_frame(clip, elapsed);
             if (animation != part.animation || frame != part.frame || interpolate != part.interpolated ||
-                (interpolate && elapsed != part.elapsed)) {
+                (interpolate && elapsed != part.elapsed && detail == Skin::Full)) {
                 skin_mesh(source.mesh->mesh, clip, elapsed, model.model.scale, model.model.offset, part.skin, interpolate);
                 renderer_.update_mesh(part.gpu, part.skin.vertices);
                 part.bounds = indexed_bounds(part.skin.vertices, source.mesh->mesh.indices);
@@ -502,8 +507,8 @@ void SceneCache::prepare_night_lights(ModelInstance& instance,std::size_t n) {
 }
 
 void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t animation,
-                      std::uint32_t elapsed, std::uint32_t wall_clock) {
-    prepare(instance, animation, elapsed);
+                      std::uint32_t elapsed, std::uint32_t wall_clock, Skin detail) {
+    prepare(instance, animation, elapsed, detail);
     const auto graphics = renderer_.graphics_settings();
     const bool parallax = graphics.enhanced && graphics.parallax;
     const bool night_lights=graphics.enhanced&&graphics.ray_tracing&&renderer_.ray_tracing_available()&&state.emission>0;
@@ -520,9 +525,9 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             if (pass.video) video_texture(pass.texture_name, wall_clock, true, texture);
             else if (!texture) texture = image(pass.texture_name);
             auto submission = state;
-            submission.emission=pass.texture_name.ends_with("trafik_lambasi.tga") ? 0 : night_lamp_emission(pass.texture_name,state.emission);
-            submission.window_emission=night_window_emission(pass.texture_name,state.emission)+
-                night_facade_emission(pass.texture_name,state.emission);
+            const float night=state.emission>0?state.emission:0; // emission helpers are linear in night
+            submission.emission=material.info[p].lamp*night;
+            submission.window_emission=material.info[p].window*night;
             if(night_lights) for(auto light:part.night_lights[p]) {
                 if(light.traffic_phase>=0&&light.traffic_phase!=traffic_phase) continue;
                 const Vec3 local{light.position[0],light.position[1],light.position[2]};
@@ -536,7 +541,7 @@ void SceneCache::draw(ModelInstance& instance, DrawState state, std::size_t anim
             submission.temporal_id = submission.ray_geometry && !pass.video ? part.temporal_id : 0;
             if (parallax && submission.temporal_static && submission.ray_geometry && !pass.blend && !pass.alpha_test &&
                 pass.depth_test && pass.depth_write && texture != white_)
-                submission.relief = relief(pass.texture_name);
+                submission.relief = material.relief[p]!=~0u ? material.relief[p] : (material.relief[p]=relief(pass.texture_name));
             renderer_.draw(part.gpu, texture, material.material, pass, submission);
         }
     }

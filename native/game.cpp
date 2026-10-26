@@ -27,6 +27,20 @@ Mat4 inverse_pose(const Mat4& pose) {
     return result;
 }
 std::string descriptor(std::string_view model) { return "data/models/"+std::string(model)+"/model.dat"; }
+// Conservative: true unless the (padded) bounds are wholly outside the view frustum.
+// Unskinned (invalid) bounds count as visible so first poses are always built.
+bool on_screen(const ShadowBounds& bounds,const Mat4& view,const Mat4& projection) {
+    if (!bounds.valid) return true;
+    constexpr float pad=64; // pose may move past last-frame bounds
+    ShadowBounds padded=bounds;
+    padded.include(Vec3{bounds.min.x-pad,bounds.min.y-pad,bounds.min.z-pad});
+    padded.include(Vec3{bounds.max.x+pad,bounds.max.y+pad,bounds.max.z+pad});
+    const auto eye=padded.transformed(view);
+    if (eye.min.z>-1) return false; // wholly behind the camera
+    const float depth=-eye.min.z; // farthest point gives the widest cross-section
+    return eye.min.x*projection.values[0]<=depth && eye.max.x*projection.values[0]>=-depth &&
+           eye.min.y*projection.values[5]<=depth && eye.max.y*projection.values[5]>=-depth;
+}
 menu::Draw ui_quad(menu::Rect rect,std::string_view material) {
     menu::Draw d; d.rect=rect; d.material=material;
     d.positions={{{rect.x,rect.y+rect.height},{rect.x+rect.width,rect.y+rect.height},
@@ -47,6 +61,7 @@ struct Game::State {
     std::vector<enemy_ai::State> ai;
     std::vector<std::unique_ptr<ModelInstance>> models;
     std::vector<std::size_t> shadowCasters;
+    std::vector<SceneCache::Skin> skinDetail; // per actor, recomputed each drawn frame
     std::unique_ptr<ModelInstance> alternatePlayer;
     std::array<std::unique_ptr<ModelInstance>,8> projectileModels;
     std::vector<HealthState> pickups;
@@ -451,10 +466,24 @@ struct Game::State {
                 if (effect.playEndingMovie) movie_begin("son",90);
             });
             else operation([&] {
-                const auto effects=tick_body(i,forces[i],{0,-1,0},clock.frameNow,clock.level,metadata.blocking,actors,pickups,score);
+                // Anchor render interpolation at this tick's scheduled time, not the
+                // frame that ran it, so frame-rate/tick phase cannot jitter motion.
+                const auto effects=tick_body(i,forces[i],{0,-1,0},clock.nextTick,clock.level,metadata.blocking,actors,pickups,score);
                 entity::synchronize_position(runtime[i],actors[i]); entity::pickup_effects(effects,healthMessageFrames,events);
             });
             if (clock.phase!=Phase::Active || levelGeneration!=generation) return;
+        }
+        if (clock.level==4 && !actors.empty()) {
+            // tick_flight never stamps positionStart, so flight rendered at 30Hz.
+            // The passenger reuses the plane's motion so the two never separate.
+            auto& plane=actors[0]; plane.positionStart=clock.nextTick;
+            if (passenger && *passenger<actors.size()) {
+                auto& rider=actors[*passenger];
+                rider.previousPosition={plane.previousPosition.x+rider.committedPosition.x-plane.committedPosition.x,
+                                        plane.previousPosition.y+rider.committedPosition.y-plane.committedPosition.y,
+                                        plane.previousPosition.z+rider.committedPosition.z-plane.committedPosition.z};
+                rider.positionStart=clock.nextTick;
+            }
         }
         operation([&] { auto ctx=context(); combat::tick_projectiles(combat,ctx,clock.nextTick); });
     }
@@ -512,6 +541,8 @@ struct Game::State {
         for (std::size_t i=0;i<actors.size();++i) {
             operation([&] {
             entity::update_render(actors[i],runtime[i],clock.frameNow);
+            if (clock.level!=4 && !actors[i].dead && !actors[i].hidden)
+                runtime[i].transform.values[13]+=ground_lift({actors[i].position,actors[i].bounds.extents},metadata.blocking);
             const auto& resource=models[i]->resource();
             if (!resource.parts.empty() && !resource.parts[0].mesh->animations.empty()) {
                 const auto ordinal=static_cast<std::size_t>(actors[i].action);
@@ -585,10 +616,11 @@ struct Game::State {
         ShadowBounds casters,receivers;
         for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {
             auto& model=*models[i];
-            game.scene_.prepare(model,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame);
             const auto transform=entity::upright_transform(runtime[i],model.resource().model.collision_box.y);
-            const auto bounds=model.bounds(transform);
-            if (game.renderer_.shadow_caster_visible(bounds)) {
+            if (game.renderer_.shadow_caster_visible(model.bounds(transform))) {
+                const auto detail=skinDetail[i]==SceneCache::Skin::Full?SceneCache::Skin::Full:SceneCache::Skin::Coarse;
+                game.scene_.prepare(model,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame,detail);
+                const auto bounds=model.bounds(transform);
                 casters.include(bounds);
                 shadowCasters.push_back(i);
             }
@@ -626,7 +658,18 @@ struct Game::State {
         if (clock.phase==Phase::Active && !actors.empty()) {
             entity::respawn_big_health(actors[0],pickups,score);
             if (clock.level==4) entity::update_flight_pickups(pickupMotion,pickupRuntime,pickups);
-            game.renderer_.camera(inverse_pose(camera),frustum_projection(0.75f,float(game.renderer_.pixel_width())/game.renderer_.pixel_height(),1,30000));
+            const auto view=inverse_pose(camera);
+            const auto projection=frustum_projection(0.75f,float(game.renderer_.pixel_width())/game.renderer_.pixel_height(),1,30000);
+            game.renderer_.camera(view,projection);
+            // Off-screen actors skip per-frame skinning; under RT they can still be seen in
+            // shadows/reflections, so they keep the original 30fps pose cadence there.
+            const bool rayTraced=graphics.enhanced&&graphics.ray_tracing&&game.renderer_.ray_tracing_available();
+            skinDetail.assign(actors.size(),SceneCache::Skin::Full);
+            for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {
+                const auto transform=entity::upright_transform(runtime[i],models[i]->resource().model.collision_box.y);
+                if (!on_screen(models[i]->bounds(transform),view,projection))
+                    skinDetail[i]=rayTraced?SceneCache::Skin::Coarse:SceneCache::Skin::Hold;
+            }
             if (game.renderer_.shadow_enabled()) draw_actor_shadows();
             for (std::size_t i=0;i<sources.size();++i) if (!sources[i].hidden) {
                 DrawState draw; draw.model=sources[i].transform; draw.lighting=i!=0; draw.fog=i!=0 && clock.level!=4;
@@ -639,7 +682,7 @@ struct Game::State {
             for (std::size_t i=0;i<actors.size();++i) if (!actors[i].hidden) {
                 DrawState draw; draw.model=entity::upright_transform(runtime[i],models[i]->resource().model.collision_box.y);
                 draw.lighting=true; draw.fog=clock.level!=4; draw.diffuse_light=entity::draw_light(actors[i],runtime[i]);
-                game.scene_.draw(*models[i],draw,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame,now);
+                game.scene_.draw(*models[i],draw,static_cast<std::size_t>(actors[i].action),actors[i].animationFrame,now,skinDetail[i]);
             }
             if(!actors[0].hidden&&actors[0].weapon>0)
                 submit_weapon_light(entity::player_muzzle(runtime[0],actors[0].position),combat::weapon_light(actors[0].weapon),combat::weapon_light(actors[0].weapon).gun);

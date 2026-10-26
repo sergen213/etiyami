@@ -14,7 +14,13 @@ struct MeshResource {
     unsigned static_gpu = 0;
     ShadowBounds static_bounds;
 };
-struct MaterialResource { Material material; std::vector<unsigned> textures, relief; };
+struct MaterialResource {
+    Material material;
+    std::vector<unsigned> textures, relief; // relief: ~0u until first resolved
+    // Per-pass texture-name classification, computed once at load (scaled by night emission).
+    struct PassInfo { float lamp = 0, window = 0; };
+    std::vector<PassInfo> info;
+};
 struct ModelResource {
     Model model;
     struct Part { MeshResource* mesh; MaterialResource* material; };
@@ -65,10 +71,13 @@ public:
     MaterialResource& material(std::string_view name); // data/materials/<name>.dat
     unsigned image(std::string_view filename); // original missing-image white semantics
     unsigned relief(std::string_view filename); // Lazily derived diffuse relief; zero means flat/unusable.
-    void prepare(ModelInstance&, std::size_t animation, std::uint32_t elapsed);
+    // Skinning detail: Full = per-frame interpolated pose; Coarse = only on original
+    // 30fps frame changes (off-screen but may cast RT/shadow-map shadows); Hold = keep last pose.
+    enum class Skin { Full, Coarse, Hold };
+    void prepare(ModelInstance&, std::size_t animation, std::uint32_t elapsed, Skin = Skin::Full);
     void draw_shadow(ModelInstance&, DrawState);
     void draw(ModelInstance&, DrawState, std::size_t animation, std::uint32_t elapsed,
-              std::uint32_t wall_clock);
+              std::uint32_t wall_clock, Skin = Skin::Full);
     void draw_ui(std::span<const menu::Draw>, std::uint32_t wall_clock);
     bool draw_video(std::string_view material, std::uint32_t elapsed); // false at actual end
     void reset_video(std::string_view material);

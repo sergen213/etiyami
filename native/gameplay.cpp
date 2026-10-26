@@ -31,7 +31,9 @@ std::size_t first_health(const std::vector<HealthState>& healths) noexcept {
 }
 Obb entity_box(const EntityState& e) {
     Obb result;
-    result.center = e.position;
+    // Not original: test the physics position, not the render-interpolated one
+    // (which lags up to one tick), so hits and blocking match the current tick.
+    result.center = e.committedPosition;
     result.axes = e.bounds.axes;
     result.extents = e.bounds.extents;
     return result;
@@ -668,6 +670,28 @@ WorldSweep sweep_world(const Aabb& probe,Vec3 direction,float distance,
         if (!boxes[i].disabled) consider(boxes[i],WorldSweep::Kind::Static,i,false);
     nearest.fraction=last<=0.1f ? 0 : best-0.1f;
     return nearest;
+}
+float ground_lift(const Aabb& body,const std::vector<Obb>& boxes) noexcept {
+    constexpr float probe=4,hover=2;
+    float gap=probe+1;
+    for (const auto& box:boxes) {
+        if (box.disabled) continue;
+        // Cheap world-AABB reject before the SAT sweep.
+        Vec3 reach{};
+        for (std::size_t k=0;k<3;++k) {
+            const float e=component(box.extents,k);
+            reach.x+=std::fabs(box.axes[k].x)*e; reach.y+=std::fabs(box.axes[k].y)*e; reach.z+=std::fabs(box.axes[k].z)*e;
+        }
+        if (std::fabs(box.center.x-body.center.x)>reach.x+body.extents.x ||
+            std::fabs(box.center.z-body.center.z)>reach.z+body.extents.z ||
+            box.center.y-reach.y>body.center.y+body.extents.y ||
+            box.center.y+reach.y<body.center.y-body.extents.y-probe) continue;
+        const auto hit=sweep_box(box,body,{0,-probe,0});
+        if (hit.hit && hit.fraction>=0) gap=std::min(gap,hit.fraction*probe);
+    }
+    if (gap<=hover) return hover-gap;
+    // Fade to zero by the probe length so walking off ledges stays continuous.
+    return gap<=probe ? (hover-gap)*(probe-gap)/(probe-hover) : 0;
 }
 void set_force_rate(ForceState& force,float rate) noexcept {
     constexpr float dt=0.033333335f; // 004596c4
