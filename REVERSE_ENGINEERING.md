@@ -317,6 +317,12 @@ This local-source correction is separate from the historical v1.1.1 implementati
 - Walking-camera mouse pitch now works in both aiming modes. Yaw is unbounded and composed around world-up before pitch, preventing roll during a full turn; the existing pitch limits, camera boom collision and level-four flight controls remain unchanged. Model replacement and pause restoration keep transform/pitch state coherent, aiming-mode changes no longer reset the view, and targetless automatic-aim projectiles retain their previous horizontal fallback.
 - Final private-KWin verification passed **18/18 CTests** (`<local evidence>/free-camera-normals/ctest.log`). The real SDL smoke verifies vertical automatic-aim camera motion and roll-free yaw; scratch-only capture instrumentation completed dedicated up/down views and four yaw quadrants at 2560×1440 (`free-camera-normals/camera-views/grid.png`) without adding capture hooks to the source tree. The live `game.ini` SHA256 remained unchanged.
 
+### Current source — enemy-aim NaN crash
+
+- Enemies aiming straight at Yaman could kill the Vulkan RT game with `Invalid local-light position`. The quantized original `normalize` (`004147b0`) leaves collinear unit vectors with a dot product up to ~1+3×10⁻⁵, which happened for 99.9% of 200,000 sampled collinear pairs. `entity::enemy_aim`'s unclamped `acos` then returned NaN yaw, so the aim direction, projectile path and per-projectile weapon light became NaN, and the renderer's light validation threw. OpenGL ignores local lights, so there the bad shot was only invisible.
+- The `acos` input is now clamped to [-1, 1], as `enemy_ai.cpp`'s `clamped_acos` already does for the clamps recovered at `00406bc1`. The projectile-yaw `acos` in `combat::spawn` gets the same clamp. Automatic-aim target selection (`acos` in `player_aim`) is unchanged: there NaN only skips a candidate.
+- The new collinear `check_combat` regression fails on the pre-fix library and passes after the fix.
+
 ### Current source — smooth motion, slope following and render culling
 
 - Render interpolation is anchored at each fixed tick's scheduled time (`clock.nextTick`) instead of the frame that executed it, removing frame/tick phase jitter and the lost segment when one frame runs two ticks. Level-four flight now stamps `positionStart` for the plane and copies its motion to the passenger, so flight no longer renders at 30 Hz and the two never separate.

@@ -49,7 +49,7 @@ void spawn(World& world,Context& c,std::size_t owner,Vec3 position,Vec3 directio
     gameplay::normalize(direction);
     Vec3 horizontal{direction.x,0,direction.z}; gameplay::normalize(horizontal);
     const float degrees=std::bit_cast<float>(0x42652ee0U);
-    float angle=static_cast<float>(std::acos(double(horizontal.x))*degrees);
+    float angle=static_cast<float>(std::acos(double(std::clamp(horizontal.x,-1.0f,1.0f)))*degrees);
     if (horizontal.z<0) angle=360-angle;
     const float yaw=180-angle;
     world.projectiles.push_back({owner,position,position,position,direction,

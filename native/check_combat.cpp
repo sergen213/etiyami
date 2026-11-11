@@ -97,5 +97,14 @@ int main() {
     world={}; world.lastPlayerAttack=0; context.frameNow=1000;
     assert(combat::attack_player(world,context,15,camera,true));
     assert(world.projectiles.size()==1 && std::fabs(world.projectiles[0].direction.y)<0.0001f);
+    // Quantized normalize gives collinear vectors a dot slightly above 1; an enemy
+    // aiming straight at its target must not produce a NaN aim or projectile path.
+    for (int step=0;step<360;step+=5) {
+        entity::Runtime aimer; entity::look(aimer,float(step),0);
+        const auto forward=entity::forward_axis(aimer);
+        const auto direction=entity::enemy_aim(aimer,{-forward.x*700,0,-forward.z*700});
+        assert(std::isfinite(direction.x) && std::isfinite(direction.y) && std::isfinite(direction.z));
+        assert(std::fabs(aimer.aimYaw)<0.001f);
+    }
     std::cout<<"combat cooldown, energy, actual ray hit, synchronous death state, melee delay, live weapon and expiry verified\n";
 }

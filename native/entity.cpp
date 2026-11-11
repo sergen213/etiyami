@@ -121,7 +121,9 @@ Vec3 enemy_aim(Runtime& r,Vec3 target) noexcept {
     if (!r.horizontalAim) {
         forward.y=0; difference=sub(target,muzzle); difference.y=0;
         gameplay::normalize(forward); gameplay::normalize(difference);
-        float yaw=static_cast<float>(std::acos(double(dot(forward,difference))));
+        // The quantized normalize leaves collinear unit vectors with dot up to ~1+3e-5;
+        // unclamped acos then yields a NaN yaw, aim and projectile path.
+        float yaw=static_cast<float>(std::acos(double(std::clamp(dot(forward,difference),-1.0f,1.0f))));
         if (difference.z*forward.x-difference.x*forward.z<0) yaw=-yaw;
         r.aimYaw=std::clamp(yaw,-r.yawLimit,r.yawLimit);
         const float c=static_cast<float>(std::cos(r.aimYaw)),s=static_cast<float>(std::sin(r.aimYaw));
